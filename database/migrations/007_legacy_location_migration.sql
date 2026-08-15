@@ -1,0 +1,62 @@
+CREATE TABLE IF NOT EXISTS legacy_migration_run (
+  id CHAR(36) PRIMARY KEY,
+  source_system VARCHAR(80) NOT NULL,
+  started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TIMESTAMP NULL,
+  status VARCHAR(40) NOT NULL,
+  dry_run TINYINT(1) NOT NULL,
+  selected_type VARCHAR(30) NULL,
+  batch_size INT NOT NULL DEFAULT 500,
+  province_source_count INT NOT NULL DEFAULT 0,
+  province_migrated_count INT NOT NULL DEFAULT 0,
+  district_source_count INT NOT NULL DEFAULT 0,
+  district_migrated_count INT NOT NULL DEFAULT 0,
+  ds_source_count INT NOT NULL DEFAULT 0,
+  ds_migrated_count INT NOT NULL DEFAULT 0,
+  asc_source_count INT NOT NULL DEFAULT 0,
+  asc_migrated_count INT NOT NULL DEFAULT 0,
+  arpa_source_count INT NOT NULL DEFAULT 0,
+  arpa_migrated_count INT NOT NULL DEFAULT 0,
+  gn_source_count INT NOT NULL DEFAULT 0,
+  gn_migrated_count INT NOT NULL DEFAULT 0,
+  relationship_count INT NOT NULL DEFAULT 0,
+  warning_count INT NOT NULL DEFAULT 0,
+  error_count INT NOT NULL DEFAULT 0,
+  created_by CHAR(36) NULL,
+  report_path VARCHAR(500) NULL,
+  summary_json JSON NULL,
+  INDEX idx_legacy_run_source_started(source_system, started_at),
+  INDEX idx_legacy_run_status(status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS legacy_location_reference (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  location_id CHAR(36) NOT NULL,
+  source_system VARCHAR(80) NOT NULL,
+  source_table VARCHAR(80) NOT NULL,
+  legacy_id VARCHAR(100) NOT NULL,
+  legacy_code VARCHAR(255) NULL,
+  legacy_payload_json JSON NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_legacy_location_reference_location FOREIGN KEY(location_id) REFERENCES location(id),
+  UNIQUE KEY uq_legacy_location_source(source_system, source_table, legacy_id),
+  INDEX idx_legacy_location_location(location_id),
+  INDEX idx_legacy_location_code(source_system, source_table, legacy_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS legacy_migration_issue (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  migration_run_id CHAR(36) NOT NULL,
+  source_table VARCHAR(80) NOT NULL,
+  legacy_id VARCHAR(100) NULL,
+  issue_type VARCHAR(80) NOT NULL,
+  severity VARCHAR(20) NOT NULL,
+  message TEXT NOT NULL,
+  source_payload_json JSON NULL,
+  resolved TINYINT(1) NOT NULL DEFAULT 0,
+  resolution_note TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_legacy_issue_run FOREIGN KEY(migration_run_id) REFERENCES legacy_migration_run(id),
+  INDEX idx_legacy_issue_run(migration_run_id, severity),
+  INDEX idx_legacy_issue_type(issue_type, resolved)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

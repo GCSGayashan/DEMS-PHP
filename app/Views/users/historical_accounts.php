@@ -1,0 +1,3 @@
+<div class="page-heading"><div><div class="breadcrumb-lite">Administration / Users</div><h1>Historical / Disabled Users</h1><p>Imported legacy identities remain non-login until an administrator explicitly assigns current access and a new DEMS credential.</p></div><a class="btn btn-outline-secondary" href="<?= e(url('access-management/users')) ?>">Active Users</a></div>
+<div class="alert alert-info">Legacy roles and organizational mappings shown here are historical evidence only. They are never copied automatically into current permissions or scopes.</div>
+<?php require BASE_PATH.'/app/Views/components/datatable.php'; ?>

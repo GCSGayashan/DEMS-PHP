@@ -1,0 +1,6 @@
+<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Appointments / Legacy Appointment Preview</div><h1>Legacy Appointment Preview</h1><p>Read-only preview of reconciled ARPA Officer appointment and ASC function history before migration into DEMS.</p></div><span class="badge bg-info text-dark">READ ONLY</span></div>
+<div class="alert alert-info"><i class="bi bi-info-circle" aria-hidden="true"></i> These records are reconstructed from the legacy HR system. They have not yet been migrated into the operational ARPA Appointment module.</div>
+<div class="row g-3 mb-4">
+<?php foreach(['total'=>'Total Reconciled Records','arpa_division'=>'ARPA Division Appointments','pre_baseline_carried_forward'=>'Pre-2025 Carried Forward','legacy_period'=>'2025+ Legacy','pre_baseline_history'=>'Pre-2025 History','historical'=>'Historical / Ended','current_candidates'=>'Current Candidates','blockers'=>'Manual Review Required'] as $key=>$label): ?><div class="col-6 col-xl-3"><div class="stat-card h-100"><div class="stat-label"><?= e($label) ?></div><div class="stat-value"><?= number_format((int)($summary[$key]??0)) ?></div></div></div><?php endforeach; ?>
+</div>
+<?php $dataTable=$table;require BASE_PATH.'/app/Views/components/datatable.php'; ?>

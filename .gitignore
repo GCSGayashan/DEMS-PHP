@@ -1,0 +1,36 @@
+.env
+/storage/logs/*.log
+/vendor/
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime-generated data
+/storage/logs/*
+/storage/reports/*
+/storage/backups/*
+/storage/sessions/*
+/storage/cache/*
+
+# Local backup files
+*.bak
+
+# Dependencies
+/vendor/
+/node_modules/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Safe environment templates
+!.env.example
+!.env.production.example
+
+# Generated validation output
+BUILD_VALIDATION.txt
