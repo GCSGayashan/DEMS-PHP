@@ -14,7 +14,7 @@ use Throwable;
 final class LocationBaselineEffectiveDateCorrectionService
 {
     private const EXCLUSIVE_RELATIONSHIPS=[
-        'PROVINCE_DISTRICT','DISTRICT_DS_DIVISION','DISTRICT_ASC','ASC_ARPA_DIVISION',
+        'PROVINCE_DISTRICT','DISTRICT_DS_DIVISION','DISTRICT_ASC','ASC_ARPA_DIVISION','ASC_GN_DIVISION',
     ];
     private const RELATIONSHIP_TYPES=[
         'PROVINCE_DISTRICT'=>['PROVINCE','DISTRICT','ONE'],
@@ -22,6 +22,7 @@ final class LocationBaselineEffectiveDateCorrectionService
         'DISTRICT_ASC'=>['DISTRICT','ASC','ONE'],
         'DS_DIVISION_ASC'=>['DS_DIVISION','ASC','OPTIONAL_MANY'],
         'ASC_ARPA_DIVISION'=>['ASC','ARPA_DIVISION','ONE'],
+        'ASC_GN_DIVISION'=>['ASC','GN_DIVISION','OPTIONAL_ONE'],
         'DS_DIVISION_GN_DIVISION'=>['DS_DIVISION','GN_DIVISION','OPTIONAL_MANY'],
         'ARPA_GN_DIVISION'=>['ARPA_DIVISION','GN_DIVISION','ONE_OR_MORE'],
     ];
@@ -133,9 +134,9 @@ final class LocationBaselineEffectiveDateCorrectionService
     {
         $baseline=LocationHierarchyEffectiveDatePolicy::BASELINE_DATE;$parents=[];$compatibility=[];
         foreach($relationships as $row){if($row['approval_status']!=='APPROVED'||(int)$row['active']!==1||$row['effective_from']>$baseline||($row['effective_to']!==null&&$row['effective_to']<$baseline))continue;$type=$row['relationship_type'];$parents[$type][$row['child_location_id']][]=$row['parent_location_id'];$rule=self::RELATIONSHIP_TYPES[$type]??null;if($rule===null){$compatibility[]=['relationship_id'=>$row['id'],'reason'=>'Unknown relationship type '.$type];continue;}if(($locationTypes[$row['parent_location_id']]??null)!==$rule[0]||($locationTypes[$row['child_location_id']]??null)!==$rule[1])$compatibility[]=['relationship_id'=>$row['id'],'reason'=>'Parent or child Location Type does not match '.$type];}
-        $checks=[];foreach(self::RELATIONSHIP_TYPES as $relationshipType=>[$parentType,$childType,$cardinality]){$childIds=array_keys(array_filter($locationTypes,fn($type)=>$type===$childType));$missing=0;$one=0;$multiple=0;foreach($childIds as $child){$count=count(array_unique($parents[$relationshipType][$child]??[]));if($count===0)$missing++;elseif($count===1)$one++;else$multiple++;}$checks[$relationshipType]=['parent_type'=>$parentType,'child_type'=>$childType,'rule'=>$cardinality,'children'=>count($childIds),'missing'=>$missing,'one_parent'=>$one,'multiple_parents'=>$multiple];if($cardinality==='ONE'&&($missing>0||$multiple>0))$blockers[]=['area'=>'HIERARCHY','relationship_type'=>$relationshipType,'reason'=>'Required one-parent hierarchy has missing or multiple parents.','missing'=>$missing,'multiple'=>$multiple];if($cardinality==='ONE_OR_MORE'&&$missing>0)$blockers[]=['area'=>'HIERARCHY','relationship_type'=>$relationshipType,'reason'=>'Required hierarchy coverage is missing.','missing'=>$missing];}
+        $checks=[];foreach(self::RELATIONSHIP_TYPES as $relationshipType=>[$parentType,$childType,$cardinality]){$childIds=array_keys(array_filter($locationTypes,fn($type)=>$type===$childType));$missing=0;$one=0;$multiple=0;foreach($childIds as $child){$count=count(array_unique($parents[$relationshipType][$child]??[]));if($count===0)$missing++;elseif($count===1)$one++;else$multiple++;}$checks[$relationshipType]=['parent_type'=>$parentType,'child_type'=>$childType,'rule'=>$cardinality,'children'=>count($childIds),'missing'=>$missing,'one_parent'=>$one,'multiple_parents'=>$multiple];if($cardinality==='ONE'&&($missing>0||$multiple>0))$blockers[]=['area'=>'HIERARCHY','relationship_type'=>$relationshipType,'reason'=>'Required one-parent hierarchy has missing or multiple parents.','missing'=>$missing,'multiple'=>$multiple];if($cardinality==='OPTIONAL_ONE'&&$multiple>0)$blockers[]=['area'=>'HIERARCHY','relationship_type'=>$relationshipType,'reason'=>'Optional one-parent hierarchy has multiple parents.','multiple'=>$multiple];if($cardinality==='ONE_OR_MORE'&&$missing>0)$blockers[]=['area'=>'HIERARCHY','relationship_type'=>$relationshipType,'reason'=>'Required hierarchy coverage is missing.','missing'=>$missing];}
         foreach($compatibility as $problem)$blockers[]=['area'=>'HIERARCHY']+$problem;
-        return ['checks'=>$checks,'type_compatibility_errors'=>count($compatibility),'missing_required_parents'=>array_sum(array_map(fn($c)=>$c['rule']==='ONE'?$c['missing']:($c['rule']==='ONE_OR_MORE'?$c['missing']:0),$checks)),'ambiguous_required_parents'=>array_sum(array_map(fn($c)=>$c['rule']==='ONE'?$c['multiple_parents']:0,$checks))];
+        return ['checks'=>$checks,'type_compatibility_errors'=>count($compatibility),'missing_required_parents'=>array_sum(array_map(fn($c)=>$c['rule']==='ONE'?$c['missing']:($c['rule']==='ONE_OR_MORE'?$c['missing']:0),$checks)),'ambiguous_required_parents'=>array_sum(array_map(fn($c)=>in_array($c['rule'],['ONE','OPTIONAL_ONE'],true)?$c['multiple_parents']:0,$checks))];
     }
 
     private function analyseOffices(array $locationTypes,array &$blockers):array
