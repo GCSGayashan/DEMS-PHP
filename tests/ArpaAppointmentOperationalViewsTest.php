@@ -28,6 +28,11 @@ final class ArpaAppointmentOperationalViewsTest
         $this->same('c.id IS NULL',ArpaAppointmentReadService::openAppointmentClause(),'open definition is absence of formal closure');
         $routes=file_get_contents(BASE_PATH.'/routes/web.php');foreach(['/new','/submitted','/approval','/open','/history','/vacant-divisions','/data-issues'] as $path)$this->same(true,str_contains($routes,"/hr/arpa-appointments{$path}"),"{$path} route registered");
         $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');$this->same(true,str_contains($controller,"Auth::requirePermission('arpa.appointment.view')"),'workflow tabs require backend view permission');$this->same(true,str_contains($controller,'workflowQueuePolicy()->canUseWorkflowQueues'),'workflow routes require an active action permission and matching scope');$view=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/list.php');$this->same(true,str_contains($controller,'openAppointmentAscSummary'),'Open Appointments requests the District ASC summary');$this->same(true,str_contains($view,'ASC Appointment Summary'),'appointment list contains the ASC summary view');$summaryPosition=strpos($view,'ASC Appointment Summary');$tablePosition=strpos($view,'components/datatable.php');$this->same(true,$summaryPosition!==false&&$tablePosition!==false&&$summaryPosition<$tablePosition,'ASC summary renders before the detailed appointment list');
+            $this->same(true,str_contains($view,'Total ARPA Divisions'),'District ASC summary displays total ARPA Division counts');
+            $this->same(true,str_contains($view,'Vacant Divisions'),'District ASC summary displays vacant Division counts');
+            $this->same(true,str_contains($view,'View Records'),'District ASC summary provides a View Records action');
+            $this->same(false,str_contains($view,'District Total'),'District ASC summary does not render a bottom total row');
+            $this->same(true,str_contains($controller,'$selectedAsc')&&str_contains($controller,'$initialFilters'),'View Records ASC selection is passed into the detailed DataTable filter');
     }
 
     private function transactionalReadModels():void
@@ -57,6 +62,12 @@ final class ArpaAppointmentOperationalViewsTest
                         +(int)$summaryRow['attend_to_duty'],
                     'ASC summary total equals the four appointment-type counts'
                 );
+            }
+
+            foreach($districtSummary['rows'] as $summaryRow){
+                $this->same(true,array_key_exists('total_divisions',$summaryRow),'ASC summary exposes total ARPA Division count');
+                $this->same(true,array_key_exists('vacant_divisions',$summaryRow),'ASC summary exposes vacant Division count');
+                $this->same(true,(int)$summaryRow['vacant_divisions']<=(int)$summaryRow['total_divisions'],'vacant Division count cannot exceed total ARPA Divisions');
             }
 
             $previousSession=$_SESSION;

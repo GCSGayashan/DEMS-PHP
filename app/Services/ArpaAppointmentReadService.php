@@ -85,7 +85,10 @@ final class ArpaAppointmentReadService
         }
         $districtNames=array_values(array_unique($districtNames));
 
-        $counts=[];
+        $appointmentCounts=[];
+        $divisionCounts=[];
+        $vacantCounts=[];
+
         if($ascs!==[]){
             $ids=array_values(array_map(
                 fn(array $row)=>(string)$row['id'],
@@ -93,32 +96,74 @@ final class ArpaAppointmentReadService
             ));
             $placeholders=implode(',',array_fill(0,count($ids),'?'));
 
-            $sql="SELECT
-                        a.asc_location_id,
-                        SUM(a.appointment_type='PERMANENT') permanent_count,
-                        SUM(a.appointment_type='ACTING') acting_count,
-                        SUM(a.appointment_type='DUTY_COVERING') duty_covering_count,
-                        SUM(a.appointment_type='ATTEND_TO_DUTY') attend_to_duty_count,
-                        COUNT(*) total_count
-                  FROM arpa_division_appointment a
-                  LEFT JOIN arpa_division_appointment_closure c
-                    ON c.appointment_id=a.id
-                  WHERE a.legacy_history_only=0
-                    AND ".self::openAppointmentClause('a','c')."
-                    AND a.asc_location_id IN ({$placeholders})
-                  GROUP BY a.asc_location_id";
+            $appointmentSql="SELECT
+                                a.asc_location_id,
+                                SUM(a.appointment_type='PERMANENT') permanent_count,
+                                SUM(a.appointment_type='ACTING') acting_count,
+                                SUM(a.appointment_type='DUTY_COVERING') duty_covering_count,
+                                SUM(a.appointment_type='ATTEND_TO_DUTY') attend_to_duty_count,
+                                COUNT(*) total_count
+                             FROM arpa_division_appointment a
+                             LEFT JOIN arpa_division_appointment_closure c
+                               ON c.appointment_id=a.id
+                             WHERE a.legacy_history_only=0
+                               AND ".self::openAppointmentClause('a','c')."
+                               AND a.asc_location_id IN ({$placeholders})
+                             GROUP BY a.asc_location_id";
 
-            $stmt=$this->pdo->prepare($sql);
+            $stmt=$this->pdo->prepare($appointmentSql);
             $stmt->execute($ids);
 
             foreach($stmt->fetchAll() as $row){
-                $counts[(string)$row['asc_location_id']]=[
+                $appointmentCounts[(string)$row['asc_location_id']]=[
                     'permanent'=>(int)$row['permanent_count'],
                     'acting'=>(int)$row['acting_count'],
                     'duty_covering'=>(int)$row['duty_covering_count'],
                     'attend_to_duty'=>(int)$row['attend_to_duty_count'],
                     'total'=>(int)$row['total_count'],
                 ];
+            }
+
+            $divisionSql="SELECT
+                                rel.parent_location_id asc_location_id,
+                                COUNT(DISTINCT arpa.id) total_divisions
+                          FROM location_relationship rel
+                          JOIN location arpa
+                            ON arpa.id=rel.child_location_id
+                          JOIN location_type arpa_t
+                            ON arpa_t.id=arpa.location_type_id
+                           AND arpa_t.system_key='ARPA_DIVISION'
+                          WHERE rel.relationship_type='ASC_ARPA_DIVISION'
+                            AND rel.active=1
+                            AND rel.approval_status='APPROVED'
+                            AND rel.effective_from<=CURRENT_DATE()
+                            AND (rel.effective_to IS NULL OR rel.effective_to>=CURRENT_DATE())
+                            AND arpa.approval_status='APPROVED'
+                            AND arpa.operational_status='ACTIVE'
+                            AND arpa.effective_from<=CURRENT_DATE()
+                            AND (arpa.effective_to IS NULL OR arpa.effective_to>=CURRENT_DATE())
+                            AND rel.parent_location_id IN ({$placeholders})
+                          GROUP BY rel.parent_location_id";
+
+            $stmt=$this->pdo->prepare($divisionSql);
+            $stmt->execute($ids);
+
+            foreach($stmt->fetchAll() as $row){
+                $divisionCounts[(string)$row['asc_location_id']]=(int)$row['total_divisions'];
+            }
+
+            $vacantSql="SELECT
+                            v.asc_location_id,
+                            COUNT(*) vacant_divisions
+                        FROM ".self::vacantDivisionSource()." v
+                        WHERE v.asc_location_id IN ({$placeholders})
+                        GROUP BY v.asc_location_id";
+
+            $stmt=$this->pdo->prepare($vacantSql);
+            $stmt->execute($ids);
+
+            foreach($stmt->fetchAll() as $row){
+                $vacantCounts[(string)$row['asc_location_id']]=(int)$row['vacant_divisions'];
             }
         }
 
@@ -131,8 +176,11 @@ final class ArpaAppointmentReadService
         ];
 
         $rows=[];
+
         foreach($ascs as $asc){
-            $rowCounts=$counts[(string)$asc['id']]??[
+            $ascId=(string)$asc['id'];
+
+            $rowCounts=$appointmentCounts[$ascId]??[
                 'permanent'=>0,
                 'acting'=>0,
                 'duty_covering'=>0,
@@ -141,9 +189,11 @@ final class ArpaAppointmentReadService
             ];
 
             $rows[]=[
-                'asc_id'=>(string)$asc['id'],
+                'asc_id'=>$ascId,
                 'asc_dad'=>(string)$asc['dad_number'],
                 'asc_name'=>(string)$asc['name_en'],
+                'total_divisions'=>$divisionCounts[$ascId]??0,
+                'vacant_divisions'=>$vacantCounts[$ascId]??0,
             ]+$rowCounts;
 
             foreach($totals as $key=>$value){

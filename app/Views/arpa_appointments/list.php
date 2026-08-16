@@ -33,6 +33,9 @@
                         <th class="text-end">Duty Covering</th>
                         <th class="text-end">Attend to Duty</th>
                         <th class="text-end">Total Open</th>
+                        <th class="text-end">Total ARPA Divisions</th>
+                        <th class="text-end">Vacant Divisions</th>
+                        <th class="text-end">Records</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -47,19 +50,17 @@
                             <td class="text-end"><?= e((string)$row['duty_covering']) ?></td>
                             <td class="text-end"><?= e((string)$row['attend_to_duty']) ?></td>
                             <td class="text-end fw-semibold"><?= e((string)$row['total']) ?></td>
+                            <td class="text-end"><?= e((string)$row['total_divisions']) ?></td>
+                            <td class="text-end"><?= e((string)$row['vacant_divisions']) ?></td>
+                            <td class="text-end">
+                                <a class="btn btn-sm btn-outline-primary"
+                                   href="<?= e(url('hr/arpa-appointments/open?asc='.$row['asc_id'])) ?>">
+                                    <i class="bi bi-list-ul"></i> View Records
+                                </a>
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
-                <tfoot class="table-light">
-                    <tr class="fw-semibold">
-                        <td>District Total</td>
-                        <td class="text-end"><?= e((string)$ascSummary['totals']['permanent']) ?></td>
-                        <td class="text-end"><?= e((string)$ascSummary['totals']['acting']) ?></td>
-                        <td class="text-end"><?= e((string)$ascSummary['totals']['duty_covering']) ?></td>
-                        <td class="text-end"><?= e((string)$ascSummary['totals']['attend_to_duty']) ?></td>
-                        <td class="text-end"><?= e((string)$ascSummary['totals']['total']) ?></td>
-                    </tr>
-                </tfoot>
             </table>
         </div>
     <?php endif; ?>
