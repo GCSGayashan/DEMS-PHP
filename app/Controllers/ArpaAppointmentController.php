@@ -30,7 +30,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.create');
 
-        if($this->districtAppointmentSummary(
+        if($this->appointmentHierarchySummary(
             'New Appointments',
             'arpa-new-appointments-summary',
             'hr/arpa-appointments/divisions/create',
@@ -68,7 +68,7 @@ final class ArpaAppointmentController extends Controller
             return;
         }
 
-        if($this->districtAppointmentSummary(
+        if($this->appointmentHierarchySummary(
             'Submitted Appointments',
             'arpa-submitted-appointments-summary',
             null,
@@ -112,7 +112,7 @@ final class ArpaAppointmentController extends Controller
             return;
         }
 
-        if($this->districtAppointmentSummary(
+        if($this->appointmentHierarchySummary(
             'Approval / Verification',
             'arpa-approval-verification-summary',
             null,
@@ -151,7 +151,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.view');
 
-        if($this->districtAppointmentSummary(
+        if($this->appointmentHierarchySummary(
             'Open Appointments',
             'arpa-open-appointments-summary',
             'hr/arpa-appointments/divisions/create',
@@ -230,7 +230,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.view');
 
-        if($this->districtAppointmentSummary(
+        if($this->appointmentHierarchySummary(
             'Historical Appointments',
             'arpa-historical-appointments-summary',
             null,
@@ -259,6 +259,179 @@ final class ArpaAppointmentController extends Controller
         );
     }
 
+    public function newAppointmentsDistrict(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.create');
+
+        $this->appointmentDistrictSummary(
+            'New Appointments',
+            'arpa-new-appointments-summary',
+            'hr/arpa-appointments/new',
+            $id,
+            'Requests still controlled by their ASC creator or returned for correction.',
+            'hr/arpa-appointments/divisions/create',
+            'New Appointment'
+        );
+    }
+
+    public function newAppointmentsDistrictAsc(
+        string $districtId,
+        string $ascId
+    ):void
+    {
+        Auth::requirePermission('arpa.appointment.create');
+
+        $this->appointmentAscList(
+            'New Appointments',
+            'arpa-new-appointments',
+            'hr/arpa-appointments/new',
+            $ascId,
+            'Requests still controlled by their ASC creator or returned for correction.',
+            $districtId
+        );
+    }
+
+    public function submittedAppointmentsDistrict(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        $this->appointmentDistrictSummary(
+            'Submitted Appointments',
+            'arpa-submitted-appointments-summary',
+            'hr/arpa-appointments/submitted',
+            $id,
+            'Actionable appointment requests grouped by ASC within the selected District.'
+        );
+    }
+
+    public function submittedAppointmentsDistrictAsc(
+        string $districtId,
+        string $ascId
+    ):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        $this->appointmentAscList(
+            'Submitted Appointments',
+            'arpa-submitted-appointments',
+            'hr/arpa-appointments/submitted',
+            $ascId,
+            'Actionable appointment requests for the selected Agrarian Service Center.',
+            $districtId
+        );
+    }
+
+    public function approvalVerificationDistrict(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        $this->appointmentDistrictSummary(
+            'Approval / Verification',
+            'arpa-approval-verification-summary',
+            'hr/arpa-appointments/approval',
+            $id,
+            'Completed verification and approval actions grouped by ASC within the selected District.'
+        );
+    }
+
+    public function approvalVerificationDistrictAsc(
+        string $districtId,
+        string $ascId
+    ):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        $this->appointmentAscList(
+            'Approval / Verification',
+            'arpa-approval-verification',
+            'hr/arpa-appointments/approval',
+            $ascId,
+            'Completed verification and approval actions for the selected Agrarian Service Center.',
+            $districtId
+        );
+    }
+
+    public function openAppointmentsDistrict(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        $this->appointmentDistrictSummary(
+            'Open Appointments',
+            'arpa-open-appointments-summary',
+            'hr/arpa-appointments/open',
+            $id,
+            'Open and scheduled operational appointments grouped by ASC within the selected District.',
+            'hr/arpa-appointments/divisions/create',
+            'New Appointment'
+        );
+    }
+
+    public function openAppointmentsDistrictAsc(
+        string $districtId,
+        string $ascId
+    ):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        $this->appointmentAscList(
+            'Open Appointments',
+            'arpa-open-appointments',
+            'hr/arpa-appointments/open',
+            $ascId,
+            'Open and scheduled operational appointments for the selected Agrarian Service Center.',
+            $districtId
+        );
+    }
+
+    public function historyDistrict(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        $this->appointmentDistrictSummary(
+            'Historical Appointments',
+            'arpa-historical-appointments-summary',
+            'hr/arpa-appointments/history',
+            $id,
+            'Closed appointment history grouped by ASC within the selected District.'
+        );
+    }
+
+    public function historyDistrictAsc(
+        string $districtId,
+        string $ascId
+    ):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        $this->appointmentAscList(
+            'Historical Appointments',
+            'arpa-historical-appointments',
+            'hr/arpa-appointments/history',
+            $ascId,
+            'Closed appointment history for the selected Agrarian Service Center.',
+            $districtId
+        );
+    }
     public function createDivision(): void
     {
         Auth::requirePermission('arpa.appointment.create');
@@ -494,7 +667,7 @@ final class ArpaAppointmentController extends Controller
         ]);
     }
 
-    private function districtAppointmentSummary(
+    private function appointmentHierarchySummary(
         string $title,
         string $summaryKey,
         ?string $createUrl,
@@ -504,21 +677,90 @@ final class ArpaAppointmentController extends Controller
     {
         $userId=(string)Auth::user()['id'];
         $profile=ScopeService::scopeProfile($userId);
+        $level=(string)($profile['level']??'');
 
-        if(($profile['level']??'')!=='DISTRICT')return false;
+        if($level==='NATIONAL'){
+            $districtSummaryKey=str_replace(
+                '-summary',
+                '-district-summary',
+                $summaryKey
+            );
 
-        $dataTable=DataTableRegistry::viewModel($summaryKey);
+            $this->render('arpa_appointments/district_summary',[
+                'title'=>$title,
+                'description'=>$description,
+                'dataTable'=>DataTableRegistry::viewModel($districtSummaryKey),
+                'createUrl'=>$createUrl,
+                'createPermission'=>$createUrl?'arpa.appointment.create':null,
+                'createLabel'=>$createLabel,
+            ]);
+
+            return true;
+        }
+
+        if($level==='DISTRICT'){
+            $this->render('arpa_appointments/asc_summary',[
+                'title'=>$title,
+                'description'=>$description,
+                'dataTable'=>DataTableRegistry::viewModel($summaryKey),
+                'createUrl'=>$createUrl,
+                'createPermission'=>$createUrl?'arpa.appointment.create':null,
+                'createLabel'=>$createLabel,
+            ]);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private function appointmentDistrictSummary(
+        string $title,
+        string $summaryKey,
+        string $summaryUrl,
+        string $districtId,
+        string $description,
+        ?string $createUrl=null,
+        ?string $createLabel=null
+    ):void
+    {
+        $userId=(string)Auth::user()['id'];
+
+        if((ScopeService::scopeProfile($userId)['level']??'')!=='NATIONAL'){
+            http_response_code(403);
+            $this->render('partials/forbidden',[
+                'permission'=>'National geographic scope'
+            ]);
+            return;
+        }
+
+        $district=$this->scopedLocationById(
+            $userId,
+            'DISTRICT',
+            $districtId
+        );
+
+        if($district===null){
+            http_response_code(403);
+            $this->render('partials/forbidden',[
+                'permission'=>'access to the selected District'
+            ]);
+            return;
+        }
 
         $this->render('arpa_appointments/asc_summary',[
             'title'=>$title,
             'description'=>$description,
-            'dataTable'=>$dataTable,
+            'district'=>$district,
+            'summaryUrl'=>$summaryUrl,
+            'dataTable'=>DataTableRegistry::viewModel(
+                $summaryKey,
+                ['district_id'=>$districtId]
+            ),
             'createUrl'=>$createUrl,
             'createPermission'=>$createUrl?'arpa.appointment.create':null,
             'createLabel'=>$createLabel,
         ]);
-
-        return true;
     }
 
     private function appointmentAscList(
@@ -526,28 +768,58 @@ final class ArpaAppointmentController extends Controller
         string $key,
         string $summaryUrl,
         string $ascId,
-        string $description
+        string $description,
+        ?string $districtId=null
     ):void
     {
         $userId=(string)Auth::user()['id'];
         $profile=ScopeService::scopeProfile($userId);
+        $level=(string)($profile['level']??'');
 
-        if(($profile['level']??'')!=='DISTRICT'){
-            http_response_code(403);
-            $this->render('partials/forbidden',[
-                'permission'=>'District geographic scope'
-            ]);
-            return;
-        }
+        $district=null;
 
-        $asc=null;
-
-        foreach(ScopeService::scopedLocations($userId,'ASC') as $candidate){
-            if((string)$candidate['id']===$ascId){
-                $asc=$candidate;
-                break;
+        if($districtId===null){
+            if($level!=='DISTRICT'){
+                http_response_code(403);
+                $this->render('partials/forbidden',[
+                    'permission'=>'District geographic scope'
+                ]);
+                return;
             }
+        }else{
+            if($level!=='NATIONAL'){
+                http_response_code(403);
+                $this->render('partials/forbidden',[
+                    'permission'=>'National geographic scope'
+                ]);
+                return;
+            }
+
+            $district=$this->scopedLocationById(
+                $userId,
+                'DISTRICT',
+                $districtId
+            );
+
+            if(
+                $district===null
+                || !$this->districtContainsAsc($districtId,$ascId)
+            ){
+                http_response_code(403);
+                $this->render('partials/forbidden',[
+                    'permission'=>'access to the selected ASC within the selected District'
+                ]);
+                return;
+            }
+
+            $summaryUrl.='/district/'.$districtId;
         }
+
+        $asc=$this->scopedLocationById(
+            $userId,
+            'ASC',
+            $ascId
+        );
 
         if($asc===null){
             http_response_code(403);
@@ -566,10 +838,52 @@ final class ArpaAppointmentController extends Controller
         $this->render('arpa_appointments/asc_records',[
             'title'=>$title,
             'description'=>$description,
+            'district'=>$district,
             'asc'=>$asc,
             'summaryUrl'=>$summaryUrl,
             'dataTable'=>$dataTable,
         ]);
+    }
+
+    private function scopedLocationById(
+        string $userId,
+        string $type,
+        string $id
+    ):?array
+    {
+        foreach(ScopeService::scopedLocations($userId,$type) as $location){
+            if((string)$location['id']===$id)return $location;
+        }
+
+        return null;
+    }
+
+    private function districtContainsAsc(
+        string $districtId,
+        string $ascId
+    ):bool
+    {
+        $stmt=Database::pdo()->prepare(
+            "SELECT COUNT(*)
+             FROM location_relationship lr
+             JOIN location asc_l
+               ON asc_l.id=lr.child_location_id
+             JOIN location_type asc_t
+               ON asc_t.id=asc_l.location_type_id
+              AND asc_t.system_key='ASC'
+             WHERE lr.parent_location_id=?
+               AND lr.child_location_id=?
+               AND lr.active=1
+               AND lr.approval_status='APPROVED'
+               AND lr.effective_from<=CURRENT_DATE()
+               AND (lr.effective_to IS NULL OR lr.effective_to>=CURRENT_DATE())
+               AND asc_l.approval_status='APPROVED'
+               AND asc_l.operational_status='ACTIVE'"
+        );
+
+        $stmt->execute([$districtId,$ascId]);
+
+        return (int)$stmt->fetchColumn()>0;
     }
     private function workflowQueuePolicy():ArpaWorkflowQueuePolicy{return new ArpaWorkflowQueuePolicy(Database::pdo());}
     private function dataIssueCorrectionService():ArpaAppointmentDataIssueCorrectionService{return new ArpaAppointmentDataIssueCorrectionService(Database::pdo());}

@@ -3,7 +3,11 @@
 <div class="page-heading">
     <div>
         <div class="breadcrumb-lite">
-            Human Resource Management / ARPA Officer Appointments / <?= e($asc['name_en']) ?>
+            Human Resource Management / ARPA Officer Appointments
+            <?php if(isset($district) && is_array($district)): ?>
+                / <?= e($district['name_en']) ?>
+            <?php endif; ?>
+            / <?= e($asc['name_en']) ?>
         </div>
 
         <h1><?= e($title) ?> - <?= e($asc['name_en']) ?></h1>

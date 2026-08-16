@@ -83,6 +83,25 @@ final class ArpaAppointmentOperationalViewsTest
             );
         }
 
+        foreach([
+            '/new/district/{id}',
+            '/new/district/{districtId}/asc/{ascId}',
+            '/submitted/district/{id}',
+            '/submitted/district/{districtId}/asc/{ascId}',
+            '/approval/district/{id}',
+            '/approval/district/{districtId}/asc/{ascId}',
+            '/open/district/{id}',
+            '/open/district/{districtId}/asc/{ascId}',
+            '/history/district/{id}',
+            '/history/district/{districtId}/asc/{ascId}',
+        ] as $path){
+            $this->same(
+                true,
+                str_contains($routes,"/hr/arpa-appointments{$path}"),
+                "{$path} National hierarchy route registered"
+            );
+        }
+
         $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');
 
         $this->same(
@@ -99,14 +118,26 @@ final class ArpaAppointmentOperationalViewsTest
 
         $this->same(
             true,
-            str_contains($controller,'districtAppointmentSummary'),
-            'District appointment pages use the common ASC summary renderer'
+            str_contains($controller,'appointmentHierarchySummary'),
+            'appointment pages select the summary level from the authenticated geographic scope'
+        );
+
+        $this->same(
+            true,
+            str_contains($controller,'appointmentDistrictSummary'),
+            'National appointment pages drill into a selected District ASC summary'
         );
 
         $this->same(
             true,
             str_contains($controller,'appointmentAscList'),
-            'District View Records pages use the common ASC detail renderer'
+            'District and National View Records pages use the common ASC detail renderer'
+        );
+
+        $this->same(
+            true,
+            str_contains($controller,'districtContainsAsc'),
+            'National ASC drill-down validates the selected ASC belongs to the selected District'
         );
 
         $registry=file_get_contents(BASE_PATH.'/app/Core/DataTableRegistry.php');
@@ -117,6 +148,11 @@ final class ArpaAppointmentOperationalViewsTest
             'arpa-approval-verification-summary',
             'arpa-open-appointments-summary',
             'arpa-historical-appointments-summary',
+            'arpa-new-appointments-district-summary',
+            'arpa-submitted-appointments-district-summary',
+            'arpa-approval-verification-district-summary',
+            'arpa-open-appointments-district-summary',
+            'arpa-historical-appointments-district-summary',
         ] as $key){
             $this->same(
                 true,
@@ -131,6 +167,7 @@ final class ArpaAppointmentOperationalViewsTest
             'ASC detail context is enforced in DataTable definitions'
         );
 
+        $districtSummaryView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/district_summary.php');
         $summaryView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/asc_summary.php');
         $recordsView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/asc_records.php');
         $listView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/list.php');
@@ -138,8 +175,26 @@ final class ArpaAppointmentOperationalViewsTest
 
         $this->same(
             true,
+            str_contains($districtSummaryView,'components/datatable.php'),
+            'National District summary uses the standard DataTable component'
+        );
+
+        $this->same(
+            true,
+            str_contains($districtSummaryView,'View ASCs'),
+            'National District summary exposes the District to ASC drill-down'
+        );
+
+        $this->same(
+            true,
             str_contains($summaryView,'components/datatable.php'),
             'District ASC summary uses the standard DataTable component'
+        );
+
+        $this->same(
+            true,
+            str_contains($summaryView,'Back to District Summary'),
+            'National District ASC summary links back to the District summary'
         );
 
         $this->same(
@@ -181,6 +236,7 @@ final class ArpaAppointmentOperationalViewsTest
             $officers=$this->pdo->prepare("SELECT DISTINCT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' JOIN officer_office_assignment oa ON oa.officer_id=o.id AND oa.active=1 AND oa.approval_status='APPROVED' JOIN office ofc ON ofc.id=oa.office_id AND ofc.linked_location_id=? WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' ORDER BY o.id LIMIT 3");$officers->execute([$asc]);$ids=$officers->fetchAll(PDO::FETCH_COLUMN);if(count($ids)<2)throw new RuntimeException('Two assigned ARPA Officers required.');
             $today=date('Y-m-d');$future=date('Y-m-d',strtotime('+30 days'));$read=new ArpaAppointmentReadService($this->pdo);
             $this->districtSummaryReadModels();
+            $this->nationalSummaryReadModels();
             $eligible=array_column($read->eligibleOfficersForAsc($this->actor,$asc,$today),'id');$this->same(true,in_array($ids[0],$eligible,true),'ASC selector includes an assigned eligible ARPA Officer');
             $outsider=(string)$this->pdo->query("SELECT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM officer_office_assignment oa JOIN office f ON f.id=oa.office_id WHERE oa.officer_id=o.id AND f.linked_location_id='{$asc}' AND oa.active=1 AND oa.approval_status='APPROVED') LIMIT 1")->fetchColumn();$this->same(false,in_array($outsider,$eligible,true),'ASC selector excludes Officers assigned only outside the ASC');
             $vacant=array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id');if($vacant===[])throw new RuntimeException('Vacant ARPA Division fixture required.');$division=(string)$vacant[0];$this->same(true,in_array($division,$vacant,true),'vacancy selector and page source begin from an actually vacant Division');
@@ -389,6 +445,490 @@ final class ArpaAppointmentOperationalViewsTest
         }finally{
             $_SESSION=$previousSession;
         }
+    }
+    private function nationalSummaryReadModels():void
+    {
+        $previousSession=$_SESSION;
+
+        $nationalCreator=$this->temporaryNationalUser('ASC_SUBJECT_OFFICER');
+        $nationalSubject=$this->temporaryNationalUser('NATIONAL_SUBJECT_OFFICER');
+        $nationalAdmin=$this->temporaryNationalUser('NATIONAL_ADMIN');
+
+        try{
+            $pages=[
+                [
+                    'name'=>'New Appointments',
+                    'user'=>$nationalCreator,
+                    'district_summary'=>'arpa-new-appointments-district-summary',
+                    'asc_summary'=>'arpa-new-appointments-summary',
+                    'detail'=>'arpa-new-appointments',
+                ],
+                [
+                    'name'=>'Submitted Appointments',
+                    'user'=>$nationalSubject,
+                    'district_summary'=>'arpa-submitted-appointments-district-summary',
+                    'asc_summary'=>'arpa-submitted-appointments-summary',
+                    'detail'=>'arpa-submitted-appointments',
+                ],
+                [
+                    'name'=>'Approval / Verification',
+                    'user'=>$nationalSubject,
+                    'district_summary'=>'arpa-approval-verification-district-summary',
+                    'asc_summary'=>'arpa-approval-verification-summary',
+                    'detail'=>'arpa-approval-verification',
+                ],
+                [
+                    'name'=>'Open Appointments',
+                    'user'=>$nationalAdmin,
+                    'district_summary'=>'arpa-open-appointments-district-summary',
+                    'asc_summary'=>'arpa-open-appointments-summary',
+                    'detail'=>'arpa-open-appointments',
+                ],
+                [
+                    'name'=>'Historical Appointments',
+                    'user'=>$nationalAdmin,
+                    'district_summary'=>'arpa-historical-appointments-district-summary',
+                    'asc_summary'=>'arpa-historical-appointments-summary',
+                    'detail'=>'arpa-historical-appointments',
+                ],
+            ];
+
+            foreach($pages as $page){
+                $_SESSION=['user_id'=>$page['user']];
+
+                $profile=ScopeService::scopeProfile($page['user']);
+
+                $this->same(
+                    'NATIONAL',
+                    (string)($profile['level']??''),
+                    "{$page['name']} National hierarchy fixture resolves to NATIONAL scope"
+                );
+
+                $districts=ScopeService::scopedLocations(
+                    $page['user'],
+                    'DISTRICT'
+                );
+
+                $this->same(
+                    true,
+                    count($districts)>0,
+                    "{$page['name']} National hierarchy exposes active Districts"
+                );
+
+                $districtDefinition=DataTableRegistry::definition(
+                    $page['district_summary']
+                );
+
+                $this->same(
+                    true,
+                    !isset($districtDefinition['authorize'])
+                    || ($districtDefinition['authorize'])(),
+                    "{$page['name']} District summary definition authorizes the National fixture"
+                );
+
+                $districtQuery=new DataTableQuery(
+                    $this->pdo,
+                    $districtDefinition,
+                    new DataTableRequest(['length'=>100])
+                );
+
+                $districtResponse=$districtQuery->response();
+
+                $this->same(
+                    count($districts),
+                    (int)$districtResponse['recordsTotal'],
+                    "{$page['name']} National summary contains every active District"
+                );
+
+                $districtRows=iterator_to_array(
+                    $districtQuery->exportRows(),
+                    false
+                );
+
+                $districtTotal=0;
+
+                foreach($districtRows as $row){
+                    $districtTotal+=(int)$row['total_count'];
+
+                    $this->same(
+                        true,
+                        array_key_exists('total_ascs',$row),
+                        "{$page['name']} District summary exposes Total ASCs"
+                    );
+
+                    $this->same(
+                        true,
+                        array_key_exists('total_divisions',$row),
+                        "{$page['name']} District summary exposes Total ARPA Divisions"
+                    );
+
+                    $this->same(
+                        true,
+                        array_key_exists('vacant_divisions',$row),
+                        "{$page['name']} District summary exposes Vacant Divisions"
+                    );
+
+                    $this->same(
+                        true,
+                        (int)$row['vacant_divisions']<=(int)$row['total_divisions'],
+                        "{$page['name']} District vacant Divisions do not exceed total ARPA Divisions"
+                    );
+                }
+
+                $detailDefinition=DataTableRegistry::definition(
+                    $page['detail']
+                );
+
+                $detailResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $detailDefinition,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $this->same(
+                    (int)$detailResponse['recordsTotal'],
+                    $districtTotal,
+                    "{$page['name']} National District totals reconcile with the underlying detail DataTable"
+                );
+
+                $district=$this->districtWithAsc($districts);
+                $districtId=(string)$district['id'];
+                $ascIds=$this->districtAscIds($districtId);
+
+                $this->same(
+                    true,
+                    count($ascIds)>0,
+                    "{$page['name']} selected National District contains at least one ASC"
+                );
+
+                $oneDistrict=$districtDefinition;
+                $oneDistrict['baseWhere'][]='summary_district.id=?';
+                $oneDistrict['baseParams'][]=$districtId;
+
+                $oneDistrictResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $oneDistrict,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $this->same(
+                    1,
+                    (int)$oneDistrictResponse['recordsTotal'],
+                    "{$page['name']} National District summary can isolate the selected District"
+                );
+
+                $districtRow=$oneDistrictResponse['data'][0]??[];
+
+                $this->same(
+                    count($ascIds),
+                    (int)($districtRow['total_ascs']??-1),
+                    "{$page['name']} District Total ASCs matches the active ASC hierarchy"
+                );
+
+                $districtHtml=implode(
+                    ' ',
+                    array_map('strval',$districtRow)
+                );
+
+                $this->same(
+                    true,
+                    str_contains(
+                        $districtHtml,
+                        '/'.$this->nationalRouteSegment($page['district_summary']).
+                        '/district/'.$districtId
+                    ),
+                    "{$page['name']} District row View ASCs action targets the selected District"
+                );
+
+                $ascDefinition=DataTableRegistry::definition(
+                    $page['asc_summary'],
+                    ['district_id'=>$districtId]
+                );
+
+                $this->same(
+                    true,
+                    !isset($ascDefinition['authorize'])
+                    || ($ascDefinition['authorize'])(),
+                    "{$page['name']} selected District ASC summary authorizes the National fixture"
+                );
+
+                $ascQuery=new DataTableQuery(
+                    $this->pdo,
+                    $ascDefinition,
+                    new DataTableRequest(['length'=>100])
+                );
+
+                $ascResponse=$ascQuery->response();
+
+                $this->same(
+                    count($ascIds),
+                    (int)$ascResponse['recordsTotal'],
+                    "{$page['name']} selected District ASC summary contains every active ASC in that District"
+                );
+
+                $ascRows=iterator_to_array(
+                    $ascQuery->exportRows(),
+                    false
+                );
+
+                $ascRecordTotal=0;
+                $ascDivisionTotal=0;
+                $ascVacantTotal=0;
+
+                foreach($ascRows as $row){
+                    $ascRecordTotal+=(int)$row['total_count'];
+                    $ascDivisionTotal+=(int)$row['total_divisions'];
+                    $ascVacantTotal+=(int)$row['vacant_divisions'];
+                }
+
+                $this->same(
+                    (int)($districtRow['total_count']??-1),
+                    $ascRecordTotal,
+                    "{$page['name']} District record total reconciles with its ASC summary"
+                );
+
+                $this->same(
+                    (int)($districtRow['total_divisions']??-1),
+                    $ascDivisionTotal,
+                    "{$page['name']} District ARPA Division total reconciles with its ASC summary"
+                );
+
+                $this->same(
+                    (int)($districtRow['vacant_divisions']??-1),
+                    $ascVacantTotal,
+                    "{$page['name']} District vacancy total reconciles with its ASC summary"
+                );
+
+                $ascId=(string)$ascIds[0];
+
+                $oneAsc=$ascDefinition;
+                $oneAsc['baseWhere'][]='summary_asc.id=?';
+                $oneAsc['baseParams'][]=$ascId;
+
+                $oneAscResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $oneAsc,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $this->same(
+                    1,
+                    (int)$oneAscResponse['recordsTotal'],
+                    "{$page['name']} National ASC summary can isolate the selected ASC"
+                );
+
+                $ascRow=$oneAscResponse['data'][0]??[];
+                $ascHtml=implode(
+                    ' ',
+                    array_map('strval',$ascRow)
+                );
+
+                $this->same(
+                    true,
+                    str_contains(
+                        $ascHtml,
+                        '/district/'.$districtId.'/asc/'.$ascId
+                    ),
+                    "{$page['name']} National View Records action preserves District and ASC context"
+                );
+
+                $ascDetailDefinition=DataTableRegistry::definition(
+                    $page['detail'],
+                    ['asc_id'=>$ascId]
+                );
+
+                $ascDetailResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $ascDetailDefinition,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $this->same(
+                    (int)($ascRow['total_count']??0),
+                    (int)$ascDetailResponse['recordsTotal'],
+                    "{$page['name']} National selected ASC record total matches the ASC-locked detail DataTable"
+                );
+
+                $this->same(
+                    true,
+                    in_array(
+                        $ascId,
+                        array_values($ascDetailDefinition['baseParams']??[]),
+                        true
+                    ),
+                    "{$page['name']} National records DataTable locks the selected ASC in backend parameters"
+                );
+
+                if(isset($ascDetailDefinition['filters']['asc'])){
+                    $this->same(
+                        null,
+                        $ascDetailDefinition['filters']['asc']['ui']??null,
+                        "{$page['name']} National records page hides the redundant ASC filter"
+                    );
+                }
+            }
+        }finally{
+            $_SESSION=$previousSession;
+        }
+    }
+
+    private function temporaryNationalUser(string $roleCode):string
+    {
+        $id=$this->uuid();
+        $username='national-summary-'.
+            strtolower(str_replace('_','-',$roleCode)).
+            '-'.
+            substr($id,0,6);
+
+        $this->pdo->prepare(
+            "INSERT INTO system_user(
+                id,
+                identity_type,
+                username,
+                display_name,
+                account_status,
+                enabled
+             )
+             VALUES(?,'STAFF',?,?,'ACTIVE',1)"
+        )->execute([
+            $id,
+            $username,
+            'National Summary '.$roleCode,
+        ]);
+
+
+        $stmt=$this->pdo->prepare(
+            "SELECT id FROM application_role WHERE role_code=?"
+        );
+        $stmt->execute([$roleCode]);
+        $roleId=(string)$stmt->fetchColumn();
+
+        if($roleId===''){
+            throw new RuntimeException(
+                "{$roleCode} role fixture required."
+            );
+        }
+
+        $this->pdo->prepare(
+            "INSERT INTO user_account_role(
+                id,
+                user_id,
+                role_id,
+                effective_from,
+                approval_status,
+                active,
+                reason,
+                created_by,
+                approved_by,
+                approved_at
+             )
+             VALUES(
+                UUID(),
+                ?,
+                ?,
+                CURRENT_DATE(),
+                'APPROVED',
+                1,
+                'National appointment hierarchy test',
+                ?,
+                ?,
+                NOW()
+             )"
+        )->execute([
+            $id,
+            $roleId,
+            $this->actor,
+            $this->actor,
+        ]);
+
+        $this->pdo->prepare(
+            "INSERT INTO user_account_scope(
+                id,
+                user_id,
+                scope_type,
+                scope_mode,
+                location_id,
+                effective_from,
+                approval_status,
+                active,
+                reason,
+                created_by,
+                approved_by,
+                approved_at
+             )
+             VALUES(
+                UUID(),
+                ?,
+                'NATIONAL',
+                'NATIONAL',
+                NULL,
+                CURRENT_DATE(),
+                'APPROVED',
+                1,
+                'National appointment hierarchy test',
+                ?,
+                ?,
+                NOW()
+             )"
+        )->execute([
+            $id,
+            $this->actor,
+            $this->actor,
+        ]);
+
+        return $id;
+    }
+
+    private function districtWithAsc(array $districts):array
+    {
+        foreach($districts as $district){
+            if($this->districtAscIds((string)$district['id'])!==[]){
+                return $district;
+            }
+        }
+
+        throw new RuntimeException(
+            'Active District with at least one active ASC fixture required.'
+        );
+    }
+
+    private function districtAscIds(string $districtId):array
+    {
+        $stmt=$this->pdo->prepare(
+            "SELECT DISTINCT asc_l.id
+             FROM location_relationship lr
+             JOIN location asc_l
+               ON asc_l.id=lr.child_location_id
+             JOIN location_type asc_t
+               ON asc_t.id=asc_l.location_type_id
+              AND asc_t.system_key='ASC'
+             WHERE lr.parent_location_id=?
+               AND lr.active=1
+               AND lr.approval_status='APPROVED'
+               AND lr.effective_from<=CURRENT_DATE()
+               AND (lr.effective_to IS NULL OR lr.effective_to>=CURRENT_DATE())
+               AND asc_l.approval_status='APPROVED'
+               AND asc_l.operational_status='ACTIVE'
+             ORDER BY asc_l.name_en"
+        );
+
+        $stmt->execute([$districtId]);
+
+        return $stmt->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    private function nationalRouteSegment(string $key):string
+    {
+        return match($key){
+            'arpa-new-appointments-district-summary'=>'new',
+            'arpa-submitted-appointments-district-summary'=>'submitted',
+            'arpa-approval-verification-district-summary'=>'approval',
+            'arpa-open-appointments-district-summary'=>'open',
+            'arpa-historical-appointments-district-summary'=>'history',
+            default=>throw new RuntimeException(
+                'Unknown National appointment summary route.'
+            ),
+        };
     }
     private function districtUser():string
     {
