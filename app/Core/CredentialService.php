@@ -24,8 +24,8 @@ final class CredentialService
 
     public static function hashPassword(string $password): string
     {
-        if(strlen($password)<12 || preg_match('/[A-Z]/',$password)!==1 || preg_match('/[a-z]/',$password)!==1 || preg_match('/\d/',$password)!==1 || preg_match('/[^A-Za-z0-9]/',$password)!==1){
-            throw new DomainException('Password must be at least 12 characters and include uppercase, lowercase, number, and symbol.');
+        if(strlen($password)<8 || preg_match('/[A-Z]/',$password)!==1 || preg_match('/[a-z]/',$password)!==1 || preg_match('/\d/',$password)!==1 || preg_match('/[^A-Za-z0-9]/',$password)!==1){
+            throw new DomainException('Password must be at least 8 characters and include uppercase, lowercase, number, and symbol.');
         }
         $hash=password_hash($password,PASSWORD_DEFAULT);
         if($hash===false) throw new DomainException('Unable to create the secure password hash.');

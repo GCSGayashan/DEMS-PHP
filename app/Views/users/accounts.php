@@ -12,7 +12,7 @@
     <div class="modal-body">
         <div class="mb-3"><label class="form-label">Approved Officer *</label><select class="form-select" name="officer_id" required><option value="">Select</option><?php foreach ($officers as $officer): ?><option value="<?= e($officer['id']) ?>"><?= e($officer['dad_number'] . ' - ' . $officer['name_with_initials']) ?></option><?php endforeach; ?></select></div>
         <div class="mb-3"><label class="form-label">Username *</label><input class="form-control" name="username" required pattern="[a-z0-9._-]{5,50}"></div>
-        <div class="mb-3"><label class="form-label">Temporary Password *</label><input type="password" class="form-control" name="temporary_password" minlength="12" required><div class="form-text">Stored only as a secure password hash.</div></div>
+        <div class="mb-3"><label class="form-label">Temporary Password *</label><input type="password" class="form-control" name="temporary_password" minlength="8" required><div class="form-text">Stored only as a secure password hash.</div></div>
         <div class="mb-3"><label class="form-label">MFA Method</label><select class="form-select" name="mfa_method"><option>AUTHENTICATOR_APP</option><option>SMS_OTP</option></select></div>
     </div>
     <div class="modal-footer"><button class="btn btn-primary">Create Request</button></div>

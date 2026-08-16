@@ -93,11 +93,16 @@ final class UserManagementController extends Controller
     {
         Auth::requirePermission('user.request'); Csrf::validate();
         $username=strtolower(trim((string)($_POST['username']??''))); $password=(string)($_POST['temporary_password']??'');
-        if(!preg_match('/^[a-z0-9._-]{5,50}$/',$username) || strlen($password)<12){
-            $this->flash('danger','Valid username and a temporary password of at least 12 characters are required.'); redirect('/access-management/users');
+        if(!preg_match('/^[a-z0-9._-]{5,50}$/',$username)){
+            $this->flash('danger','Valid username is required.'); redirect('/access-management/users');
+        }
+        try{
+            $passwordHash=\App\Core\CredentialService::hashTemporaryPassword($password);
+        }catch(\DomainException $e){
+            $this->flash('danger',$e->getMessage()); redirect('/access-management/users');
         }
         $stmt=Database::pdo()->prepare("INSERT INTO `system_user`(id,officer_id,identity_type,username,password_hash,account_status,approval_status,enabled,mfa_method,password_setup_required,mfa_enrolled,requested_by,requested_at,created_at) VALUES(UUID(),?,'STAFF',?,?,'REQUESTED','DRAFT',0,?,1,0,?,NOW(),NOW())");
-        $stmt->execute([$_POST['officer_id'],$username,password_hash($password,PASSWORD_DEFAULT),$_POST['mfa_method']??'AUTHENTICATOR_APP',Auth::user()['id']]);
+        $stmt->execute([$_POST['officer_id'],$username,$passwordHash,$_POST['mfa_method']??'AUTHENTICATOR_APP',Auth::user()['id']]);
         Audit::record('user.request','SYSTEM_USER',null,['username'=>$username]);
         $this->flash('success','User account request created.'); redirect('/access-management/account-requests');
     }

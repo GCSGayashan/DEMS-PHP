@@ -8,8 +8,8 @@
     <div class="col-12 col-xl-7"><div class="card border-0 shadow-sm"><form method="post" action="<?= e(url('access-management/users/'.$user['id'].'/reset-password')) ?>" class="card-body">
         <?= Csrf::field() ?>
         <div class="alert alert-warning">The temporary password is never displayed again. The user must replace it after the next successful login.</div>
-        <div class="mb-3"><label class="form-label">Temporary Password *</label><input type="password" class="form-control" name="temporary_password" minlength="12" autocomplete="new-password" required><div class="form-text">At least 12 characters with uppercase, lowercase, number, and symbol.</div></div>
-        <div class="mb-3"><label class="form-label">Confirm Temporary Password *</label><input type="password" class="form-control" name="temporary_password_confirmation" minlength="12" autocomplete="new-password" required></div>
+        <div class="mb-3"><label class="form-label">Temporary Password *</label><input type="password" class="form-control" name="temporary_password" minlength="8" autocomplete="new-password" required><div class="form-text">At least 8 characters with uppercase, lowercase, number, and symbol.</div></div>
+        <div class="mb-3"><label class="form-label">Confirm Temporary Password *</label><input type="password" class="form-control" name="temporary_password_confirmation" minlength="8" autocomplete="new-password" required></div>
         <div class="mb-3"><label class="form-label">Reason *</label><textarea class="form-control" name="reason" rows="3" required></textarea></div>
         <div class="mb-3"><label class="form-label">Official Reference</label><input class="form-control" name="official_reference" maxlength="255"></div>
         <div class="d-flex justify-content-end gap-2"><a class="btn btn-outline-secondary" href="<?= e(url('access-management/users')) ?>">Cancel</a><button class="btn btn-danger" type="submit"><i class="bi bi-key-fill"></i> Reset Password</button></div>

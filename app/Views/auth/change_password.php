@@ -11,8 +11,8 @@
     <form method="post" action="<?= e(url('account/change-password')) ?>">
       <?= Csrf::field() ?>
       <div class="mb-3"><label class="form-label" for="current-password">Current Password</label><input id="current-password" type="password" class="form-control" name="current_password" autocomplete="current-password" required></div>
-      <div class="mb-3"><label class="form-label" for="new-password">New Password</label><input id="new-password" type="password" class="form-control" name="new_password" minlength="12" autocomplete="new-password" aria-describedby="password-help" required><div id="password-help" class="form-text">At least 12 characters with uppercase, lowercase, number and symbol.</div></div>
-      <div class="mb-3"><label class="form-label" for="confirm-password">Confirm New Password</label><input id="confirm-password" type="password" class="form-control" name="new_password_confirmation" minlength="12" autocomplete="new-password" required></div>
+      <div class="mb-3"><label class="form-label" for="new-password">New Password</label><input id="new-password" type="password" class="form-control" name="new_password" minlength="8" autocomplete="new-password" aria-describedby="password-help" required><div id="password-help" class="form-text">At least 8 characters with uppercase, lowercase, number and symbol.</div></div>
+      <div class="mb-3"><label class="form-label" for="confirm-password">Confirm New Password</label><input id="confirm-password" type="password" class="form-control" name="new_password_confirmation" minlength="8" autocomplete="new-password" required></div>
       <button class="btn btn-primary" type="submit">Change Password</button>
     </form>
   </div>
