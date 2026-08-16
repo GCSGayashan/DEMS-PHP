@@ -43,7 +43,28 @@ final class LegacyArpaLocationRepairTest
         $this->same(0, $report['collision_projection']['after']['arpa_divisions_multiple_open_permanent'], 'corrected target projection removes false Permanent collisions');
         $this->same($postRepair?0:138, $report['collision_projection']['before']['arpa_divisions_multiple_open_acting'], 'Acting collision projection reflects repair state');
         $this->same(0, $report['collision_projection']['after']['arpa_divisions_multiple_open_acting'], 'corrected target projection removes false Acting collisions');
-        $this->same(43, $report['collision_projection']['after']['dependent_without_qualifying_permanent'], 'location repair does not rewrite Officer dependency evidence');
+        $yearEndRepairCorrections = (int)$this->pdo->query(
+            "SELECT COUNT(*)
+             FROM arpa_appointment_data_correction
+             WHERE issue_type='NON_PERMANENT_2025_YEAR_END'
+               AND correction_action='SET_EFFECTIVE_TO'
+               AND resolution_status='RESOLVED_BY_CORRECTION'"
+        )->fetchColumn();
+
+        $this->same(
+            true,
+            in_array($yearEndRepairCorrections, [0, 3316], true),
+            'ARPA 2025 year-end repair is either absent or fully applied'
+        );
+
+        $expectedDependentWithoutPermanent =
+            $yearEndRepairCorrections === 3316 ? 23 : 43;
+
+        $this->same(
+            $expectedDependentWithoutPermanent,
+            $report['collision_projection']['after']['dependent_without_qualifying_permanent'],
+            'location repair preserves the Officer dependency projection appropriate to the ARPA 2025 repair state'
+        );
 
         $this->same('70007-0007026', $report['wewagedara']['dad_number'], 'Wewagedara regression target found');
         $this->same($postRepair?1:24, $report['wewagedara']['before']['requests'], 'Wewagedara request projection reflects repair state');

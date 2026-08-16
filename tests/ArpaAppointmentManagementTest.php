@@ -84,7 +84,10 @@ final class ArpaAppointmentManagementTest
     {
         $tables=['arpa_appointment_end_reason','arpa_service_permanency_history','arpa_division_appointment_request','arpa_division_appointment','arpa_division_appointment_closure','arpa_appointment_workflow_action','subject_master','arpa_subject_assignment_request','arpa_subject_assignment','arpa_subject_assignment_closure','arpa_subject_workflow_action','arpa_officer_sub_designation_period','arpa_officer_sub_designation_closure'];
         foreach($tables as $table)$this->same(1,$this->scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='{$table}'"),"{$table} exists");
-        $this->same(16,$this->scalar('SELECT COUNT(*) FROM arpa_appointment_end_reason'),'normalized end-reason master seeded');
+        $this->same(17,$this->scalar('SELECT COUNT(*) FROM arpa_appointment_end_reason'),'normalized end-reason master includes End of Appointment Period');
+        $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_end_reason WHERE system_key='END_OF_APPOINTMENT_PERIOD'"),'End of Appointment Period reason exists exactly once');
+        $this->same(1,$this->scalar("SELECT active FROM arpa_appointment_end_reason WHERE system_key='END_OF_APPOINTMENT_PERIOD'"),'End of Appointment Period reason is active');
+        $this->same(0,$this->scalar("SELECT service_terminating FROM arpa_appointment_end_reason WHERE system_key='END_OF_APPOINTMENT_PERIOD'"),'End of Appointment Period does not terminate officer service');
         $this->same(24,$this->scalar("SELECT COUNT(*) FROM application_permission WHERE module_code='ARPA_APPOINTMENT'"),'module permissions include workflow, legacy review, and direct scoped data-correction access');
         $this->same(2,$this->scalar("SELECT COUNT(*) FROM application_permission WHERE permission_key IN('arpa.legacy-reconciliation.view','arpa.legacy-reconciliation.decide')"),'legacy reconciliation permissions are explicit');
         $this->same(3,$this->scalar("SELECT COUNT(*) FROM application_permission WHERE module_code='SUBJECT_MANAGEMENT'"),'Head Office Subject Master permissions seeded');
