@@ -41,11 +41,16 @@ final class DataTableRegistry
             'provisioning-failures' => self::provisioningFailures(),
             'security-history' => self::securityHistory(),
             'arpa-division-appointments' => self::arpaDivisionAppointments(),
-            'arpa-new-appointments' => self::arpaNewAppointments(),
-            'arpa-submitted-appointments' => self::arpaSubmittedAppointments(),
-            'arpa-approval-verification' => self::arpaApprovalVerification(),
-            'arpa-open-appointments' => self::arpaOpenAppointments(),
-            'arpa-historical-appointments' => self::arpaHistoricalAppointments(),
+            'arpa-new-appointments' => self::applyArpaAscContext(self::arpaNewAppointments(), $input, 'r.asc_location_id'),
+            'arpa-submitted-appointments' => self::applyArpaAscContext(self::arpaSubmittedAppointments(), $input, 'r.asc_location_id'),
+            'arpa-approval-verification' => self::applyArpaAscContext(self::arpaApprovalVerification(), $input, 'r.asc_location_id'),
+            'arpa-open-appointments' => self::applyArpaAscContext(self::arpaOpenAppointments(), $input, 'a.asc_location_id'),
+            'arpa-historical-appointments' => self::applyArpaAscContext(self::arpaHistoricalAppointments(), $input, 'a.asc_location_id'),
+            'arpa-new-appointments-summary' => self::arpaAppointmentAscSummary('new'),
+            'arpa-submitted-appointments-summary' => self::arpaAppointmentAscSummary('submitted'),
+            'arpa-approval-verification-summary' => self::arpaAppointmentAscSummary('approval'),
+            'arpa-open-appointments-summary' => self::arpaAppointmentAscSummary('open'),
+            'arpa-historical-appointments-summary' => self::arpaAppointmentAscSummary('history'),
             'arpa-vacant-divisions' => self::arpaVacantDivisions(),
             'arpa-appointment-issues' => self::arpaAppointmentIssues(),
             'arpa-appointment-corrections' => self::arpaAppointmentCorrections(),
@@ -378,6 +383,197 @@ final class DataTableRegistry
         ];
     }
 
+    private static function applyArpaAscContext(array $definition,array $input,string $column):array
+    {
+        $ascId=trim((string)($input['asc_id']??''));
+
+        if($ascId==='')return $definition;
+
+        if(preg_match(self::uuidPattern(),$ascId)!==1){
+            $definition['baseWhere'][]='1=0';
+            return $definition;
+        }
+
+        $definition['baseWhere'][]=$column.'=?';
+        $definition['baseParams'][]=$ascId;
+
+        if(isset($definition['filters']['asc'])){
+            $definition['filters']['asc']['ui']=null;
+        }
+
+        $definition['filename']=($definition['filename']??'arpa-appointments').'-asc';
+
+        return $definition;
+    }
+
+    private static function arpaAppointmentAscSummary(string $page):array
+    {
+        $userId=(string)(Auth::user()['id']??'');
+
+        [$detail,$ascColumn,$typeColumn,$route,$totalLabel]=match($page){
+            'new'=>[
+                self::arpaNewAppointments(),
+                'r.asc_location_id',
+                'r.appointment_type',
+                'new',
+                'Total Records',
+            ],
+            'submitted'=>[
+                self::arpaSubmittedAppointments(),
+                'r.asc_location_id',
+                'r.appointment_type',
+                'submitted',
+                'Total Records',
+            ],
+            'approval'=>[
+                self::arpaApprovalVerification(),
+                'r.asc_location_id',
+                'r.appointment_type',
+                'approval',
+                'Total Records',
+            ],
+            'open'=>[
+                self::arpaOpenAppointments(),
+                'a.asc_location_id',
+                'a.appointment_type',
+                'open',
+                'Total Open',
+            ],
+            'history'=>[
+                self::arpaHistoricalAppointments(),
+                'a.asc_location_id',
+                'a.appointment_type',
+                'history',
+                'Total Historical',
+            ],
+            default=>throw new RuntimeException('Unknown ARPA appointment summary page.'),
+        };
+
+        $profile=ScopeService::scopeProfile($userId);
+        $ascs=($profile['level']??'')==='DISTRICT'
+            ? ScopeService::scopedLocations($userId,'ASC')
+            : [];
+
+        $ascIds=array_values(array_map(
+            fn(array $row)=>(string)$row['id'],
+            $ascs
+        ));
+
+        $detailWhere=array_values($detail['baseWhere']??[]);
+        $detailWhereSql=$detailWhere===[]?'':' WHERE '.implode(' AND ',$detailWhere);
+        $detailCount=(string)$detail['count'];
+
+        $recordCounts="(
+            SELECT
+                {$ascColumn} asc_id,
+                COUNT(DISTINCT CASE WHEN {$typeColumn}='PERMANENT' THEN {$detailCount} END) permanent_count,
+                COUNT(DISTINCT CASE WHEN {$typeColumn}='ACTING' THEN {$detailCount} END) acting_count,
+                COUNT(DISTINCT CASE WHEN {$typeColumn}='DUTY_COVERING' THEN {$detailCount} END) duty_covering_count,
+                COUNT(DISTINCT CASE WHEN {$typeColumn}='ATTEND_TO_DUTY' THEN {$detailCount} END) attend_to_duty_count,
+                COUNT(DISTINCT {$detailCount}) total_count
+            FROM {$detail['from']}
+            {$detailWhereSql}
+            GROUP BY {$ascColumn}
+        ) record_counts";
+
+        $divisionCounts="(
+            SELECT
+                rel.parent_location_id asc_id,
+                COUNT(DISTINCT arpa.id) total_divisions
+            FROM location_relationship rel
+            JOIN location arpa
+              ON arpa.id=rel.child_location_id
+            JOIN location_type arpa_t
+              ON arpa_t.id=arpa.location_type_id
+             AND arpa_t.system_key='ARPA_DIVISION'
+            WHERE rel.relationship_type='ASC_ARPA_DIVISION'
+              AND rel.active=1
+              AND rel.approval_status='APPROVED'
+              AND rel.effective_from<=CURRENT_DATE()
+              AND (rel.effective_to IS NULL OR rel.effective_to>=CURRENT_DATE())
+              AND arpa.approval_status='APPROVED'
+              AND arpa.operational_status='ACTIVE'
+              AND arpa.effective_from<=CURRENT_DATE()
+              AND (arpa.effective_to IS NULL OR arpa.effective_to>=CURRENT_DATE())
+            GROUP BY rel.parent_location_id
+        ) division_counts";
+
+        $vacantCounts="(
+            SELECT
+                vacant.asc_location_id asc_id,
+                COUNT(*) vacant_divisions
+            FROM ".\App\Services\ArpaAppointmentReadService::vacantDivisionSource()." vacant
+            GROUP BY vacant.asc_location_id
+        ) vacant_counts";
+
+        $scopeWhere=$ascIds===[]?
+            '1=0':
+            'summary_asc.id IN ('.implode(',',array_fill(0,count($ascIds),'?')).')';
+
+        $detailAuthorize=$detail['authorize']??null;
+
+        return [
+            'permission'=>$detail['permission'],
+            'authorize'=>fn():bool=>
+                (ScopeService::scopeProfile($userId)['level']??'')==='DISTRICT'
+                && ($detailAuthorize===null || $detailAuthorize()),
+            'export'=>false,
+            'filename'=>'arpa-'.$page.'-appointments-summary',
+            'with'=>$detail['with']??'',
+            'from'=>"location summary_asc
+                     LEFT JOIN {$recordCounts}
+                       ON record_counts.asc_id=summary_asc.id
+                     LEFT JOIN {$divisionCounts}
+                       ON division_counts.asc_id=summary_asc.id
+                     LEFT JOIN {$vacantCounts}
+                       ON vacant_counts.asc_id=summary_asc.id",
+            'select'=>[
+                'summary_asc.id asc_id',
+                'summary_asc.dad_number asc_dad',
+                'summary_asc.name_en asc_name',
+                'COALESCE(record_counts.permanent_count,0) permanent_count',
+                'COALESCE(record_counts.acting_count,0) acting_count',
+                'COALESCE(record_counts.duty_covering_count,0) duty_covering_count',
+                'COALESCE(record_counts.attend_to_duty_count,0) attend_to_duty_count',
+                'COALESCE(record_counts.total_count,0) total_count',
+                'COALESCE(division_counts.total_divisions,0) total_divisions',
+                'COALESCE(vacant_counts.vacant_divisions,0) vacant_divisions',
+            ],
+            'count'=>'summary_asc.id',
+            'baseWhere'=>[$scopeWhere],
+            'baseParams'=>array_merge(
+                array_values($detail['baseParams']??[]),
+                $ascIds
+            ),
+            'searchable'=>[
+                'summary_asc.dad_number',
+                'summary_asc.name_en',
+            ],
+            'filters'=>[],
+            'columns'=>[
+                self::col(
+                    'ASC',
+                    'asc_name',
+                    'summary_asc.name_en',
+                    fn($r)=>'<div class="fw-semibold">'.e($r['asc_name']).'</div><div class="text-muted small">'.e($r['asc_dad']).'</div>'
+                ),
+                self::col('Permanent','permanent_count','COALESCE(record_counts.permanent_count,0)',fn($r)=>DataTableFormat::text((string)$r['permanent_count'])),
+                self::col('Acting','acting_count','COALESCE(record_counts.acting_count,0)',fn($r)=>DataTableFormat::text((string)$r['acting_count'])),
+                self::col('Duty Covering','duty_covering_count','COALESCE(record_counts.duty_covering_count,0)',fn($r)=>DataTableFormat::text((string)$r['duty_covering_count'])),
+                self::col('Attend to Duty','attend_to_duty_count','COALESCE(record_counts.attend_to_duty_count,0)',fn($r)=>DataTableFormat::text((string)$r['attend_to_duty_count'])),
+                self::col($totalLabel,'total_count','COALESCE(record_counts.total_count,0)',fn($r)=>DataTableFormat::text((string)$r['total_count'])),
+                self::col('Total ARPA Divisions','total_divisions','COALESCE(division_counts.total_divisions,0)',fn($r)=>DataTableFormat::text((string)$r['total_divisions'])),
+                self::col('Vacant Divisions','vacant_divisions','COALESCE(vacant_counts.vacant_divisions,0)',fn($r)=>DataTableFormat::text((string)$r['vacant_divisions'])),
+                self::actionColumn(
+                    fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.
+                        e(url('hr/arpa-appointments/'.$route.'/asc/'.$r['asc_id'])).
+                        '"><i class="bi bi-list-ul"></i> View Records</a>'
+                ),
+            ],
+            'defaultOrder'=>[0,'ASC'],
+            'emptyMessage'=>'No Agrarian Service Centers are available in your District scope.',
+        ];
+    }
     private static function arpaNewAppointments():array
     {
         $definition=self::arpaRequestList();

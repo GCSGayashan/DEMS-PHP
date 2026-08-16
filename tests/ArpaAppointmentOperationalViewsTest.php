@@ -23,18 +23,155 @@ final class ArpaAppointmentOperationalViewsTest
     private function staticRuleCoverage():void
     {
         $source=ArpaAppointmentReadService::issueSource();
-        foreach(['DIVISION_MULTIPLE_OPEN','OFFICER_MULTIPLE_PERMANENT','OFFICER_MULTIPLE_ACTING','OFFICER_MULTIPLE_ATTEND_TO_DUTY','DEPENDENT_WITHOUT_PERMANENT','PERMANENT_SERVICE_WITH_ATTEND_TO_DUTY','NON_PERMANENT_SERVICE_WITH_ACTING','EXCLUSIVE_FUNCTION_OVERLAP','MULTIPLE_EXCLUSIVE_FUNCTIONS','MISSING_ASC_OFFICE_ASSIGNMENT','APPOINTMENT_OUTSIDE_ASC','INVALID_DATE_RANGE','OPEN_APPOINTMENT_WITH_END_REASON','ENDED_APPOINTMENT_WITHOUT_END_REASON','FUTURE_OVERLAP_CONFLICT'] as $issue)$this->same(true,str_contains($source,$issue),"{$issue} diagnostic is independently defined");
+
+        foreach([
+            'DIVISION_MULTIPLE_OPEN',
+            'OFFICER_MULTIPLE_PERMANENT',
+            'OFFICER_MULTIPLE_ACTING',
+            'OFFICER_MULTIPLE_ATTEND_TO_DUTY',
+            'DEPENDENT_WITHOUT_PERMANENT',
+            'PERMANENT_SERVICE_WITH_ATTEND_TO_DUTY',
+            'NON_PERMANENT_SERVICE_WITH_ACTING',
+            'EXCLUSIVE_FUNCTION_OVERLAP',
+            'MULTIPLE_EXCLUSIVE_FUNCTIONS',
+            'MISSING_ASC_OFFICE_ASSIGNMENT',
+            'APPOINTMENT_OUTSIDE_ASC',
+            'INVALID_DATE_RANGE',
+            'OPEN_APPOINTMENT_WITH_END_REASON',
+            'ENDED_APPOINTMENT_WITHOUT_END_REASON',
+            'FUTURE_OVERLAP_CONFLICT',
+        ] as $issue){
+            $this->same(
+                true,
+                str_contains($source,$issue),
+                "{$issue} diagnostic is independently defined"
+            );
+        }
+
         $this->same(false,str_contains($source,'UPDATE '),'diagnostic source is read-only');
         $this->same('c.id IS NULL',ArpaAppointmentReadService::openAppointmentClause(),'open definition is absence of formal closure');
-        $routes=file_get_contents(BASE_PATH.'/routes/web.php');foreach(['/new','/submitted','/approval','/open','/history','/vacant-divisions','/data-issues'] as $path)$this->same(true,str_contains($routes,"/hr/arpa-appointments{$path}"),"{$path} route registered");
-        $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');$this->same(true,str_contains($controller,"Auth::requirePermission('arpa.appointment.view')"),'workflow tabs require backend view permission');$this->same(true,str_contains($controller,'workflowQueuePolicy()->canUseWorkflowQueues'),'workflow routes require an active action permission and matching scope');$view=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/list.php');$this->same(true,str_contains($controller,'openAppointmentAscSummary'),'Open Appointments requests the District ASC summary');$this->same(true,str_contains($view,'ASC Appointment Summary'),'appointment list contains the ASC summary view');$summaryPosition=strpos($view,'ASC Appointment Summary');$tablePosition=strpos($view,'components/datatable.php');$this->same(true,$summaryPosition!==false&&$tablePosition!==false&&$summaryPosition<$tablePosition,'ASC summary renders before the detailed appointment list');
-            $this->same(true,str_contains($view,'Total ARPA Divisions'),'District ASC summary displays total ARPA Division counts');
-            $this->same(true,str_contains($view,'Vacant Divisions'),'District ASC summary displays vacant Division counts');
-            $this->same(true,str_contains($view,'View Records'),'District ASC summary provides a View Records action');
-            $this->same(false,str_contains($view,'District Total'),'District ASC summary does not render a bottom total row');
-            $this->same(true,str_contains($controller,'$selectedAsc')&&str_contains($controller,'$initialFilters'),'View Records ASC selection is passed into the detailed DataTable filter');
-    }
 
+        $routes=file_get_contents(BASE_PATH.'/routes/web.php');
+
+        foreach([
+            '/new',
+            '/submitted',
+            '/approval',
+            '/open',
+            '/history',
+            '/vacant-divisions',
+            '/data-issues',
+        ] as $path){
+            $this->same(
+                true,
+                str_contains($routes,"/hr/arpa-appointments{$path}"),
+                "{$path} route registered"
+            );
+        }
+
+        foreach([
+            '/new/asc/{id}',
+            '/submitted/asc/{id}',
+            '/approval/asc/{id}',
+            '/open/asc/{id}',
+            '/history/asc/{id}',
+        ] as $path){
+            $this->same(
+                true,
+                str_contains($routes,"/hr/arpa-appointments{$path}"),
+                "{$path} District ASC drill-down route registered"
+            );
+        }
+
+        $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');
+
+        $this->same(
+            true,
+            str_contains($controller,"Auth::requirePermission('arpa.appointment.view')"),
+            'workflow tabs require backend view permission'
+        );
+
+        $this->same(
+            true,
+            str_contains($controller,'workflowQueuePolicy()->canUseWorkflowQueues'),
+            'workflow routes require an active action permission and matching scope'
+        );
+
+        $this->same(
+            true,
+            str_contains($controller,'districtAppointmentSummary'),
+            'District appointment pages use the common ASC summary renderer'
+        );
+
+        $this->same(
+            true,
+            str_contains($controller,'appointmentAscList'),
+            'District View Records pages use the common ASC detail renderer'
+        );
+
+        $registry=file_get_contents(BASE_PATH.'/app/Core/DataTableRegistry.php');
+
+        foreach([
+            'arpa-new-appointments-summary',
+            'arpa-submitted-appointments-summary',
+            'arpa-approval-verification-summary',
+            'arpa-open-appointments-summary',
+            'arpa-historical-appointments-summary',
+        ] as $key){
+            $this->same(
+                true,
+                str_contains($registry,$key),
+                "{$key} DataTable is registered"
+            );
+        }
+
+        $this->same(
+            true,
+            str_contains($registry,'applyArpaAscContext'),
+            'ASC detail context is enforced in DataTable definitions'
+        );
+
+        $summaryView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/asc_summary.php');
+        $recordsView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/asc_records.php');
+        $listView=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/list.php');
+        $readService=file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentReadService.php');
+
+        $this->same(
+            true,
+            str_contains($summaryView,'components/datatable.php'),
+            'District ASC summary uses the standard DataTable component'
+        );
+
+        $this->same(
+            true,
+            str_contains($summaryView,'View Records'),
+            'District ASC summary explains the View Records drill-down'
+        );
+
+        $this->same(
+            true,
+            str_contains($recordsView,'Back to ASC Summary'),
+            'separate ASC records page links back to the summary'
+        );
+
+        $this->same(
+            true,
+            str_contains($recordsView,'components/datatable.php'),
+            'separate ASC records page uses the standard DataTable component'
+        );
+
+        $this->same(
+            false,
+            str_contains($listView,'ASC Appointment Summary'),
+            'generic appointment list no longer embeds the old custom ASC summary'
+        );
+
+        $this->same(
+            false,
+            str_contains($readService,'openAppointmentAscSummary'),
+            'obsolete Open-only ASC summary read model has been removed'
+        );
+    }
     private function transactionalReadModels():void
     {
         $this->pdo->beginTransaction();
@@ -43,51 +180,7 @@ final class ArpaAppointmentOperationalViewsTest
             if(!$fixture)throw new RuntimeException('ASC with ARPA Division fixtures required.');$asc=(string)$fixture['asc_id'];$divisions=explode(',',$fixture['divisions']);
             $officers=$this->pdo->prepare("SELECT DISTINCT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' JOIN officer_office_assignment oa ON oa.officer_id=o.id AND oa.active=1 AND oa.approval_status='APPROVED' JOIN office ofc ON ofc.id=oa.office_id AND ofc.linked_location_id=? WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' ORDER BY o.id LIMIT 3");$officers->execute([$asc]);$ids=$officers->fetchAll(PDO::FETCH_COLUMN);if(count($ids)<2)throw new RuntimeException('Two assigned ARPA Officers required.');
             $today=date('Y-m-d');$future=date('Y-m-d',strtotime('+30 days'));$read=new ArpaAppointmentReadService($this->pdo);
-            $this->same(null,$read->openAppointmentAscSummary($this->actor),'System scope does not receive the District ASC summary');
-
-            $districtUser=$this->districtUser();
-            $districtSummary=$read->openAppointmentAscSummary($districtUser);
-            $this->same(true,is_array($districtSummary),'District scope receives the ASC summary');
-
-            $scopedAscs=ScopeService::scopedLocations($districtUser,'ASC');
-            $this->same(true,count($scopedAscs)>0,'District fixture exposes at least one ASC');
-            $this->same(count($scopedAscs),count($districtSummary['rows']),'District summary includes every scoped ASC including zero-count ASCs');
-
-            foreach($districtSummary['rows'] as $summaryRow){
-                $this->same(
-                    (int)$summaryRow['total'],
-                    (int)$summaryRow['permanent']
-                        +(int)$summaryRow['acting']
-                        +(int)$summaryRow['duty_covering']
-                        +(int)$summaryRow['attend_to_duty'],
-                    'ASC summary total equals the four appointment-type counts'
-                );
-            }
-
-            foreach($districtSummary['rows'] as $summaryRow){
-                $this->same(true,array_key_exists('total_divisions',$summaryRow),'ASC summary exposes total ARPA Division count');
-                $this->same(true,array_key_exists('vacant_divisions',$summaryRow),'ASC summary exposes vacant Division count');
-                $this->same(true,(int)$summaryRow['vacant_divisions']<=(int)$summaryRow['total_divisions'],'vacant Division count cannot exceed total ARPA Divisions');
-            }
-
-            $previousSession=$_SESSION;
-            $_SESSION=['user_id'=>$districtUser];
-            try{
-                $districtOpen=DataTableRegistry::definition('arpa-open-appointments');
-                $districtResponse=(new DataTableQuery(
-                    $this->pdo,
-                    $districtOpen,
-                    new DataTableRequest(['length'=>10])
-                ))->response();
-
-                $this->same(
-                    (int)$districtSummary['totals']['total'],
-                    (int)$districtResponse['recordsTotal'],
-                    'District ASC summary total matches the detailed Open Appointments list'
-                );
-            }finally{
-                $_SESSION=$previousSession;
-            }
+            $this->districtSummaryReadModels();
             $eligible=array_column($read->eligibleOfficersForAsc($this->actor,$asc,$today),'id');$this->same(true,in_array($ids[0],$eligible,true),'ASC selector includes an assigned eligible ARPA Officer');
             $outsider=(string)$this->pdo->query("SELECT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM officer_office_assignment oa JOIN office f ON f.id=oa.office_id WHERE oa.officer_id=o.id AND f.linked_location_id='{$asc}' AND oa.active=1 AND oa.approval_status='APPROVED') LIMIT 1")->fetchColumn();$this->same(false,in_array($outsider,$eligible,true),'ASC selector excludes Officers assigned only outside the ASC');
             $vacant=array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id');if($vacant===[])throw new RuntimeException('Vacant ARPA Division fixture required.');$division=(string)$vacant[0];$this->same(true,in_array($division,$vacant,true),'vacancy selector and page source begin from an actually vacant Division');
@@ -134,6 +227,169 @@ final class ArpaAppointmentOperationalViewsTest
         $this->pdo->prepare("INSERT INTO arpa_subject_assignment(id,request_id,officer_id,subject_id,subject_kind_snapshot,officer_exclusive_snapshot,asc_location_id,asc_dad_snapshot,asc_name_snapshot,subject_name_snapshot,context_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,?,?,?,?,1,?,?,?,?,'{}',?,?,NOW())")->execute([$id,$request,$officer,$s['id'],$kind,$asc,$ascRow['dad_number'],$ascRow['name_en'],$s['name_en'],$from,$this->actor]);return $id;
     }
 
+    private function districtSummaryReadModels():void
+    {
+        $previousSession=$_SESSION;
+        $districtUser=$this->districtUser();
+
+        $_SESSION=['user_id'=>$districtUser];
+
+        try{
+            $scopedAscs=ScopeService::scopedLocations($districtUser,'ASC');
+
+            $this->same(
+                true,
+                count($scopedAscs)>0,
+                'District summary fixture exposes at least one ASC'
+            );
+
+            $ascId=(string)$scopedAscs[0]['id'];
+
+            $pages=[
+                [
+                    'name'=>'New Appointments',
+                    'summary'=>'arpa-new-appointments-summary',
+                    'detail'=>'arpa-new-appointments',
+                ],
+                [
+                    'name'=>'Submitted Appointments',
+                    'summary'=>'arpa-submitted-appointments-summary',
+                    'detail'=>'arpa-submitted-appointments',
+                ],
+                [
+                    'name'=>'Approval / Verification',
+                    'summary'=>'arpa-approval-verification-summary',
+                    'detail'=>'arpa-approval-verification',
+                ],
+                [
+                    'name'=>'Open Appointments',
+                    'summary'=>'arpa-open-appointments-summary',
+                    'detail'=>'arpa-open-appointments',
+                ],
+                [
+                    'name'=>'Historical Appointments',
+                    'summary'=>'arpa-historical-appointments-summary',
+                    'detail'=>'arpa-historical-appointments',
+                ],
+            ];
+
+            foreach($pages as $page){
+                $summaryDefinition=DataTableRegistry::definition($page['summary']);
+
+                $summaryQuery=new DataTableQuery(
+                    $this->pdo,
+                    $summaryDefinition,
+                    new DataTableRequest(['length'=>10])
+                );
+
+                $summaryResponse=$summaryQuery->response();
+
+                $this->same(
+                    count($scopedAscs),
+                    (int)$summaryResponse['recordsTotal'],
+                    "{$page['name']} summary contains every ASC in District scope"
+                );
+
+                $summaryRows=iterator_to_array(
+                    $summaryQuery->exportRows(),
+                    false
+                );
+
+                $summaryTotal=0;
+
+                foreach($summaryRows as $row){
+                    $summaryTotal+=(int)$row['total_count'];
+
+                    $this->same(
+                        true,
+                        array_key_exists('total_divisions',$row),
+                        "{$page['name']} summary exposes total ARPA Divisions"
+                    );
+
+                    $this->same(
+                        true,
+                        array_key_exists('vacant_divisions',$row),
+                        "{$page['name']} summary exposes vacant Divisions"
+                    );
+
+                    $this->same(
+                        true,
+                        (int)$row['vacant_divisions']<=(int)$row['total_divisions'],
+                        "{$page['name']} vacant Divisions do not exceed total ARPA Divisions"
+                    );
+                }
+
+                $detailDefinition=DataTableRegistry::definition($page['detail']);
+
+                $detailResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $detailDefinition,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $this->same(
+                    (int)$detailResponse['recordsTotal'],
+                    $summaryTotal,
+                    "{$page['name']} ASC summary total reconciles with its District detail DataTable"
+                );
+
+                $oneAscSummary=$summaryDefinition;
+                $oneAscSummary['baseWhere'][]='summary_asc.id=?';
+                $oneAscSummary['baseParams'][]=$ascId;
+
+                $oneAscResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $oneAscSummary,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $this->same(
+                    1,
+                    (int)$oneAscResponse['recordsTotal'],
+                    "{$page['name']} summary can isolate the selected ASC"
+                );
+
+                $detailAscDefinition=DataTableRegistry::definition(
+                    $page['detail'],
+                    ['asc_id'=>$ascId]
+                );
+
+                $detailAscResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $detailAscDefinition,
+                    new DataTableRequest(['length'=>1])
+                ))->response();
+
+                $summaryAscTotal=(int)($oneAscResponse['data'][0]['total_count']??0);
+
+                $this->same(
+                    $summaryAscTotal,
+                    (int)$detailAscResponse['recordsTotal'],
+                    "{$page['name']} View Records detail count matches the selected ASC summary"
+                );
+
+                $this->same(
+                    true,
+                    in_array(
+                        $ascId,
+                        array_values($detailAscDefinition['baseParams']??[]),
+                        true
+                    ),
+                    "{$page['name']} separate records DataTable locks the selected ASC into backend query parameters"
+                );
+
+                if(isset($detailAscDefinition['filters']['asc'])){
+                    $this->same(
+                        null,
+                        $detailAscDefinition['filters']['asc']['ui']??null,
+                        "{$page['name']} separate records page hides the redundant ASC selector"
+                    );
+                }
+            }
+        }finally{
+            $_SESSION=$previousSession;
+        }
+    }
     private function districtUser():string
     {
         $sql="SELECT DISTINCT su.id

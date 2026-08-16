@@ -29,41 +29,156 @@ final class ArpaAppointmentController extends Controller
     public function newAppointments():void
     {
         Auth::requirePermission('arpa.appointment.create');
-        $this->appointmentList('New Appointments','arpa-new-appointments','hr/arpa-appointments/divisions/create','New Appointment','Requests still controlled by their ASC creator or returned for correction.');
+
+        if($this->districtAppointmentSummary(
+            'New Appointments',
+            'arpa-new-appointments-summary',
+            'hr/arpa-appointments/divisions/create',
+            'New Appointment',
+            'Requests still controlled by their ASC creator or returned for correction.'
+        ))return;
+
+        $this->appointmentList(
+            'New Appointments',
+            'arpa-new-appointments',
+            'hr/arpa-appointments/divisions/create',
+            'New Appointment',
+            'Requests still controlled by their ASC creator or returned for correction.'
+        );
+    }
+
+    public function newAppointmentsAsc(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.create');
+        $this->appointmentAscList(
+            'New Appointments',
+            'arpa-new-appointments',
+            'hr/arpa-appointments/new',
+            $id,
+            'Requests still controlled by their ASC creator or returned for correction.'
+        );
     }
 
     public function submittedAppointments():void
     {
         Auth::requirePermission('arpa.appointment.view');
-        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){$this->workflowQueueForbidden();return;}
-        $this->appointmentList('Submitted Appointments','arpa-submitted-appointments',null,null,'Your current actionable inbox. Each request leaves this list immediately after you complete your required workflow action.');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        if($this->districtAppointmentSummary(
+            'Submitted Appointments',
+            'arpa-submitted-appointments-summary',
+            null,
+            null,
+            'Your current actionable inbox. Each request leaves this list immediately after you complete your required workflow action.'
+        ))return;
+
+        $this->appointmentList(
+            'Submitted Appointments',
+            'arpa-submitted-appointments',
+            null,
+            null,
+            'Your current actionable inbox. Each request leaves this list immediately after you complete your required workflow action.'
+        );
+    }
+
+    public function submittedAppointmentsAsc(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        $this->appointmentAscList(
+            'Submitted Appointments',
+            'arpa-submitted-appointments',
+            'hr/arpa-appointments/submitted',
+            $id,
+            'Actionable appointment requests for the selected Agrarian Service Center.'
+        );
     }
 
     public function approvalVerification():void
     {
         Auth::requirePermission('arpa.appointment.view');
-        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){$this->workflowQueueForbidden();return;}
-        $this->appointmentList('Approval / Verification','arpa-approval-verification',null,null,'Completed verification and approval actions performed by your account. Later workflow progress remains visible here as audit history.');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        if($this->districtAppointmentSummary(
+            'Approval / Verification',
+            'arpa-approval-verification-summary',
+            null,
+            null,
+            'Completed verification and approval actions performed by your account. Later workflow progress remains visible here as audit history.'
+        ))return;
+
+        $this->appointmentList(
+            'Approval / Verification',
+            'arpa-approval-verification',
+            null,
+            null,
+            'Completed verification and approval actions performed by your account. Later workflow progress remains visible here as audit history.'
+        );
+    }
+
+    public function approvalVerificationAsc(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+
+        if(!$this->workflowQueuePolicy()->canUseWorkflowQueues((string)Auth::user()['id'])){
+            $this->workflowQueueForbidden();
+            return;
+        }
+
+        $this->appointmentAscList(
+            'Approval / Verification',
+            'arpa-approval-verification',
+            'hr/arpa-appointments/approval',
+            $id,
+            'Completed verification and approval actions for the selected Agrarian Service Center.'
+        );
     }
 
     public function openAppointments():void
     {
         Auth::requirePermission('arpa.appointment.view');
-        $ascSummary=(new ArpaAppointmentReadService(Database::pdo()))->openAppointmentAscSummary((string)Auth::user()['id']);
 
-        $initialFilters=[];
-        $selectedAsc=trim((string)($_GET['asc']??''));
+        if($this->districtAppointmentSummary(
+            'Open Appointments',
+            'arpa-open-appointments-summary',
+            'hr/arpa-appointments/divisions/create',
+            'New Appointment',
+            'Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.'
+        ))return;
 
-        if($ascSummary!==null && $selectedAsc!==''){
-            $allowedAscIds=array_column($ascSummary['rows'],'asc_id');
-            if(in_array($selectedAsc,$allowedAscIds,true)){
-                $initialFilters['asc']=$selectedAsc;
-            }
-        }
-
-        $this->appointmentList('Open Appointments','arpa-open-appointments','hr/arpa-appointments/divisions/create','New Appointment','Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.',$ascSummary,$initialFilters);
+        $this->appointmentList(
+            'Open Appointments',
+            'arpa-open-appointments',
+            'hr/arpa-appointments/divisions/create',
+            'New Appointment',
+            'Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.'
+        );
     }
 
+    public function openAppointmentsAsc(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $this->appointmentAscList(
+            'Open Appointments',
+            'arpa-open-appointments',
+            'hr/arpa-appointments/open',
+            $id,
+            'Open and scheduled operational appointments for the selected Agrarian Service Center.'
+        );
+    }
     public function vacantDivisions():void
     {
         Auth::requirePermission('arpa.appointment.view');
@@ -114,7 +229,34 @@ final class ArpaAppointmentController extends Controller
     public function history(): void
     {
         Auth::requirePermission('arpa.appointment.view');
-        $this->appointmentList('Historical Appointments','arpa-historical-appointments',null,null,'Closed ARPA Division appointments in chronological, immutable history.');
+
+        if($this->districtAppointmentSummary(
+            'Historical Appointments',
+            'arpa-historical-appointments-summary',
+            null,
+            null,
+            'Closed ARPA Division appointments in chronological, immutable history.'
+        ))return;
+
+        $this->appointmentList(
+            'Historical Appointments',
+            'arpa-historical-appointments',
+            null,
+            null,
+            'Closed ARPA Division appointments in chronological, immutable history.'
+        );
+    }
+
+    public function historyAsc(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $this->appointmentAscList(
+            'Historical Appointments',
+            'arpa-historical-appointments',
+            'hr/arpa-appointments/history',
+            $id,
+            'Closed appointment history for the selected Agrarian Service Center.'
+        );
     }
 
     public function createDivision(): void
@@ -334,11 +476,101 @@ final class ArpaAppointmentController extends Controller
         return ['officers'=>$ascId===''?[]:(new ArpaAppointmentCandidateService(Database::pdo()))->optionsForAsc($userId,$ascId,$effectiveDate),'ascs'=>$this->locations('ASC'),'arpaDivisions'=>$ascId===''?[]:$read->vacantDivisionsForAsc($userId,$ascId,$effectiveDate)];
     }
 
-    private function appointmentList(string $title,string $key,?string $createUrl,?string $createLabel,string $description,?array $ascSummary=null,array $initialFilters=[]):void
+    private function appointmentList(
+        string $title,
+        string $key,
+        ?string $createUrl,
+        ?string $createLabel,
+        string $description
+    ):void
     {
-        $this->render('arpa_appointments/list',['title'=>$title,'description'=>$description,'dataTable'=>DataTableRegistry::viewModel($key,[],$this->filterOptions(),$initialFilters),'createUrl'=>$createUrl,'createPermission'=>$createUrl?'arpa.appointment.create':null,'createLabel'=>$createLabel,'ascSummary'=>$ascSummary]);
+        $this->render('arpa_appointments/list',[
+            'title'=>$title,
+            'description'=>$description,
+            'dataTable'=>DataTableRegistry::viewModel($key,[],$this->filterOptions()),
+            'createUrl'=>$createUrl,
+            'createPermission'=>$createUrl?'arpa.appointment.create':null,
+            'createLabel'=>$createLabel,
+        ]);
     }
 
+    private function districtAppointmentSummary(
+        string $title,
+        string $summaryKey,
+        ?string $createUrl,
+        ?string $createLabel,
+        string $description
+    ):bool
+    {
+        $userId=(string)Auth::user()['id'];
+        $profile=ScopeService::scopeProfile($userId);
+
+        if(($profile['level']??'')!=='DISTRICT')return false;
+
+        $dataTable=DataTableRegistry::viewModel($summaryKey);
+
+        $this->render('arpa_appointments/asc_summary',[
+            'title'=>$title,
+            'description'=>$description,
+            'dataTable'=>$dataTable,
+            'createUrl'=>$createUrl,
+            'createPermission'=>$createUrl?'arpa.appointment.create':null,
+            'createLabel'=>$createLabel,
+        ]);
+
+        return true;
+    }
+
+    private function appointmentAscList(
+        string $title,
+        string $key,
+        string $summaryUrl,
+        string $ascId,
+        string $description
+    ):void
+    {
+        $userId=(string)Auth::user()['id'];
+        $profile=ScopeService::scopeProfile($userId);
+
+        if(($profile['level']??'')!=='DISTRICT'){
+            http_response_code(403);
+            $this->render('partials/forbidden',[
+                'permission'=>'District geographic scope'
+            ]);
+            return;
+        }
+
+        $asc=null;
+
+        foreach(ScopeService::scopedLocations($userId,'ASC') as $candidate){
+            if((string)$candidate['id']===$ascId){
+                $asc=$candidate;
+                break;
+            }
+        }
+
+        if($asc===null){
+            http_response_code(403);
+            $this->render('partials/forbidden',[
+                'permission'=>'access to the selected Agrarian Service Center'
+            ]);
+            return;
+        }
+
+        $dataTable=DataTableRegistry::viewModel(
+            $key,
+            ['asc_id'=>$ascId],
+            $this->filterOptions()
+        );
+
+        $this->render('arpa_appointments/asc_records',[
+            'title'=>$title,
+            'description'=>$description,
+            'asc'=>$asc,
+            'summaryUrl'=>$summaryUrl,
+            'dataTable'=>$dataTable,
+        ]);
+    }
     private function workflowQueuePolicy():ArpaWorkflowQueuePolicy{return new ArpaWorkflowQueuePolicy(Database::pdo());}
     private function dataIssueCorrectionService():ArpaAppointmentDataIssueCorrectionService{return new ArpaAppointmentDataIssueCorrectionService(Database::pdo());}
     private function workflowQueueForbidden():void{http_response_code(403);$this->render('partials/forbidden',['permission'=>'an active ARPA workflow role and matching geographic scope']);}
