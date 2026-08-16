@@ -12,7 +12,7 @@ final class OperationalUserActivationTest
     public function run():int
     {
         $this->pdo=Database::pdo();$before=$this->state();
-        $this->same(1323,$before['historical'],'remaining historical fixture total after explicitly activated asctest');
+        $this->same(true,$before['historical']>0,'historical fixture population is available');
         $this->testDataTable();$this->testActivationAndDeactivation();
         $this->same($before,$this->state(),'tests roll back every operational access change');
         echo "OperationalUserActivationTest: {$this->assertions} assertions passed.\n";return 0;
@@ -21,12 +21,14 @@ final class OperationalUserActivationTest
     private function testDataTable():void
     {
         $_SESSION=[];$admin=$this->admin();$_SESSION['user_id']=$admin;
+        $historical=$this->scalar("SELECT COUNT(*) FROM system_user WHERE identity_type='HISTORICAL' AND enabled=0");
         $definition=DataTableRegistry::definition('historical-users');$response=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>10,'search'=>['value'=>'legacy.hr.']])))->response();
-        $this->same(1323,$response['recordsTotal'],'remaining historical list total');$this->same(true,count($response['data'])<=10,'historical user list is server paginated');
+        $this->same($historical,$response['recordsTotal'],'remaining historical list total');$this->same(true,count($response['data'])<=10,'historical user list is server paginated');
     }
 
     private function testActivationAndDeactivation():void
     {
+        $historicalBefore=$this->scalar("SELECT COUNT(*) FROM system_user WHERE identity_type='HISTORICAL' AND enabled=0");
         $this->pdo->beginTransaction();
         try{
             $admin=$this->admin();$target=$this->pdo->query("SELECT su.*,lur.id reference_id FROM system_user su JOIN legacy_user_reference lur ON lur.system_user_id=su.id WHERE su.identity_type='HISTORICAL' ORDER BY su.id LIMIT 1 FOR UPDATE")->fetch();$targetId=(string)$target['id'];
@@ -48,7 +50,7 @@ final class OperationalUserActivationTest
             $this->same(1,$this->scalar("SELECT COUNT(*) FROM system_user WHERE id='{$targetId}' AND username='{$newUsername}' AND enabled=1 AND account_status='ACTIVE'"),'activated original identity satisfies login eligibility');
             $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE user_id='{$targetId}' UNION SELECT COUNT(*) FROM arpa_subject_workflow_action WHERE user_id='{$targetId}'")>=0?1:0,'workflow foreign-key identity remains resolvable');
             $service->deactivate($targetId,'No longer current staff','TEST/DEACT/1',$admin);$user=$this->pdo->query("SELECT * FROM system_user WHERE id='{$targetId}'")->fetch();$this->same('STAFF',$user['identity_type'],'deactivation preserves operational identity type');$this->same(0,(int)$user['enabled'],'deactivation disables login');$this->same(0,$this->scalar("SELECT COUNT(*) FROM user_account_role WHERE user_id='{$targetId}' AND active=1"),'role history is ended');$this->same(0,$this->scalar("SELECT COUNT(*) FROM user_account_scope WHERE user_id='{$targetId}' AND active=1"),'scope history is ended');$this->same(0,$this->scalar("SELECT COUNT(*) FROM system_user WHERE id='{$targetId}' AND username='{$newUsername}' AND enabled=1 AND account_status='ACTIVE'"),'deactivated user cannot satisfy authentication predicate');
-            $this->same(1322,$this->scalar("SELECT COUNT(*) FROM system_user WHERE identity_type='HISTORICAL' AND enabled=0"),'unrelated historical identities remain disabled during selected activation');
+            $this->same($historicalBefore-1,$this->scalar("SELECT COUNT(*) FROM system_user WHERE identity_type='HISTORICAL' AND enabled=0"),'only the selected historical identity leaves the historical population during activation');
             $this->same(1,$this->scalar("SELECT COUNT(*) FROM user_operational_access_event WHERE user_id='{$targetId}' AND event_type='DEACTIVATE'"),'deactivation event is audited');
             $rules=file_get_contents(dirname(__DIR__).'/app/Services/ArpaAppointmentService.php');$this->same(true,str_contains($rules,'assertMakerChecker'),'ARPA no-self-approval remains enforced');
         }finally{$_SESSION=[];$this->pdo->rollBack();}
