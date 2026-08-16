@@ -54,19 +54,35 @@ final class LocationBaselineEffectiveDateCorrectionTest
         $service=new LocationBaselineEffectiveDateCorrectionService($this->pdo,$this->legacy);
         $first=$service->dryRun(false);$second=$service->dryRun(false);
         $this->same('2024-01-05',LocationHierarchyEffectiveDatePolicy::BASELINE_DATE,'central Location Master baseline is 05 January 2024');
-        $this->same(18181,$first['location_master']['total'],'all Location records are counted');
+        $this->same(25353,$first['location_master']['total'],'all Location records are counted');
         $this->same(18181,$first['location_master']['baseline_records_examined'],'all imported baseline Locations are examined');
-        $this->same(18181,$first['location_master']['already_2024_01_05'],'all Locations use the approved baseline date');
+        $this->same(18181,$first['location_master']['already_2024_01_05'],'all imported baseline Locations use the approved baseline date');
+        $this->same(7172,$first['location_master']['excluded_nonbaseline_records'],'GN repair-created Locations are excluded from the original import-baseline batch');
         $this->same(0,$first['location_master']['would_change'],'no Location requires another baseline correction');
         $this->same(0,$first['location_master']['later_revisions_preserved'],'no later Location revision exists in the current data');
-        $this->same(37997,$first['location_relationships']['total'],'all hierarchy records are counted');
-        $this->same(37997,$first['location_relationships']['already_2024_01_05'],'all hierarchy relationships use the approved baseline date');
+        $this->same(52027,$first['location_relationships']['total'],'all hierarchy records are counted');
+        $this->same(37997,$first['location_relationships']['already_2024_01_05'],'all imported baseline hierarchy relationships use the approved baseline date');
+        $this->same(14030,$first['location_relationships']['excluded_nonbaseline_records'],'GN repair-created hierarchy relationships are excluded from the original import-baseline batch');
         $this->same(0,$first['location_relationships']['would_change'],'no hierarchy relationship requires another baseline correction');
         $this->same(0,$first['location_relationships']['later_revisions_preserved'],'no later hierarchy revision exists in the current data');
         $this->same(0,$first['blockers']['total'],'dry-run has no ambiguous or blocking record');
         $this->same(0,$first['hierarchy_validation']['type_compatibility_errors'],'all hierarchy relationships have compatible Location Types');
         $this->same(0,$first['hierarchy_validation']['missing_required_parents'],'required hierarchy parents are complete');
         $this->same(0,$first['hierarchy_validation']['ambiguous_required_parents'],'required one-parent hierarchy is unambiguous');
+
+        $this->same(14016,$first['location_relationships']['by_type']['ASC_GN_DIVISION']['total'],'all repaired ASC to GN relationships are counted');
+        $this->same(0,$first['location_relationships']['by_type']['ASC_GN_DIVISION']['examined'],'repair-created ASC to GN relationships are outside the original import-baseline batch');
+
+        $this->same(14016,$first['location_relationships']['by_type']['ARPA_GN_DIVISION']['total'],'all repaired ARPA to GN relationships are counted');
+        $this->same(14002,$first['location_relationships']['by_type']['ARPA_GN_DIVISION']['examined'],'original imported ARPA to GN relationships remain in the baseline batch');
+
+        $this->same(14016,$first['hierarchy_validation']['checks']['ASC_GN_DIVISION']['children'],'all GN Locations participate in ASC hierarchy validation');
+        $this->same(0,$first['hierarchy_validation']['checks']['ASC_GN_DIVISION']['missing'],'no GN is missing its direct ASC relationship');
+        $this->same(14016,$first['hierarchy_validation']['checks']['ASC_GN_DIVISION']['one_parent'],'every GN has exactly one direct ASC');
+
+        $this->same(14016,$first['hierarchy_validation']['checks']['ARPA_GN_DIVISION']['children'],'all GN Locations participate in ARPA hierarchy validation');
+        $this->same(0,$first['hierarchy_validation']['checks']['ARPA_GN_DIVISION']['missing'],'no GN is missing its ARPA relationship');
+        $this->same(14016,$first['hierarchy_validation']['checks']['ARPA_GN_DIVISION']['one_parent'],'every GN has exactly one ARPA relationship');
         $this->same(592,$first['offices']['total'],'all baseline Offices are counted');
         $this->same(592,$first['offices']['baseline_records_examined'],'all approved active baseline Offices are examined');
         $this->same(592,$first['offices']['already_2024_01_05'],'all baseline Offices use the approved baseline date');
@@ -84,7 +100,9 @@ final class LocationBaselineEffectiveDateCorrectionTest
         $this->same($first['location_relationships'],$second['location_relationships'],'repeat dry-run produces the same hierarchy plan');
         $this->same($first['offices'],$second['offices'],'repeat dry-run produces the same Office plan');
         $this->same(10396,$first['location_master']['by_type']['ARPA_DIVISION']['already_2024_01_05'],'ARPA Division baseline count is reconciled');
-        $this->same(6844,$first['location_master']['by_type']['GN_DIVISION']['already_2024_01_05'],'GN Division baseline count is reconciled');
+        $this->same(14016,$first['location_master']['by_type']['GN_DIVISION']['total'],'all repaired GN Division Locations are counted');
+        $this->same(6844,$first['location_master']['by_type']['GN_DIVISION']['examined'],'original imported GN Division baseline records are examined');
+        $this->same(6844,$first['location_master']['by_type']['GN_DIVISION']['already_2024_01_05'],'original imported GN Division baseline count is reconciled');
         $this->same(566,$first['location_master']['by_type']['ASC']['already_2024_01_05'],'ASC baseline count is reconciled');
         $this->same(25,$first['location_master']['by_type']['DISTRICT']['already_2024_01_05'],'District baseline count is reconciled');
         $this->same(9,$first['location_master']['by_type']['PROVINCE']['already_2024_01_05'],'Province baseline count is reconciled');
