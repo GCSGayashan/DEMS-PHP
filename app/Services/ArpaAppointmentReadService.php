@@ -60,6 +60,103 @@ final class ArpaAppointmentReadService
                      WHERE open_a.arpa_division_location_id=arpa.id AND open_a.legacy_history_only=0 AND open_c.id IS NULL))";
     }
 
+    /**
+     * District-level Open Appointments summary grouped by ASC.
+     *
+     * @return array{
+     *   district_names:array<int,string>,
+     *   rows:array<int,array<string,mixed>>,
+     *   totals:array{permanent:int,acting:int,duty_covering:int,attend_to_duty:int,total:int}
+     * }|null
+     */
+    public function openAppointmentAscSummary(string $userId): ?array
+    {
+        $profile=ScopeService::scopeProfile($userId);
+        if(($profile['level']??'')!=='DISTRICT')return null;
+
+        $ascs=ScopeService::scopedLocations($userId,'ASC');
+
+        $districtNames=[];
+        foreach($profile['scopes']??[] as $scope){
+            if(($scope['location_type']??'')==='DISTRICT'){
+                $name=trim((string)($scope['name_en']??''));
+                if($name!=='')$districtNames[]=$name;
+            }
+        }
+        $districtNames=array_values(array_unique($districtNames));
+
+        $counts=[];
+        if($ascs!==[]){
+            $ids=array_values(array_map(
+                fn(array $row)=>(string)$row['id'],
+                $ascs
+            ));
+            $placeholders=implode(',',array_fill(0,count($ids),'?'));
+
+            $sql="SELECT
+                        a.asc_location_id,
+                        SUM(a.appointment_type='PERMANENT') permanent_count,
+                        SUM(a.appointment_type='ACTING') acting_count,
+                        SUM(a.appointment_type='DUTY_COVERING') duty_covering_count,
+                        SUM(a.appointment_type='ATTEND_TO_DUTY') attend_to_duty_count,
+                        COUNT(*) total_count
+                  FROM arpa_division_appointment a
+                  LEFT JOIN arpa_division_appointment_closure c
+                    ON c.appointment_id=a.id
+                  WHERE a.legacy_history_only=0
+                    AND ".self::openAppointmentClause('a','c')."
+                    AND a.asc_location_id IN ({$placeholders})
+                  GROUP BY a.asc_location_id";
+
+            $stmt=$this->pdo->prepare($sql);
+            $stmt->execute($ids);
+
+            foreach($stmt->fetchAll() as $row){
+                $counts[(string)$row['asc_location_id']]=[
+                    'permanent'=>(int)$row['permanent_count'],
+                    'acting'=>(int)$row['acting_count'],
+                    'duty_covering'=>(int)$row['duty_covering_count'],
+                    'attend_to_duty'=>(int)$row['attend_to_duty_count'],
+                    'total'=>(int)$row['total_count'],
+                ];
+            }
+        }
+
+        $totals=[
+            'permanent'=>0,
+            'acting'=>0,
+            'duty_covering'=>0,
+            'attend_to_duty'=>0,
+            'total'=>0,
+        ];
+
+        $rows=[];
+        foreach($ascs as $asc){
+            $rowCounts=$counts[(string)$asc['id']]??[
+                'permanent'=>0,
+                'acting'=>0,
+                'duty_covering'=>0,
+                'attend_to_duty'=>0,
+                'total'=>0,
+            ];
+
+            $rows[]=[
+                'asc_id'=>(string)$asc['id'],
+                'asc_dad'=>(string)$asc['dad_number'],
+                'asc_name'=>(string)$asc['name_en'],
+            ]+$rowCounts;
+
+            foreach($totals as $key=>$value){
+                $totals[$key]+=$rowCounts[$key];
+            }
+        }
+
+        return [
+            'district_names'=>$districtNames,
+            'rows'=>$rows,
+            'totals'=>$totals,
+        ];
+    }
     /** @return array<int,array<string,mixed>> */
     public function eligibleOfficersForAsc(string $userId, string $ascLocationId, string $effectiveDate): array
     {

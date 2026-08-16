@@ -49,7 +49,8 @@ final class ArpaAppointmentController extends Controller
     public function openAppointments():void
     {
         Auth::requirePermission('arpa.appointment.view');
-        $this->appointmentList('Open Appointments','arpa-open-appointments','hr/arpa-appointments/divisions/create','New Appointment','Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.');
+        $ascSummary=(new ArpaAppointmentReadService(Database::pdo()))->openAppointmentAscSummary((string)Auth::user()['id']);
+        $this->appointmentList('Open Appointments','arpa-open-appointments','hr/arpa-appointments/divisions/create','New Appointment','Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.',$ascSummary);
     }
 
     public function vacantDivisions():void
@@ -322,9 +323,9 @@ final class ArpaAppointmentController extends Controller
         return ['officers'=>$ascId===''?[]:(new ArpaAppointmentCandidateService(Database::pdo()))->optionsForAsc($userId,$ascId,$effectiveDate),'ascs'=>$this->locations('ASC'),'arpaDivisions'=>$ascId===''?[]:$read->vacantDivisionsForAsc($userId,$ascId,$effectiveDate)];
     }
 
-    private function appointmentList(string $title,string $key,?string $createUrl,?string $createLabel,string $description):void
+    private function appointmentList(string $title,string $key,?string $createUrl,?string $createLabel,string $description,?array $ascSummary=null):void
     {
-        $this->render('arpa_appointments/list',['title'=>$title,'description'=>$description,'dataTable'=>DataTableRegistry::viewModel($key,[],$this->filterOptions()),'createUrl'=>$createUrl,'createPermission'=>$createUrl?'arpa.appointment.create':null,'createLabel'=>$createLabel]);
+        $this->render('arpa_appointments/list',['title'=>$title,'description'=>$description,'dataTable'=>DataTableRegistry::viewModel($key,[],$this->filterOptions()),'createUrl'=>$createUrl,'createPermission'=>$createUrl?'arpa.appointment.create':null,'createLabel'=>$createLabel,'ascSummary'=>$ascSummary]);
     }
 
     private function workflowQueuePolicy():ArpaWorkflowQueuePolicy{return new ArpaWorkflowQueuePolicy(Database::pdo());}

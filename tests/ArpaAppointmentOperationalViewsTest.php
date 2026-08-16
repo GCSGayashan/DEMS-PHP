@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database};
+use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
 use App\Services\{ArpaAppointmentReadService,ScopedDashboardService};
 
 require dirname(__DIR__).'/bootstrap.php';
@@ -27,7 +27,7 @@ final class ArpaAppointmentOperationalViewsTest
         $this->same(false,str_contains($source,'UPDATE '),'diagnostic source is read-only');
         $this->same('c.id IS NULL',ArpaAppointmentReadService::openAppointmentClause(),'open definition is absence of formal closure');
         $routes=file_get_contents(BASE_PATH.'/routes/web.php');foreach(['/new','/submitted','/approval','/open','/history','/vacant-divisions','/data-issues'] as $path)$this->same(true,str_contains($routes,"/hr/arpa-appointments{$path}"),"{$path} route registered");
-        $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');$this->same(true,str_contains($controller,"Auth::requirePermission('arpa.appointment.view')"),'workflow tabs require backend view permission');$this->same(true,str_contains($controller,'workflowQueuePolicy()->canUseWorkflowQueues'),'workflow routes require an active action permission and matching scope');
+        $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');$this->same(true,str_contains($controller,"Auth::requirePermission('arpa.appointment.view')"),'workflow tabs require backend view permission');$this->same(true,str_contains($controller,'workflowQueuePolicy()->canUseWorkflowQueues'),'workflow routes require an active action permission and matching scope');$view=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/list.php');$this->same(true,str_contains($controller,'openAppointmentAscSummary'),'Open Appointments requests the District ASC summary');$this->same(true,str_contains($view,'ASC Appointment Summary'),'appointment list contains the ASC summary view');$summaryPosition=strpos($view,'ASC Appointment Summary');$tablePosition=strpos($view,'components/datatable.php');$this->same(true,$summaryPosition!==false&&$tablePosition!==false&&$summaryPosition<$tablePosition,'ASC summary renders before the detailed appointment list');
     }
 
     private function transactionalReadModels():void
@@ -38,6 +38,45 @@ final class ArpaAppointmentOperationalViewsTest
             if(!$fixture)throw new RuntimeException('ASC with ARPA Division fixtures required.');$asc=(string)$fixture['asc_id'];$divisions=explode(',',$fixture['divisions']);
             $officers=$this->pdo->prepare("SELECT DISTINCT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' JOIN officer_office_assignment oa ON oa.officer_id=o.id AND oa.active=1 AND oa.approval_status='APPROVED' JOIN office ofc ON ofc.id=oa.office_id AND ofc.linked_location_id=? WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' ORDER BY o.id LIMIT 3");$officers->execute([$asc]);$ids=$officers->fetchAll(PDO::FETCH_COLUMN);if(count($ids)<2)throw new RuntimeException('Two assigned ARPA Officers required.');
             $today=date('Y-m-d');$future=date('Y-m-d',strtotime('+30 days'));$read=new ArpaAppointmentReadService($this->pdo);
+            $this->same(null,$read->openAppointmentAscSummary($this->actor),'System scope does not receive the District ASC summary');
+
+            $districtUser=$this->districtUser();
+            $districtSummary=$read->openAppointmentAscSummary($districtUser);
+            $this->same(true,is_array($districtSummary),'District scope receives the ASC summary');
+
+            $scopedAscs=ScopeService::scopedLocations($districtUser,'ASC');
+            $this->same(true,count($scopedAscs)>0,'District fixture exposes at least one ASC');
+            $this->same(count($scopedAscs),count($districtSummary['rows']),'District summary includes every scoped ASC including zero-count ASCs');
+
+            foreach($districtSummary['rows'] as $summaryRow){
+                $this->same(
+                    (int)$summaryRow['total'],
+                    (int)$summaryRow['permanent']
+                        +(int)$summaryRow['acting']
+                        +(int)$summaryRow['duty_covering']
+                        +(int)$summaryRow['attend_to_duty'],
+                    'ASC summary total equals the four appointment-type counts'
+                );
+            }
+
+            $previousSession=$_SESSION;
+            $_SESSION=['user_id'=>$districtUser];
+            try{
+                $districtOpen=DataTableRegistry::definition('arpa-open-appointments');
+                $districtResponse=(new DataTableQuery(
+                    $this->pdo,
+                    $districtOpen,
+                    new DataTableRequest(['length'=>10])
+                ))->response();
+
+                $this->same(
+                    (int)$districtSummary['totals']['total'],
+                    (int)$districtResponse['recordsTotal'],
+                    'District ASC summary total matches the detailed Open Appointments list'
+                );
+            }finally{
+                $_SESSION=$previousSession;
+            }
             $eligible=array_column($read->eligibleOfficersForAsc($this->actor,$asc,$today),'id');$this->same(true,in_array($ids[0],$eligible,true),'ASC selector includes an assigned eligible ARPA Officer');
             $outsider=(string)$this->pdo->query("SELECT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM officer_office_assignment oa JOIN office f ON f.id=oa.office_id WHERE oa.officer_id=o.id AND f.linked_location_id='{$asc}' AND oa.active=1 AND oa.approval_status='APPROVED') LIMIT 1")->fetchColumn();$this->same(false,in_array($outsider,$eligible,true),'ASC selector excludes Officers assigned only outside the ASC');
             $vacant=array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id');if($vacant===[])throw new RuntimeException('Vacant ARPA Division fixture required.');$division=(string)$vacant[0];$this->same(true,in_array($division,$vacant,true),'vacancy selector and page source begin from an actually vacant Division');
@@ -84,6 +123,29 @@ final class ArpaAppointmentOperationalViewsTest
         $this->pdo->prepare("INSERT INTO arpa_subject_assignment(id,request_id,officer_id,subject_id,subject_kind_snapshot,officer_exclusive_snapshot,asc_location_id,asc_dad_snapshot,asc_name_snapshot,subject_name_snapshot,context_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,?,?,?,?,1,?,?,?,?,'{}',?,?,NOW())")->execute([$id,$request,$officer,$s['id'],$kind,$asc,$ascRow['dad_number'],$ascRow['name_en'],$s['name_en'],$from,$this->actor]);return $id;
     }
 
+    private function districtUser():string
+    {
+        $sql="SELECT DISTINCT su.id
+              FROM system_user su
+              JOIN user_account_scope uas ON uas.user_id=su.id
+              JOIN location l ON l.id=uas.location_id
+              JOIN location_type lt ON lt.id=l.location_type_id
+              WHERE su.enabled=1
+                AND su.account_status='ACTIVE'
+                AND uas.active=1
+                AND uas.approval_status='APPROVED'
+                AND uas.effective_from<=CURRENT_DATE()
+                AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE())
+                AND lt.system_key='DISTRICT'
+              ORDER BY su.id";
+
+        foreach($this->pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN) as $userId){
+            $profile=ScopeService::scopeProfile((string)$userId);
+            if(($profile['level']??'')==='DISTRICT')return (string)$userId;
+        }
+
+        throw new RuntimeException('Active District-scope user fixture required.');
+    }
     private function rawIssues():array{return $this->pdo->query('SELECT DISTINCT issue_type FROM '.ArpaAppointmentReadService::issueSource().' q')->fetchAll(PDO::FETCH_COLUMN);}
     private function state():array{return ['requests'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment_request')->fetchColumn(),'appointments'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment')->fetchColumn(),'closures'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment_closure')->fetchColumn(),'subjects'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_subject_assignment')->fetchColumn(),'offices'=>(int)$this->pdo->query('SELECT COUNT(*) FROM officer_office_assignment')->fetchColumn(),'decisions'=>(int)$this->pdo->query("SELECT COUNT(*) FROM legacy_arpa_appointment_resolution WHERE resolution_status='CONFIRMED'")->fetchColumn(),'roles'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_role')->fetchColumn(),'scopes'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_scope')->fetchColumn()];}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
