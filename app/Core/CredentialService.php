@@ -10,10 +10,20 @@ final class CredentialService
 {
     public static function validateOperationalUsername(string $username): string
     {
-        $username=strtolower(trim($username));
-        if(preg_match('/^[a-z0-9._-]{5,50}$/',$username)!==1){
-            throw new DomainException('Username must be 5-50 characters using lowercase letters, numbers, dots, underscores, or hyphens.');
+        $username = trim($username);
+
+        $length = function_exists('mb_strlen')
+            ? mb_strlen($username, 'UTF-8')
+            : strlen($username);
+
+        if ($length < 5 || $length > 50) {
+            throw new DomainException('Username must be 5-50 characters.');
         }
+
+        if (preg_match('/[\x00-\x1F\x7F]/u', $username) === 1) {
+            throw new DomainException('Username contains invalid control characters.');
+        }
+
         return $username;
     }
 
