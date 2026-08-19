@@ -33,6 +33,8 @@ $router->post('/hr/officers/search', [OfficerController::class, 'searchSubmit'])
 $router->get('/api/officers/options', [OfficerController::class, 'options']);
 $router->get('/hr/officers/create', [OfficerController::class, 'create']);
 $router->post('/hr/officers', [OfficerController::class, 'store']);
+$router->get('/hr/officers/{id}/edit', [OfficerController::class, 'edit']);
+$router->post('/hr/officers/{id}/edit', [OfficerController::class, 'update']);
 $router->get('/hr/officers/{id}', [OfficerController::class, 'show']);
 $router->get('/hr/officers/{id}/offices/assign', [OfficerController::class, 'assignOffice']);
 $router->post('/hr/officers/{id}/offices', [OfficerController::class, 'storeOfficeAssignment']);

@@ -179,7 +179,7 @@ final class ScopeService
         $profile=self::scopeProfile($userId);
         $with=$profile['level']==='ASC'
             ? "WITH scoped_locations(id) AS (SELECT DISTINCT s.location_id FROM user_account_scope s WHERE s.user_id=? AND s.scope_type='ASC' AND s.scope_mode='EXACT' AND s.active=1 AND s.approval_status='APPROVED' AND s.effective_from<=CURRENT_DATE() AND (s.effective_to IS NULL OR s.effective_to>=CURRENT_DATE())), scoped_offices(id) AS (SELECT o.id FROM office o JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' JOIN scoped_locations sl ON sl.id=o.linked_location_id) "
-            : self::visibleLocationsCte().", scoped_locations(id) AS (SELECT id FROM visible_locations), scoped_offices(id) AS (SELECT o.id FROM office o JOIN scoped_locations sl ON sl.id=o.linked_location_id) ";
+            : self::visibleLocationsCte().", scoped_locations(id) AS (SELECT id FROM scope_descendants), scoped_offices(id) AS (SELECT o.id FROM office o JOIN scoped_locations sl ON sl.id=o.linked_location_id) ";
         return [
             'with'=>$with,
             'params'=>[$userId],
