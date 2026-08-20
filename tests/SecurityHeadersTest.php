@@ -101,7 +101,7 @@ final class SecurityHeadersTest
                 }
             }
         }
-        $this->same(6, $inline, 'all six application inline script blocks are inventoried');
+        $this->same(8, $inline, 'all eight application inline script blocks are inventoried');
         $this->same($inline, $protected, 'every inline script block uses the nonce helper');
         $this->same(0, $inline - $protected, 'no unprotected inline script remains');
     }

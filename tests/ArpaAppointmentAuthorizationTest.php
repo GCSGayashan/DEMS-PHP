@@ -50,15 +50,18 @@ final class ArpaAppointmentAuthorizationTest
             $districtStmt=$this->pdo->prepare("WITH RECURSIVE parents(id) AS (SELECT ? UNION DISTINCT SELECT lr.parent_location_id FROM location_relationship lr JOIN parents p ON p.id=lr.child_location_id WHERE lr.active=1 AND lr.approval_status='APPROVED') SELECT l.id FROM parents p JOIN location l ON l.id=p.id JOIN location_type t ON t.id=l.location_type_id WHERE t.system_key='DISTRICT' LIMIT 1");$districtStmt->execute([$asc]);$district=(string)$districtStmt->fetchColumn();
             if($asc===''||$district==='')throw new RuntimeException('ASC and District fixtures are required.');
             $ascUser='00000000-0000-4000-8000-000000000201';$districtUser='00000000-0000-4000-8000-000000000202';$nationalUser='00000000-0000-4000-8000-000000000203';
+            $ascRole='00000000-0000-4000-8000-000000000211';$districtRole='00000000-0000-4000-8000-000000000212';$nationalRole='00000000-0000-4000-8000-000000000213';
             $this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,account_status,enabled) VALUES(?,'STAFF',?,'ACTIVE',1),(?,'STAFF',?,'ACTIVE',1),(?,'STAFF',?,'ACTIVE',1)")->execute([$ascUser,'scope-asc-test',$districtUser,'scope-district-test',$nationalUser,'scope-national-test']);
-            $scope=$this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,scope_type,scope_mode,location_id,effective_from,approval_status,active) VALUES(UUID(),?,?,?,?,CURRENT_DATE(),'APPROVED',1)");
-            $scope->execute([$ascUser,'ASC','EXACT',$asc]);$scope->execute([$districtUser,'DISTRICT','INCLUDE_CHILDREN',$district]);
+            $role=$this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active) SELECT ?,?,id,CURRENT_DATE(),'APPROVED',1 FROM application_role WHERE role_code=?");
+            $role->execute([$ascRole,$ascUser,'ASC_SUBJECT_OFFICER']);$role->execute([$districtRole,$districtUser,'DISTRICT_SUBJECT_OFFICER']);$role->execute([$nationalRole,$nationalUser,'NATIONAL_SUBJECT_OFFICER']);
+            $scope=$this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active) VALUES(UUID(),?,?,?,?,?,CURRENT_DATE(),'APPROVED',1)");
+            $scope->execute([$ascUser,$ascRole,'ASC','EXACT',$asc]);$scope->execute([$districtUser,$districtRole,'DISTRICT','INCLUDE_CHILDREN',$district]);
             $this->same(true,ScopeService::canAccessArpaStage($ascUser,'ASC',$asc),'ASC scope permits its ASC stage');
             $this->same(false,ScopeService::canAccessArpaStage($ascUser,'DISTRICT',$asc),'ASC scope cannot perform District stage');
             $this->same(true,ScopeService::canAccessArpaStage($districtUser,'DISTRICT',$asc),'District scope permits child ASC');
             $this->same(false,ScopeService::canAccessArpaStage($districtUser,'NATIONAL',$asc),'District scope cannot perform National stage');
             $this->same(false,ScopeService::canAccessArpaStage($nationalUser,'NATIONAL',$asc),'National role identity without NATIONAL scope is denied');
-            $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,scope_type,scope_mode,location_id,effective_from,approval_status,active) VALUES(UUID(),?,'NATIONAL','NATIONAL',NULL,CURRENT_DATE(),'APPROVED',1)")->execute([$nationalUser]);
+            $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active) VALUES(UUID(),?,?,'NATIONAL','NATIONAL',NULL,CURRENT_DATE(),'APPROVED',1)")->execute([$nationalUser,$nationalRole]);
             $this->same(true,ScopeService::canAccessArpaStage($nationalUser,'NATIONAL',$asc),'NATIONAL scope permits National stage');
         }finally{$this->pdo->rollBack();}
     }

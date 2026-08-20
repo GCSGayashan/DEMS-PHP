@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-use App\Core\{DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
-use App\Services\ScopedDashboardService;
+use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
+use App\Services\{ScopedDashboardService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -11,7 +11,7 @@ final class ScopedDashboardOrganizationTest
     private PDO $pdo;private int $assertions=0;private string $userId;private string $ascId;
     public function run():int
     {
-        $this->pdo=Database::pdo();$s=$this->pdo->query("SELECT su.id user_id,uas.location_id FROM system_user su JOIN user_account_scope uas ON uas.user_id=su.id WHERE su.username='asctest' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.scope_type='ASC' AND uas.scope_mode='EXACT'");$fixture=$s->fetch();if(!$fixture)throw new RuntimeException('The asctest ASC/EXACT verification fixture is unavailable.');$this->userId=$fixture['user_id'];$this->ascId=$fixture['location_id'];$_SESSION=['user_id'=>$this->userId];
+        $this->pdo=Database::pdo();$s=$this->pdo->query("SELECT su.id user_id,uar.id role_assignment_id,uas.id scope_assignment_id,uas.location_id FROM system_user su JOIN user_account_role uar ON uar.user_id=su.id JOIN application_role r ON r.id=uar.role_id AND r.role_code='ASC_SUBJECT_OFFICER' JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id JOIN location l ON l.id=uas.location_id AND l.dad_number='70004-0000389' WHERE su.username='asctest' AND uar.active=1 AND uar.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.scope_type='ASC' AND uas.scope_mode='EXACT'");$fixture=$s->fetch();if(!$fixture)throw new RuntimeException('The asctest ASC Subject Officer context fixture is unavailable.');$this->userId=$fixture['user_id'];$this->ascId=$fixture['location_id'];$_SESSION=['user_id'=>$this->userId,'authenticated_at'=>time(),'last_activity_at'=>time()];(new UserContextService($this->pdo))->select($this->userId,(string)$fixture['role_assignment_id'],(string)$fixture['scope_assignment_id']);Auth::forgetRequestCache();
         $this->scopeProjection();$this->dashboard();$this->organizationDataTable();$this->roleBoundaries();$this->uiContract();
         echo "ScopedDashboardOrganizationTest: {$this->assertions} assertions passed.\n";return 0;
     }
@@ -38,7 +38,7 @@ final class ScopedDashboardOrganizationTest
     private function roleBoundaries():void
     {
         $roles=['ASC_SUBJECT_OFFICER','ASC_ADMIN','ASC_VIEWER','DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN','DISTRICT_VIEWER','NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN','NATIONAL_VIEWER'];$placeholders=implode(',',array_fill(0,count($roles),'?'));$s=$this->pdo->prepare("SELECT COUNT(DISTINCT r.role_code) FROM application_role r JOIN application_role_permission rp ON rp.role_id=r.id JOIN application_permission p ON p.id=rp.permission_id WHERE r.role_code IN ({$placeholders}) AND p.permission_key='location.view'");$s->execute($roles);$this->same(9,(int)$s->fetchColumn(),'all established scoped roles have Organization read permission');
-        $role=$this->pdo->query("SELECT r.role_code FROM system_user su JOIN user_account_role uar ON uar.user_id=su.id JOIN application_role r ON r.id=uar.role_id WHERE su.username='asctest' AND uar.active=1")->fetchColumn();$this->same('ASC_SUBJECT_OFFICER',$role,'asctest role unchanged');
+        $role=$this->pdo->query("SELECT COUNT(*) FROM system_user su JOIN user_account_role uar ON uar.user_id=su.id JOIN application_role r ON r.id=uar.role_id WHERE su.username='asctest' AND uar.active=1 AND r.role_code='ASC_SUBJECT_OFFICER'")->fetchColumn();$this->same(1,(int)$role,'asctest ASC Subject Officer assignment remains available');
     }
     private function uiContract():void
     {

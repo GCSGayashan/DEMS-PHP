@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Core\Auth;
 use App\Core\ScopeService;
 use PDO;
 
@@ -57,8 +58,8 @@ final class ArpaWorkflowQueuePolicy
         if($profiles===[])return ['with'=>'','params'=>[],'where'=>'1=0','profiles'=>[]];
         $system=ScopeService::scopeProfile($userId)['level']==='SYSTEM';
         $scoped=array_values(array_filter($profiles,fn(array $p):bool=>!$system&&$p['stage']!=='NATIONAL'));
-        $with=$scoped===[]?'':ScopeService::arpaWorkflowScopeCte();
-        $params=$scoped===[]?[]:[$userId];$clauses=[];
+        $with=$scoped===[]?'':ScopeService::arpaWorkflowScopeCte($userId);
+        $params=$scoped===[]?[]:ScopeService::arpaWorkflowScopeParams($userId);$clauses=[];
         foreach($profiles as $profile){
             $scope=($system||$profile['stage']==='NATIONAL')?'1=1':"EXISTS(SELECT 1 FROM workflow_scope_locations wsl WHERE wsl.stage='{$profile['stage']}' AND wsl.id={$alias}.asc_location_id)";
             $statuses=$profile['stage']==='ASC'&&$profile['action']==='VERIFY'?"{$alias}.workflow_status IN('SUBMITTED','RETURNED')":"{$alias}.workflow_status='{$profile['status']}'";
@@ -74,8 +75,8 @@ final class ArpaWorkflowQueuePolicy
         if($profiles===[])return ['with'=>'','params'=>[],'where'=>'1=0','profiles'=>[]];
         $system=ScopeService::scopeProfile($userId)['level']==='SYSTEM';
         $scoped=array_values(array_filter($profiles,fn(array $p):bool=>!$system&&$p['stage']!=='NATIONAL'));
-        $with=$scoped===[]?'':ScopeService::arpaWorkflowScopeCte();
-        $params=$scoped===[]?[]:[$userId];$clauses=[];
+        $with=$scoped===[]?'':ScopeService::arpaWorkflowScopeCte($userId);
+        $params=$scoped===[]?[]:ScopeService::arpaWorkflowScopeParams($userId);$clauses=[];
         foreach($profiles as $profile){
             $scope=($system||$profile['stage']==='NATIONAL')?'1=1':"EXISTS(SELECT 1 FROM workflow_scope_locations wsl WHERE wsl.stage='{$profile['stage']}' AND wsl.id={$requestAlias}.asc_location_id)";
             $cycle="{$eventAlias}.id>COALESCE((SELECT MAX(boundary.id) FROM arpa_appointment_workflow_action boundary WHERE boundary.request_id={$requestAlias}.id AND boundary.action IN('RETURN_FOR_CORRECTION','REJECT')),0)";
@@ -98,6 +99,10 @@ final class ArpaWorkflowQueuePolicy
     /** @return array<string,true> */
     private function permissions(string $userId): array
     {
+        if(Auth::activeContextForUser($userId)!==null){
+            return array_fill_keys(Auth::permissions(),true);
+        }
+        if(Auth::isCurrentUser($userId))return [];
         $stmt=$this->pdo->prepare("SELECT DISTINCT p.permission_key FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN application_role_permission rp ON rp.role_id=r.id JOIN application_permission p ON p.id=rp.permission_id WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND p.active=1");
         $stmt->execute([$userId]);return array_fill_keys($stmt->fetchAll(PDO::FETCH_COLUMN),true);
     }

@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
-use App\Services\{ArpaAppointmentReadService,ScopedDashboardService};
+use App\Services\{ArpaAppointmentReadService,ScopedDashboardService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -14,7 +14,7 @@ final class ArpaAppointmentOperationalViewsTest
     {
         $this->pdo=Database::pdo();$before=$this->state();
         $this->actor=(string)$this->pdo->query("SELECT su.id FROM system_user su JOIN user_account_role ur ON ur.user_id=su.id JOIN application_role r ON r.id=ur.role_id WHERE r.role_code='SYSTEM_ADMIN' LIMIT 1")->fetchColumn();
-        if($this->actor==='')throw new RuntimeException('SYSTEM_ADMIN fixture required.');$_SESSION=['user_id'=>$this->actor];
+        if($this->actor==='')throw new RuntimeException('SYSTEM_ADMIN fixture required.');$this->activateContext($this->actor,'SYSTEM_ADMIN');
         $this->staticRuleCoverage();$this->transactionalReadModels();
         $this->same($before,$this->state(),'operational-view tests leave all appointment and safety state unchanged');
         echo "ArpaAppointmentOperationalViewsTest: {$this->assertions} assertions passed.\n";return 0;
@@ -288,7 +288,7 @@ final class ArpaAppointmentOperationalViewsTest
         $previousSession=$_SESSION;
         $districtUser=$this->districtUser();
 
-        $_SESSION=['user_id'=>$districtUser];
+        $this->activateContext($districtUser,null,'DISTRICT');
 
         try{
             $scopedAscs=ScopeService::scopedLocations($districtUser,'ASC');
@@ -443,26 +443,29 @@ final class ArpaAppointmentOperationalViewsTest
                 }
             }
         }finally{
-            $_SESSION=$previousSession;
+            $_SESSION=$previousSession;Auth::forgetRequestCache();
         }
     }
     private function nationalSummaryReadModels():void
     {
         $previousSession=$_SESSION;
 
-        $nationalCreator=$this->temporaryNationalUser('ASC_SUBJECT_OFFICER');
         $nationalSubject=$this->temporaryNationalUser('NATIONAL_SUBJECT_OFFICER');
         $nationalAdmin=$this->temporaryNationalUser('NATIONAL_ADMIN');
 
         try{
+            $this->activateContext($nationalSubject,null,'NATIONAL');
+            $nationalNew=DataTableRegistry::definition(
+                'arpa-new-appointments-district-summary'
+            );
+            $this->same(
+                false,
+                !isset($nationalNew['authorize'])
+                || ($nationalNew['authorize'])(),
+                'National context cannot borrow the ASC create permission for New Appointments'
+            );
+
             $pages=[
-                [
-                    'name'=>'New Appointments',
-                    'user'=>$nationalCreator,
-                    'district_summary'=>'arpa-new-appointments-district-summary',
-                    'asc_summary'=>'arpa-new-appointments-summary',
-                    'detail'=>'arpa-new-appointments',
-                ],
                 [
                     'name'=>'Submitted Appointments',
                     'user'=>$nationalSubject,
@@ -494,7 +497,7 @@ final class ArpaAppointmentOperationalViewsTest
             ];
 
             foreach($pages as $page){
-                $_SESSION=['user_id'=>$page['user']];
+                $this->activateContext((string)$page['user'],null,'NATIONAL');
 
                 $profile=ScopeService::scopeProfile($page['user']);
 
@@ -768,7 +771,7 @@ final class ArpaAppointmentOperationalViewsTest
                 }
             }
         }finally{
-            $_SESSION=$previousSession;
+            $_SESSION=$previousSession;Auth::forgetRequestCache();
         }
     }
 
@@ -780,6 +783,7 @@ final class ArpaAppointmentOperationalViewsTest
             '-'.
             substr($id,0,6);
 
+        $roleAssignmentId=$this->uuid();
         $this->pdo->prepare(
             "INSERT INTO system_user(
                 id,
@@ -787,9 +791,10 @@ final class ArpaAppointmentOperationalViewsTest
                 username,
                 display_name,
                 account_status,
+                approval_status,
                 enabled
              )
-             VALUES(?,'STAFF',?,?,'ACTIVE',1)"
+             VALUES(?,'STAFF',?,?,'ACTIVE','APPROVED',1)"
         )->execute([
             $id,
             $username,
@@ -823,7 +828,7 @@ final class ArpaAppointmentOperationalViewsTest
                 approved_at
              )
              VALUES(
-                UUID(),
+                ?,
                 ?,
                 ?,
                 CURRENT_DATE(),
@@ -835,6 +840,7 @@ final class ArpaAppointmentOperationalViewsTest
                 NOW()
              )"
         )->execute([
+            $roleAssignmentId,
             $id,
             $roleId,
             $this->actor,
@@ -845,6 +851,7 @@ final class ArpaAppointmentOperationalViewsTest
             "INSERT INTO user_account_scope(
                 id,
                 user_id,
+                role_assignment_id,
                 scope_type,
                 scope_mode,
                 location_id,
@@ -859,6 +866,7 @@ final class ArpaAppointmentOperationalViewsTest
              VALUES(
                 UUID(),
                 ?,
+                ?,
                 'NATIONAL',
                 'NATIONAL',
                 NULL,
@@ -872,6 +880,7 @@ final class ArpaAppointmentOperationalViewsTest
              )"
         )->execute([
             $id,
+            $roleAssignmentId,
             $this->actor,
             $this->actor,
         ]);
@@ -952,6 +961,14 @@ final class ArpaAppointmentOperationalViewsTest
         }
 
         throw new RuntimeException('Active District-scope user fixture required.');
+    }
+    private function activateContext(string $userId,?string $roleCode=null,?string $roleLevel=null):void
+    {
+        $_SESSION=['user_id'=>$userId,'authenticated_at'=>time(),'last_activity_at'=>time()];Auth::forgetRequestCache();
+        $contexts=(new UserContextService($this->pdo))->availableContexts($userId);
+        $context=array_values(array_filter($contexts,static fn(array $row):bool=>($roleCode===null||$row['role_code']===$roleCode)&&($roleLevel===null||$row['role_level']===$roleLevel)))[0]??null;
+        if(!$context)throw new RuntimeException('Required working context fixture is unavailable.');
+        (new UserContextService($this->pdo))->select($userId,(string)$context['role_assignment_id'],$context['scope_assignment_id']===null?null:(string)$context['scope_assignment_id']);Auth::forgetRequestCache();
     }
     private function rawIssues():array{return $this->pdo->query('SELECT DISTINCT issue_type FROM '.ArpaAppointmentReadService::issueSource().' q')->fetchAll(PDO::FETCH_COLUMN);}
     private function state():array{return ['requests'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment_request')->fetchColumn(),'appointments'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment')->fetchColumn(),'closures'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment_closure')->fetchColumn(),'subjects'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_subject_assignment')->fetchColumn(),'offices'=>(int)$this->pdo->query('SELECT COUNT(*) FROM officer_office_assignment')->fetchColumn(),'decisions'=>(int)$this->pdo->query("SELECT COUNT(*) FROM legacy_arpa_appointment_resolution WHERE resolution_status='CONFIRMED'")->fetchColumn(),'roles'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_role')->fetchColumn(),'scopes'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_scope')->fetchColumn()];}

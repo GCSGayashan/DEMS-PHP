@@ -2,8 +2,8 @@
 declare(strict_types=1);
 
 use App\Controllers\ArpaAppointmentController;
-use App\Core\{DataTableQuery,DataTableRegistry,DataTableRequest,Database};
-use App\Services\{ArpaAppointmentReadService,ArpaAppointmentService,ArpaWorkflowQueuePolicy,ScopedDashboardService};
+use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database};
+use App\Services\{ArpaAppointmentReadService,ArpaAppointmentService,ArpaWorkflowQueuePolicy,ScopedDashboardService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -16,7 +16,7 @@ final class ArpaWorkflowQueueTest
         $this->pdo=Database::pdo();$before=$this->state();
         $this->asctest=(string)$this->pdo->query("SELECT id FROM system_user WHERE username='asctest' AND enabled=1 AND account_status='ACTIVE'")->fetchColumn();
         if($this->asctest==='')throw new RuntimeException('Operational asctest fixture is required.');
-        $_SESSION=['user_id'=>$this->asctest];$this->layoutTest();$this->workflowTest();
+        $context=$this->pdo->query("SELECT uar.id role_assignment_id,uas.id scope_assignment_id FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id AND r.role_code='ASC_SUBJECT_OFFICER' JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id JOIN location l ON l.id=uas.location_id AND l.dad_number='70004-0000389' WHERE uar.user_id='{$this->asctest}' AND uar.active=1 AND uar.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' LIMIT 1")->fetch();if(!$context)throw new RuntimeException('asctest ASC Subject Officer context is required.');$_SESSION=['user_id'=>$this->asctest,'authenticated_at'=>time(),'last_activity_at'=>time()];(new UserContextService($this->pdo))->select($this->asctest,(string)$context['role_assignment_id'],(string)$context['scope_assignment_id']);Auth::forgetRequestCache();$this->layoutTest();$this->workflowTest();
         $this->same($before,$this->state(),'workflow queue test leaves migrated, native, role, scope, and audit state unchanged');
         echo "ArpaWorkflowQueueTest: {$this->assertions} assertions passed.\n";return 0;
     }
@@ -167,7 +167,8 @@ final class ArpaWorkflowQueueTest
 
     private function scope(string $user,string $type,string $mode,?string $location):void
     {
-        $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(UUID(),?,?,?,?,CURRENT_DATE(),'APPROVED',1,'Workflow queue test',?,?,NOW())")->execute([$user,$type,$mode,$location,$this->asctest,$this->asctest]);
+        $assignmentId=(string)$this->scalar('SELECT id FROM user_account_role WHERE user_id=? ORDER BY created_at DESC LIMIT 1',[$user]);
+        $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(UUID(),?,?,?,?,?,CURRENT_DATE(),'APPROVED',1,'Workflow queue test',?,?,NOW())")->execute([$user,$assignmentId,$type,$mode,$location,$this->asctest,$this->asctest]);
     }
 
     private function inbox(string $user,string $request):int

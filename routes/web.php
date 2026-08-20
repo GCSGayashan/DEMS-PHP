@@ -1,11 +1,13 @@
 <?php
-use App\Controllers\{AuthController,DashboardController,LocationController,OfficeController,HrMasterController,OfficerController,ArpaAppointmentController,LegacyArpaReconciliationController,LegacyArpaAppointmentPreviewController,SubjectController,UserManagementController,ModuleController,DataTableController};
+use App\Controllers\{AuthController,DashboardController,LocationController,OfficeController,HrMasterController,OfficerController,ArpaAppointmentController,LegacyArpaReconciliationController,LegacyArpaAppointmentPreviewController,SubjectController,UserManagementController,UserContextController,ModuleController,DataTableController};
 use App\Core\Auth;
 
 $router->get('/', [DashboardController::class, 'index']);
 $router->get('/login', [AuthController::class, 'login']);
 $router->post('/login', [AuthController::class, 'authenticate']);
 $router->post('/logout', [AuthController::class, 'logout']);
+$router->get('/select-context', [UserContextController::class, 'select']);
+$router->post('/select-context', [UserContextController::class, 'activate']);
 $router->get('/account/change-password', [AuthController::class, 'changePassword']);
 $router->post('/account/change-password', [AuthController::class, 'updatePassword']);
 $router->get('/dashboard', [DashboardController::class, 'index']);
@@ -133,9 +135,12 @@ $router->post('/access-management/roles/{id}/submit', [UserManagementController:
 $router->post('/access-management/roles/{id}/approve', [UserManagementController::class, 'approveRole']);
 $router->get('/access-management/permissions', [UserManagementController::class, 'permissions']);
 $router->get('/access-management/role-assignments', [UserManagementController::class, 'roleAssignments']);
+$router->get('/access-management/assignment-locations', [UserManagementController::class, 'assignmentLocations']);
 $router->post('/access-management/role-assignments', [UserManagementController::class, 'assignRole']);
 $router->post('/access-management/role-assignments/{id}/submit', [UserManagementController::class, 'submitRoleAssignment']);
 $router->post('/access-management/role-assignments/{id}/approve', [UserManagementController::class, 'approveRoleAssignment']);
+$router->get('/access-management/role-assignments/{id}/end', [UserManagementController::class, 'endRoleAssignmentForm']);
+$router->post('/access-management/role-assignments/{id}/end', [UserManagementController::class, 'endRoleAssignment']);
 $router->get('/access-management/scope-assignments', [UserManagementController::class, 'scopes']);
 $router->post('/access-management/scope-assignments', [UserManagementController::class, 'assignScope']);
 $router->post('/access-management/scope-assignments/{id}/submit', [UserManagementController::class, 'submitScope']);

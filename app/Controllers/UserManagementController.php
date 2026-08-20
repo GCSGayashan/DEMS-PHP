@@ -3,7 +3,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,CredentialService,Database,Csrf,Audit,DataTableRegistry};
-use App\Services\OperationalUserActivationService;
+use App\Services\{OperationalUserActivationService,UserAccessManagementService};
 use DomainException;
 use Throwable;
 
@@ -35,8 +35,9 @@ final class UserManagementController extends Controller
         $this->requireActivationPermissions();$pdo=Database::pdo();
         $stmt=$pdo->prepare("SELECT su.*,lur.id legacy_reference_id,lur.legacy_user_id,lur.legacy_username,lur.legacy_display_name,lur.legacy_nic,lur.legacy_role_name,lur.legacy_user_level_name,lur.legacy_status,(SELECT COUNT(*) FROM legacy_arpa_appointment_preview p WHERE JSON_SEARCH(p.workflow_json,'one',lur.legacy_user_id) IS NOT NULL) workflow_activity_count FROM system_user su JOIN legacy_user_reference lur ON lur.system_user_id=su.id WHERE su.id=? AND su.historical_identity=1");$stmt->execute([$id]);$identity=$stmt->fetch();if(!$identity){http_response_code(404);exit('Historical identity not found.');}
         $stmt=$pdo->prepare("SELECT c.*,l.dad_number,l.name_en,t.system_key location_type FROM legacy_user_organization_context c LEFT JOIN location l ON l.id=c.location_id LEFT JOIN location_type t ON t.id=l.location_type_id WHERE c.legacy_user_reference_id=? ORDER BY c.legacy_level_key,l.name_en");$stmt->execute([$identity['legacy_reference_id']]);$legacyContexts=$stmt->fetchAll();
-        $roles=$pdo->query("SELECT role_code,role_name,role_level FROM application_role WHERE role_code IN ('ASC_SUBJECT_OFFICER','ASC_ADMIN','ASC_VIEWER','DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN','DISTRICT_VIEWER','NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN','NATIONAL_VIEWER') AND active=1 AND assignable=1 AND approval_status='APPROVED' ORDER BY FIELD(role_level,'ASC','DISTRICT','NATIONAL'),role_name")->fetchAll();
-        $locations=$pdo->query("SELECT l.id,l.dad_number,l.name_en,t.system_key location_type FROM location l JOIN location_type t ON t.id=l.location_type_id WHERE t.system_key IN('ASC','DISTRICT') AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' ORDER BY t.system_key,l.name_en")->fetchAll();
+        $policy=$this->managementPolicy();$this->authorize(fn()=>$policy->assertCanManageUser((string)Auth::user()['id'],$id));
+        $roles=array_values(array_filter($policy->manageableRoles((string)Auth::user()['id']),fn($role)=>in_array($role['role_code'],OperationalUserActivationService::ROLE_CODES,true)));
+        $locations=$policy->manageableLocations((string)Auth::user()['id']);
         $this->render('users/activate_historical',compact('identity','legacyContexts','roles','locations'));
     }
 
@@ -57,12 +58,13 @@ final class UserManagementController extends Controller
 
     public function deactivateForm(string $id):void
     {
-        Auth::requirePermission('user.block');$stmt=Database::pdo()->prepare("SELECT id,username,display_name,email,identity_type,account_status,enabled FROM system_user WHERE id=? AND identity_type='STAFF'");$stmt->execute([$id]);$identity=$stmt->fetch();if(!$identity){http_response_code(404);exit('Operational user not found.');}$this->render('users/deactivate_user',compact('identity'));
+        Auth::requirePermission('user.block');$this->authorize(fn()=>$this->managementPolicy()->assertCanManageUser((string)Auth::user()['id'],$id));$stmt=Database::pdo()->prepare("SELECT id,username,display_name,email,identity_type,account_status,enabled FROM system_user WHERE id=? AND identity_type='STAFF'");$stmt->execute([$id]);$identity=$stmt->fetch();if(!$identity){http_response_code(404);exit('Operational user not found.');}$this->render('users/deactivate_user',compact('identity'));
     }
 
     public function resetPasswordForm(string $id):void
     {
         Auth::requirePermission('user.reset-password');
+        $this->authorize(fn()=>$this->managementPolicy()->assertCanManageUser((string)Auth::user()['id'],$id));
         $user=$this->passwordResetTarget($id);
         if(!$user){http_response_code(404);exit('Operational user not found.');}
         $this->render('users/reset_password',compact('user'));
@@ -72,6 +74,7 @@ final class UserManagementController extends Controller
     {
         Auth::requirePermission('user.reset-password');
         Csrf::validate();
+        $this->authorize(fn()=>$this->managementPolicy()->assertCanManageUser((string)Auth::user()['id'],$id));
         try{
             CredentialService::resetUserPassword(
                 Database::pdo(),$id,
@@ -186,64 +189,101 @@ final class UserManagementController extends Controller
     public function roleAssignments(): void
     {
         Auth::requirePermission('user.assign-role');
-        $pdo=Database::pdo();
-        $users=$pdo->query("SELECT id,username FROM `system_user` WHERE enabled=1 ORDER BY username LIMIT 1000")->fetchAll();
-        $roles=$pdo->query("SELECT id,role_code,role_name,role_level FROM application_role WHERE active=1 AND assignable=1 AND approval_status='APPROVED' ORDER BY role_level,role_name")->fetchAll();
-        $roleOptions=[]; foreach($pdo->query('SELECT id,role_name,role_code FROM application_role ORDER BY role_name')->fetchAll() as $role){$roleOptions[$role['id']]=$role['role_name'].' ('.$role['role_code'].')';}
+        $pdo=Database::pdo();$policy=$this->managementPolicy();$actor=(string)Auth::user()['id'];
+        $users=$policy->manageableUsers($actor);
+        $roles=$policy->manageableRoles($actor);
+        $roleOptions=[]; foreach($roles as $role){$roleOptions[$role['id']]=$role['role_name'].' ('.$role['role_code'].')';}
+        $roleGroups=[];$assignmentIds=$policy->manageableRoleAssignmentIds($actor);
+        if($assignmentIds!==[]){$placeholders=implode(',',array_fill(0,count($assignmentIds),'?'));$stmt=$pdo->prepare("SELECT uar.id,su.username,su.display_name,r.role_code,r.role_name,r.role_level,uar.effective_from,uar.effective_to,uar.active,uar.approval_status,GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') assigned_location FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id WHERE uar.id IN ({$placeholders}) GROUP BY uar.id,su.username,su.display_name,r.role_code,r.role_name,r.role_level,uar.effective_from,uar.effective_to,uar.active,uar.approval_status ORDER BY r.role_level,r.role_name,su.username");$stmt->execute($assignmentIds);foreach($stmt->fetchAll() as $assignment){$key=(string)$assignment['role_code'];$roleGroups[$key]['role_name']=$assignment['role_name'];$roleGroups[$key]['role_level']=$assignment['role_level'];$roleGroups[$key]['assignments'][]=$assignment;}}
+        $replacement=null;if(!empty($_GET['replace'])){$replaceId=(string)$_GET['replace'];$this->authorize(fn()=>$policy->assertCanManageRoleAssignment($actor,$replaceId));$stmt=$pdo->prepare('SELECT uar.id,uar.user_id,su.username,su.display_name,r.role_name,r.role_code,uar.effective_from FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.id=?');$stmt->execute([$replaceId]);$replacement=$stmt->fetch()?:null;}
         $dataTable=DataTableRegistry::viewModel('role-assignments',[],['role'=>$roleOptions]);
-        $this->render('users/role_assignments',compact('dataTable','users','roles'));
+        $this->render('users/role_assignments',compact('dataTable','users','roles','roleGroups','replacement'));
     }
 
     public function assignRole(): void
     {
         Auth::requirePermission('user.assign-role'); Csrf::validate();
-        $stmt=Database::pdo()->prepare("INSERT INTO user_account_role (id,user_id,role_id,effective_from,effective_to,approval_status,active,created_by,created_at) VALUES(UUID(),?,?,?,?, 'DRAFT',0,?,NOW())");
-        $stmt->execute([$_POST['user_id'],$_POST['role_id'],$_POST['effective_from']?:date('Y-m-d'),($_POST['effective_to']??'')?:null,Auth::user()['id']]);
-        Audit::record('user.role.assign','USER_ROLE',null,['user_id'=>$_POST['user_id'],'role_id'=>$_POST['role_id']]);
-        $this->flash('success','Role assignment draft created.'); redirect('/access-management/role-assignments');
+        try{
+            $id=$this->managementPolicy()->createDraftAssignment(
+                (string)Auth::user()['id'],(string)($_POST['user_id']??''),(string)($_POST['role_id']??''),
+                isset($_POST['location_id'])?(string)$_POST['location_id']:null,
+                (string)(($_POST['effective_from']??'')?:date('Y-m-d')),
+                isset($_POST['effective_to'])?(string)$_POST['effective_to']:null,
+                (string)($_POST['reason']??''),isset($_POST['official_reference'])?(string)$_POST['official_reference']:null,
+                isset($_POST['replaces_assignment_id'])?(string)$_POST['replaces_assignment_id']:null
+            );
+            Audit::record('user.role.assign','USER_ROLE',$id,['user_id'=>$_POST['user_id']??null,'role_id'=>$_POST['role_id']??null]);
+            $this->flash('success','Role and matching scope assignment draft created.');
+        }catch(DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/access-management/role-assignments');
     }
 
     public function submitRoleAssignment(string $id): void
     {
         Auth::requirePermission('user.assign-role'); Csrf::validate();
-        Database::pdo()->prepare("UPDATE user_account_role SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND created_by=? AND approval_status='DRAFT'")->execute([Auth::user()['id'],$id,Auth::user()['id']]);
+        try{$this->managementPolicy()->submitAssignment((string)Auth::user()['id'],$id);}catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments');}
         Audit::record('user.role.submit','USER_ROLE',$id); redirect('/access-management/role-assignments');
     }
 
     public function approveRoleAssignment(string $id): void
     {
-        Auth::requirePermission('user.assign-role'); Csrf::validate(); $pdo=Database::pdo();
-        $stmt=$pdo->prepare('SELECT created_by,approval_status FROM user_account_role WHERE id=?');$stmt->execute([$id]);$row=$stmt->fetch();
-        if(!$row||$row['approval_status']!=='SUBMITTED'){ $this->flash('danger','Only submitted role assignments can be approved.'); redirect('/access-management/role-assignments'); }
-        if((string)$row['created_by']===(string)Auth::user()['id']){ $this->flash('danger','Maker cannot approve their own role assignment.'); redirect('/access-management/role-assignments'); }
-        $pdo->prepare("UPDATE user_account_role SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
+        Auth::requirePermission('user.assign-role'); Csrf::validate();try{$this->managementPolicy()->approveAssignment((string)Auth::user()['id'],$id);}catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments');}
         Audit::record('user.role.approve','USER_ROLE',$id); $this->flash('success','Role assignment approved.'); redirect('/access-management/role-assignments');
+    }
+
+    public function endRoleAssignmentForm(string $id):void
+    {
+        Auth::requirePermission('user.revoke-role');$this->authorize(fn()=>$this->managementPolicy()->assertCanManageRoleAssignment((string)Auth::user()['id'],$id));$stmt=Database::pdo()->prepare('SELECT uar.id,uar.effective_from,uar.effective_to,su.username,su.display_name,r.role_name,r.role_code FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.id=?');$stmt->execute([$id]);$assignment=$stmt->fetch();if(!$assignment){http_response_code(404);exit('Role assignment not found.');}$this->render('users/end_role_assignment',compact('assignment'));
+    }
+
+    public function endRoleAssignment(string $id):void
+    {
+        Auth::requirePermission('user.revoke-role');Csrf::validate();try{$this->managementPolicy()->endAssignment((string)Auth::user()['id'],$id,(string)($_POST['effective_to']??''),(string)($_POST['reason']??''),isset($_POST['official_reference'])?(string)$_POST['official_reference']:null);$this->flash('success','Assignment ended. Its history has been preserved.');}catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments/'.$id.'/end');}redirect('/access-management/role-assignments');
     }
 
     public function scopes(): void
     {
         Auth::requirePermission('user.assign-scope');
-        $pdo=Database::pdo();
-        $roleAssignments=$pdo->query("SELECT uar.id,su.username,r.role_name,r.role_code,r.role_level,uar.user_id FROM user_account_role uar JOIN `system_user` su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.active=1 AND uar.approval_status='APPROVED' AND r.role_level<>'FARMER' ORDER BY su.username,r.role_name")->fetchAll();
-        $locations=$pdo->query("SELECT l.id,l.dad_number,l.name_en,lt.system_key type_key FROM location l JOIN location_type lt ON lt.id=l.location_type_id WHERE l.approval_status='APPROVED' ORDER BY l.name_en LIMIT 2000")->fetchAll();
+        $pdo=Database::pdo();$policy=$this->managementPolicy();$actor=(string)Auth::user()['id'];
+        $manageable=array_flip($policy->manageableRoleAssignmentIds($actor));
+        $roleAssignments=array_values(array_filter($pdo->query("SELECT uar.id,uar.role_id,su.username,r.role_name,r.role_code,r.role_level,uar.user_id FROM user_account_role uar JOIN `system_user` su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.active=1 AND uar.approval_status='APPROVED' AND r.role_level<>'FARMER' ORDER BY su.username,r.role_name")->fetchAll(),fn($row)=>isset($manageable[$row['id']])));
         $scopeOptions=['scope_type'=>$this->distinctOptions('SELECT DISTINCT scope_type value FROM user_account_scope ORDER BY scope_type')];
         $dataTable=DataTableRegistry::viewModel('scope-assignments',[],$scopeOptions);
-        $this->render('users/scope_assignments',compact('dataTable','roleAssignments','locations'));
+        $this->render('users/scope_assignments',compact('dataTable','roleAssignments'));
+    }
+
+    public function assignmentLocations():void
+    {
+        Auth::requirePermission('user.assign-scope');
+        try {
+            $results=$this->managementPolicy()->searchAssignableLocations(
+                (string)Auth::user()['id'],
+                (string)($_GET['role_id']??''),
+                (string)($_GET['q']??''),
+                (int)($_GET['limit']??100)
+            );
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['results'=>$results],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE);
+        } catch (DomainException) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error'=>'The selected role or location is outside your authority.'],JSON_THROW_ON_ERROR);
+        }
+        exit;
     }
 
     public function assignScope(): void
     {
         Auth::requirePermission('user.assign-scope'); Csrf::validate(); $pdo=Database::pdo();
-        $stmt=$pdo->prepare("SELECT uar.user_id,r.role_level FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.id=? AND uar.active=1 AND uar.approval_status='APPROVED'");
+        $stmt=$pdo->prepare("SELECT uar.user_id,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to,r.role_level FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.id=? AND uar.active=1 AND uar.approval_status='APPROVED'");
         $stmt->execute([$_POST['role_assignment_id']??'']); $assignment=$stmt->fetch();
         if(!$assignment){$this->flash('danger','Select an approved active role assignment.');redirect('/access-management/scope-assignments');}
-        $type=$_POST['scope_type']??'NATIONAL'; $level=$assignment['role_level'];
-        $expected=['SYSTEM'=>'NATIONAL','NATIONAL'=>'NATIONAL','DISTRICT'=>'DISTRICT','ASC'=>'ASC','ARPA'=>'ARPA_DIVISION'];
-        if(isset($expected[$level]) && $expected[$level]!==$type){$this->flash('danger',"Role level {$level} requires {$expected[$level]} scope.");redirect('/access-management/scope-assignments');}
-        $location=($type==='NATIONAL')?null:(($_POST['location_id']??'')?:null);
-        if($type!=='NATIONAL' && !$location){$this->flash('danger','A location target is required for this scope.');redirect('/access-management/scope-assignments');}
-        $stmt=$pdo->prepare("INSERT INTO user_account_scope (id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,effective_to,approval_status,active,created_by,created_at) VALUES(UUID(),?,?,?,?,?,?,?,?,'DRAFT',0,?,NOW())");
-        $stmt->execute([$assignment['user_id'],$_POST['role_assignment_id'],$type,$_POST['scope_mode']??'EXACT',$location,$_POST['effective_from']?:date('Y-m-d'),($_POST['effective_to']??'')?:null,Auth::user()['id']]);
+        $actor=(string)Auth::user()['id'];$policy=$this->managementPolicy();$this->authorize(fn()=>$policy->assertCanManageRoleAssignment($actor,(string)$_POST['role_assignment_id']));
+        $from=(string)(($_POST['effective_from']??'')?:date('Y-m-d'));$to=(string)($_POST['effective_to']??'');if($from<(string)$assignment['role_effective_from']||($to!==''&&($to<$from||($assignment['role_effective_to']!==null&&$to>(string)$assignment['role_effective_to'])))){$this->flash('danger','Scope dates must remain inside the selected role assignment period.');redirect('/access-management/scope-assignments');}$validated=$this->authorize(fn()=>$policy->validateAssignment($actor,(string)$assignment['role_id'],isset($_POST['location_id'])?(string)$_POST['location_id']:null,$from));
+        $type=(string)$validated['scope_type'];$mode=(string)$validated['scope_mode'];$location=$validated['location_id'];
+        if($type===''||$mode===''){$this->flash('danger','This role does not use an administrative geographic scope.');redirect('/access-management/scope-assignments');}
+        $stmt=$pdo->prepare("INSERT INTO user_account_scope (id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,effective_to,approval_status,active,created_by,created_at) VALUES(UUID(),?,?,?,?,?,?,?,'DRAFT',0,?,NOW())");
+        $stmt->execute([$assignment['user_id'],$_POST['role_assignment_id'],$type,$mode,$location,$from,$to?:null,Auth::user()['id']]);
         Audit::record('user.scope.create','USER_SCOPE',null,['user_id'=>$assignment['user_id'],'scope_type'=>$type,'location_id'=>$location]);
         $this->flash('success','Scope assignment draft created.'); redirect('/access-management/scope-assignments');
     }
@@ -251,13 +291,14 @@ final class UserManagementController extends Controller
     public function submitScope(string $id): void
     {
         Auth::requirePermission('user.assign-scope'); Csrf::validate();
+        $this->authorize(fn()=>$this->managementPolicy()->assertCanManageScopeAssignment((string)Auth::user()['id'],$id));
         Database::pdo()->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND created_by=? AND approval_status='DRAFT'")->execute([Auth::user()['id'],$id,Auth::user()['id']]);
         Audit::record('user.scope.submit','USER_SCOPE',$id);redirect('/access-management/scope-assignments');
     }
 
     public function approveScope(string $id): void
     {
-        Auth::requirePermission('user.assign-scope'); Csrf::validate();$pdo=Database::pdo();$stmt=$pdo->prepare('SELECT created_by,approval_status FROM user_account_scope WHERE id=?');$stmt->execute([$id]);$row=$stmt->fetch();
+        Auth::requirePermission('user.assign-scope'); Csrf::validate();$this->authorize(fn()=>$this->managementPolicy()->assertCanManageScopeAssignment((string)Auth::user()['id'],$id));$pdo=Database::pdo();$stmt=$pdo->prepare('SELECT created_by,approval_status FROM user_account_scope WHERE id=?');$stmt->execute([$id]);$row=$stmt->fetch();
         if(!$row||$row['approval_status']!=='SUBMITTED'){$this->flash('danger','Only submitted scope assignments can be approved.');redirect('/access-management/scope-assignments');}
         if((string)$row['created_by']===(string)Auth::user()['id']){$this->flash('danger','Maker cannot approve their own scope assignment.');redirect('/access-management/scope-assignments');}
         $pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
@@ -302,6 +343,12 @@ final class UserManagementController extends Controller
             FROM system_user su WHERE su.id=? AND su.identity_type<>'HISTORICAL' AND su.enabled=1 AND su.account_status='ACTIVE'";
         $stmt=Database::pdo()->prepare($sql);$stmt->execute([$id]);
         return $stmt->fetch()?:null;
+    }
+    private function managementPolicy():UserAccessManagementService{return new UserAccessManagementService(Database::pdo());}
+    private function authorize(callable $check):mixed
+    {
+        try{return $check();}
+        catch(DomainException){http_response_code(403);exit('Access denied.');}
     }
     private function requireActivationPermissions():void{foreach(['user.activate','user.assign-role','user.assign-scope','user.reset-password'] as $permission)Auth::requirePermission($permission);}
 }

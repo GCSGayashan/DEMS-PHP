@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,UserAccessManagementService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -1449,37 +1449,45 @@ final class DataTableRegistry
 
     private static function roleAssignments(): array
     {
+        $actor=(string)(Auth::user()['id']??'');
+        $ids=$actor===''?[]:(new UserAccessManagementService(Database::pdo()))->manageableRoleAssignmentIds($actor);
+        $visibility=$ids!==[]?'uar.id IN ('.implode(',',array_fill(0,count($ids),'?')).')':'1=0';
         return [
             'permission' => 'user.assign-role', 'export' => true, 'filename' => 'role-assignments',
-            'from' => 'user_account_role uar JOIN `system_user` su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id',
-            'select' => ['uar.id', 'uar.user_id', 'uar.role_id', 'su.username', 'r.role_name', 'r.role_code', 'uar.effective_from', 'uar.effective_to', 'uar.approval_status', 'uar.active', 'uar.created_by', 'uar.created_at'],
-            'count' => 'uar.id',
-            'searchable' => ['su.username', 'r.role_name', 'r.role_code', 'uar.approval_status'],
+            'from' => "user_account_role uar JOIN `system_user` su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN (SELECT uas.role_assignment_id,GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') assigned_locations FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id GROUP BY uas.role_assignment_id) sx ON sx.role_assignment_id=uar.id",
+            'select' => ['uar.id', 'uar.user_id', 'uar.role_id', 'su.username','su.display_name', 'r.role_name', 'r.role_code','r.role_level','sx.assigned_locations', 'uar.effective_from', 'uar.effective_to', 'uar.approval_status', 'uar.active', 'uar.created_by', 'uar.created_at'],
+            'count' => 'uar.id','baseWhere'=>[$visibility],'baseParams'=>$ids,
+            'searchable' => ['su.username','su.display_name', 'r.role_name', 'r.role_code','sx.assigned_locations', 'uar.approval_status'],
             'filters' => [
                 'role' => ['column' => 'uar.role_id', 'pattern' => self::uuidPattern(), 'ui' => ['label' => 'Role']],
                 'approval_status' => ['column' => 'uar.approval_status', 'allowed' => self::workflowStatuses(), 'ui' => ['label' => 'Approval Status', 'options' => self::workflowOptions()]],
                 'effective_status' => ['allowed' => ['ACTIVE', 'EXPIRED', 'FUTURE', 'INACTIVE'], 'build' => fn($value) => self::effectiveClause('uar', $value), 'ui' => ['label' => 'Effective Status', 'options' => ['ACTIVE' => 'Currently Active', 'EXPIRED' => 'Expired', 'FUTURE' => 'Future', 'INACTIVE' => 'Inactive']]],
             ],
             'columns' => [
-                self::col('User', 'username', 'su.username', fn($r) => DataTableFormat::text($r['username'])),
+                self::col('Name', 'display_name', 'su.display_name', fn($r) => DataTableFormat::text($r['display_name'])),
+                self::col('Username', 'username', 'su.username', fn($r) => DataTableFormat::text($r['username'])),
                 self::col('Role', 'role_name', 'r.role_name', fn($r) => DataTableFormat::text($r['role_name'] . ' (' . $r['role_code'] . ')'), fn($r) => $r['role_name'] . ' (' . $r['role_code'] . ')'),
+                self::col('Assigned Location', 'assigned_locations', 'sx.assigned_locations', fn($r) => DataTableFormat::text($r['assigned_locations'],'National / Not set')),
                 self::col('Effective From', 'effective_from', 'uar.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
                 self::col('Effective To', 'effective_to', 'uar.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Open')),
                 self::col('Approval', 'approval_status', 'uar.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
                 self::col('Active', 'active', 'uar.active', fn($r) => DataTableFormat::badge($r['active'] ? 'ACTIVE' : 'INACTIVE'), fn($r) => $r['active'] ? 'ACTIVE' : 'INACTIVE'),
                 self::actionColumn(fn($r) => self::roleAssignmentActions($r)),
             ],
-            'defaultOrder' => [2, 'DESC'],
+            'defaultOrder' => [2, 'ASC'],
         ];
     }
 
     private static function scopeAssignments(): array
     {
+        $actor=(string)(Auth::user()['id']??'');
+        $ids=$actor===''?[]:(new UserAccessManagementService(Database::pdo()))->manageableScopeAssignmentIds($actor);
+        $visibility=$ids!==[]?'uas.id IN ('.implode(',',array_fill(0,count($ids),'?')).')':'1=0';
         return [
             'permission' => 'user.assign-scope', 'export' => true, 'filename' => 'scope-assignments',
             'from' => 'user_account_scope uas JOIN `system_user` su ON su.id=uas.user_id LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN user_account_role uar ON uar.id=uas.role_assignment_id LEFT JOIN application_role r ON r.id=uar.role_id',
             'select' => ['uas.id', 'uas.user_id', 'su.username', 'r.role_name', 'uas.scope_type', 'uas.scope_mode', 'l.id AS location_id', 'l.dad_number AS location_number', 'l.name_en AS location_name', 'uas.effective_from', 'uas.effective_to', 'uas.approval_status', 'uas.active', 'uas.created_by', 'uas.created_at'],
-            'count' => 'uas.id',
+            'count' => 'uas.id','baseWhere'=>[$visibility],'baseParams'=>$ids,
             'searchable' => ['su.username', 'r.role_name', 'uas.scope_type', 'uas.scope_mode', 'l.dad_number', 'l.name_en'],
             'filters' => [
                 'scope_type' => ['column' => 'uas.scope_type', 'pattern' => '/^[A-Z0-9_]{1,50}$/', 'ui' => ['label' => 'Scope Type']],
@@ -1586,8 +1594,8 @@ final class DataTableRegistry
             return ['with' => '', 'params' => [], 'joinLocation' => '', 'joinExpression' => ''];
         }
         return [
-            'with' => ScopeService::visibleLocationsCte(),
-            'params' => [(string)$user['id']],
+            'with' => ScopeService::visibleLocationsCte((string)$user['id']),
+            'params' => ScopeService::visibleLocationParams((string)$user['id']),
             'joinLocation' => 'JOIN visible_locations vl ON vl.id=l.id',
             'joinExpression' => $expression !== null ? 'JOIN visible_locations vl ON vl.id=' . $expression : '',
         ];
@@ -1597,7 +1605,7 @@ final class DataTableRegistry
     {
         $user=Auth::user();$restricted=$user!==null&&ScopeService::requiresGeographicRestriction((string)$user['id']);
         if(!$restricted)return ['with'=>'','params'=>[],'where'=>[]];
-        return ['with'=>ScopeService::visibleLocationsCte(),'params'=>[(string)$user['id']],'where'=>["EXISTS (SELECT 1 FROM arpa_division_appointment da JOIN visible_locations vl1 ON vl1.id=da.asc_location_id WHERE da.officer_id={$officerExpression} UNION ALL SELECT 1 FROM arpa_subject_assignment sa JOIN visible_locations vl2 ON vl2.id=sa.asc_location_id WHERE sa.officer_id={$officerExpression})"]];
+        return ['with'=>ScopeService::visibleLocationsCte((string)$user['id']),'params'=>ScopeService::visibleLocationParams((string)$user['id']),'where'=>["EXISTS (SELECT 1 FROM arpa_division_appointment da JOIN visible_locations vl1 ON vl1.id=da.asc_location_id WHERE da.officer_id={$officerExpression} UNION ALL SELECT 1 FROM arpa_subject_assignment sa JOIN visible_locations vl2 ON vl2.id=sa.asc_location_id WHERE sa.officer_id={$officerExpression})"]];
     }
 
     private static function effectiveClause(string $alias, string $value): ?array
@@ -1711,6 +1719,11 @@ final class DataTableRegistry
         }
         if ($row['approval_status'] === 'SUBMITTED' && Auth::can('user.assign-role') && !self::isMaker($row['created_by'])) {
             return DataTableFormat::actionForm('access-management/role-assignments/' . $row['id'] . '/approve', 'Approve', 'btn-success');
+        }
+        if ($row['approval_status'] === 'APPROVED' && (int)$row['active'] === 1) {
+            $actions=Auth::can('user.assign-role')?'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('access-management/role-assignments?replace='.$row['id'])).'">Transfer / Change</a>':'';
+            if(Auth::can('user.revoke-role'))$actions.='<a class="btn btn-sm btn-outline-danger" href="'.e(url('access-management/role-assignments/'.$row['id'].'/end')).'">End</a>';
+            return $actions;
         }
         return '';
     }

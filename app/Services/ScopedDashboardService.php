@@ -13,7 +13,7 @@ final class ScopedDashboardService
     {
         $profile=ScopeService::scopeProfile($userId);
         if($profile['enterprise'])return ['mode'=>'ENTERPRISE','profile'=>$profile,'counts'=>$this->enterpriseCounts(),'charts'=>[],'legacy'=>null];
-        $with=ScopeService::visibleLocationsCte();$params=[$userId];$officeLocationJoin=$profile['level']==='ASC'?'JOIN scope_seeds ov ON ov.id=ofc.linked_location_id JOIN office_type oot ON oot.id=ofc.office_type_id AND oot.system_key=\'ASC_OFFICE\'':'JOIN visible_locations ov ON ov.id=ofc.linked_location_id';
+        $with=ScopeService::visibleLocationsCte($userId);$params=ScopeService::visibleLocationParams($userId);$officeLocationJoin=$profile['level']==='ASC'?'JOIN scope_seeds ov ON ov.id=ofc.linked_location_id JOIN office_type oot ON oot.id=ofc.office_type_id AND oot.system_key=\'ASC_OFFICE\'':'JOIN visible_locations ov ON ov.id=ofc.linked_location_id';
         $metricsSql=$with." SELECT
           (SELECT COUNT(*) FROM location l JOIN location_type t ON t.id=l.location_type_id JOIN visible_locations vl ON vl.id=l.id WHERE t.system_key='ASC' AND l.approval_status='APPROVED') asc_count,
           (SELECT COUNT(*) FROM location l JOIN location_type t ON t.id=l.location_type_id JOIN visible_locations vl ON vl.id=l.id WHERE t.system_key='ARPA_DIVISION' AND l.approval_status='APPROVED') arpa_divisions,
@@ -40,7 +40,7 @@ final class ScopedDashboardService
     public function arpaModuleCounts(string $userId): array
     {
         $restricted=ScopeService::requiresGeographicRestriction($userId);
-        $with=$restricted?ScopeService::visibleLocationsCte():'';
+        $with=$restricted?ScopeService::visibleLocationsCte($userId):'';
         $join=$restricted?' JOIN visible_locations vl ON vl.id=x.asc_location_id':'';
         $sql=$with." SELECT
           COALESCE(SUM(x.record_kind='DIVISION' AND x.appointment_type='PERMANENT'),0) openPermanent,
@@ -53,7 +53,7 @@ final class ScopedDashboardService
           UNION ALL
           SELECT 'SUBJECT',NULL,a.asc_location_id FROM arpa_subject_assignment a LEFT JOIN arpa_subject_assignment_closure c ON c.assignment_id=a.id WHERE a.legacy_history_only=0 AND c.id IS NULL
         ) x{$join}";
-        $params=$restricted?[$userId]:[];$stmt=$this->pdo->prepare($sql);$stmt->execute($params);$row=array_map('intval',$stmt->fetch()?:[]);
+        $params=$restricted?ScopeService::visibleLocationParams($userId):[];$stmt=$this->pdo->prepare($sql);$stmt->execute($params);$row=array_map('intval',$stmt->fetch()?:[]);
         $row['pending']=(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount($userId);
         $vacancySql=$with.' SELECT COUNT(DISTINCT v.id) FROM '.ArpaAppointmentReadService::vacantDivisionSource().' v '.($restricted?'JOIN visible_locations vl ON vl.id=v.asc_location_id':'');$stmt=$this->pdo->prepare($vacancySql);$stmt->execute($params);$row['vacantDivisions']=(int)$stmt->fetchColumn();
         $issueJoin=$restricted?'JOIN visible_locations vl ON vl.id=q.asc_location_id ':'';$issueSql=$with.' SELECT COUNT(DISTINCT q.row_key) FROM '.ArpaAppointmentReadService::issueSource().' q '.$issueJoin.'WHERE '.ArpaAppointmentReadService::currentActionIssuePredicate('q');$stmt=$this->pdo->prepare($issueSql);$stmt->execute($params);$row['issues']=(int)$stmt->fetchColumn();

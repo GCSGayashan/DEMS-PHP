@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-use App\Core\{DataTableQuery,DataTableRegistry,DataTableRequest,Database,LegacyDatabase};
-use App\Services\{ArpaAppointmentDataIssueCorrectionService,ArpaAppointmentReadService,OfficerProfileService};
+use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,LegacyDatabase};
+use App\Services\{ArpaAppointmentDataIssueCorrectionService,ArpaAppointmentReadService,OfficerProfileService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -15,6 +15,7 @@ final class ArpaAppointmentDataIssueCorrectionTest
         $this->pdo=Database::pdo();$before=$this->state();$legacyBefore=$this->legacyState();
         $this->actor=(string)$this->scalar("SELECT id FROM system_user WHERE username='asctest' AND enabled=1 AND account_status='ACTIVE'");
         if($this->actor==='')throw new RuntimeException('Operational asctest fixture is required.');
+        $context=$this->pdo->query("SELECT uar.id role_assignment_id,uas.id scope_assignment_id FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id AND r.role_code='ASC_SUBJECT_OFFICER' JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id JOIN location l ON l.id=uas.location_id AND l.dad_number='70004-0000389' WHERE uar.user_id='{$this->actor}' AND uar.active=1 AND uar.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' LIMIT 1")->fetch();if(!$context)throw new RuntimeException('asctest ASC Subject Officer context is required.');$_SESSION=['user_id'=>$this->actor,'authenticated_at'=>time(),'last_activity_at'=>time()];(new UserContextService($this->pdo))->select($this->actor,(string)$context['role_assignment_id'],(string)$context['scope_assignment_id']);Auth::forgetRequestCache();
         $this->pdo->beginTransaction();
         try{$this->fixtures();$this->authorization();$this->multipleOpenCorrection();$this->dependentCorrection();$this->historicalReview();$this->crossAscGroupIsReadOnly();$this->rollbackAndWorkflowBoundary();$this->staticCoverage();}
         finally{$this->pdo->rollBack();}
@@ -119,7 +120,7 @@ final class ArpaAppointmentDataIssueCorrectionTest
 
     private function actor(string $role,string $asc):string
     {
-        $id=$this->uuid();$this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,account_status,enabled) VALUES(?,'STAFF',?,'ACTIVE',1)")->execute([$id,'issue-'.strtolower($role).'-'.substr($id,0,6)]);$roleId=(string)$this->scalar('SELECT id FROM application_role WHERE role_code=?',[$role]);$this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(UUID(),?,?,CURRENT_DATE(),'APPROVED',1,'Data issue authorization test',?,?,NOW())")->execute([$id,$roleId,$this->actor,$this->actor]);$this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(UUID(),?,'ASC','EXACT',?,CURRENT_DATE(),'APPROVED',1,'Data issue authorization test',?,?,NOW())")->execute([$id,$asc,$this->actor,$this->actor]);return $id;
+        $id=$this->uuid();$assignmentId=$this->uuid();$this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,account_status,enabled) VALUES(?,'STAFF',?,'ACTIVE',1)")->execute([$id,'issue-'.strtolower($role).'-'.substr($id,0,6)]);$roleId=(string)$this->scalar('SELECT id FROM application_role WHERE role_code=?',[$role]);$this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(?,?,?,CURRENT_DATE(),'APPROVED',1,'Data issue authorization test',?,?,NOW())")->execute([$assignmentId,$id,$roleId,$this->actor,$this->actor]);$this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(UUID(),?,?,'ASC','EXACT',?,CURRENT_DATE(),'APPROVED',1,'Data issue authorization test',?,?,NOW())")->execute([$id,$assignmentId,$asc,$this->actor,$this->actor]);return $id;
     }
 
     private function state():array{return ['requests'=>(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_request'),'appointments'=>(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment'),'closures'=>(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure'),'corrections'=>(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_data_correction'),'audit'=>(int)$this->scalar('SELECT COUNT(*) FROM audit_event'),'users'=>(int)$this->scalar('SELECT COUNT(*) FROM system_user'),'roles'=>(int)$this->scalar('SELECT COUNT(*) FROM user_account_role'),'scopes'=>(int)$this->scalar('SELECT COUNT(*) FROM user_account_scope'),'decisions'=>(int)$this->scalar("SELECT COUNT(*) FROM legacy_arpa_appointment_resolution WHERE resolution_status='CONFIRMED'")];}

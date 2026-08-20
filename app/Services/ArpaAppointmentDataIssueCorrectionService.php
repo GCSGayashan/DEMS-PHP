@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
-use App\Core\ScopeService;
+use App\Core\{Auth,ScopeService};
 use DomainException;
 use PDO;
 use Throwable;
@@ -27,12 +27,18 @@ final class ArpaAppointmentDataIssueCorrectionService
 
     public function canCorrect(string $userId,string $ascLocationId):bool
     {
+        $context=Auth::activeContextForUser($userId);
+        if($context!==null){
+            return $context['role_code']==='ASC_SUBJECT_OFFICER'
+                && Auth::can(self::PERMISSION)
+                && ScopeService::canAccessArpaStage($userId,'ASC',$ascLocationId,date('Y-m-d'));
+        }
         $sql="SELECT COUNT(*) FROM user_account_role uar
               JOIN system_user su ON su.id=uar.user_id AND su.enabled=1 AND su.account_status='ACTIVE'
               JOIN application_role r ON r.id=uar.role_id AND r.role_code='ASC_SUBJECT_OFFICER' AND r.active=1 AND r.approval_status='APPROVED'
               JOIN application_role_permission rp ON rp.role_id=r.id
               JOIN application_permission p ON p.id=rp.permission_id AND p.permission_key=? AND p.active=1
-              JOIN user_account_scope uas ON uas.user_id=uar.user_id AND uas.scope_type='ASC' AND uas.scope_mode='EXACT' AND uas.location_id=?
+              JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id AND uas.scope_type='ASC' AND uas.scope_mode='EXACT' AND uas.location_id=?
               WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED'
                 AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE())
                 AND uas.active=1 AND uas.approval_status='APPROVED'

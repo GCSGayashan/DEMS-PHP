@@ -67,6 +67,9 @@ final class DataTableController
         if (!Auth::check()) {
             DataTableResponse::error('Authentication required.', 401, $draw);
         }
+        if (Auth::activeContext() === null) {
+            DataTableResponse::error('Select a working context before loading records.', 409, $draw);
+        }
         if (!Auth::can((string)$config['permission']) || (isset($config['authorize']) && !($config['authorize'])())) {
             DataTableResponse::error('You are not authorized to view these records.', 403, $draw);
         }

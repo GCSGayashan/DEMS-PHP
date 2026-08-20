@@ -23,6 +23,11 @@ final class OperationalUserActivationService
         $officialReference=$this->text($data['official_reference']??null);
         $effectiveFrom=$this->date((string)($data['effective_from']??date('Y-m-d')));
         $selections=$this->roleSelections($data['roles']??[],$data['role_enabled']??[]);
+        $management=new UserAccessManagementService($this->pdo);
+        $management->assertCanManageUser($actorId,$userId,$effectiveFrom);
+        foreach($selections as $roleCode=>$locationId){
+            $management->validateRoleCodeAssignment($actorId,$roleCode,$locationId,$effectiveFrom);
+        }
 
         $this->transaction(function()use($userId,$actorId,$username,$passwordHash,$email,$reason,$officialReference,$effectiveFrom,$selections):void{
             $stmt=$this->pdo->prepare('SELECT * FROM system_user WHERE id=? FOR UPDATE');$stmt->execute([$userId]);$user=$stmt->fetch();
@@ -46,6 +51,7 @@ final class OperationalUserActivationService
     public function deactivate(string $userId,string $reason,?string $officialReference,string $actorId):void
     {
         $this->assertActorPermissions($actorId,['user.block']);
+        (new UserAccessManagementService($this->pdo))->assertCanManageUser($actorId,$userId);
         $reason=$this->requiredText($reason,'Deactivation reason');$officialReference=$this->text($officialReference);
         if($userId===$actorId)throw new DomainException('Administrators cannot deactivate their own account.');
         $this->transaction(function()use($userId,$reason,$officialReference,$actorId):void{
@@ -103,10 +109,7 @@ final class OperationalUserActivationService
     private function activeAssignments(string $table,string $userId):array{$s=$this->pdo->prepare("SELECT * FROM {$table} WHERE user_id=? AND active=1 FOR UPDATE");$s->execute([$userId]);return $s->fetchAll();}
     private function assertActorPermissions(string $actorId,array $required):void
     {
-        $placeholders=implode(',',array_fill(0,count($required),'?'));
-        $sql="SELECT DISTINCT p.permission_key FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN application_role_permission rp ON rp.role_id=r.id JOIN application_permission p ON p.id=rp.permission_id WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND p.active=1 AND p.permission_key IN ({$placeholders})";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute(array_merge([$actorId],$required));$actual=array_column($stmt->fetchAll(),'permission_key');
-        foreach($required as $permission)if(!in_array($permission,$actual,true))throw new DomainException("Administrative permission {$permission} is required.");
+        (new UserAccessManagementService($this->pdo))->assertActorPermissions($actorId,$required);
     }
     private function email(mixed $value):?string{$email=strtolower(trim((string)$value));if($email==='')return null;if(filter_var($email,FILTER_VALIDATE_EMAIL)===false)throw new DomainException('Enter a valid current email address.');return $email;}
     private function date(string $value):string{$d=\DateTimeImmutable::createFromFormat('!Y-m-d',$value);if(!$d||$d->format('Y-m-d')!==$value)throw new DomainException('Enter a valid effective date.');return $value;}
