@@ -112,7 +112,7 @@ final class DataTableRegistry
                 [(int)($definition['defaultOrder'][0] ?? 0), strtolower((string)($definition['defaultOrder'][1] ?? 'asc'))],
             ],
             'filters' => $filters,
-            'emptyMessage'=>$definition['emptyMessage']??'No records found.',
+            'emptyMessage'=>$definition['emptyMessage']??'No records found for the selected filters.',
         ];
     }
 
@@ -123,6 +123,7 @@ final class DataTableRegistry
             throw new RuntimeException('Unknown Location Type.');
         }
         $geo = self::geo();
+        $hierarchy = self::locationTypeHierarchy($scopeType);
         $baseWhere = [];
         $baseParams = $geo['params'];
         if ($scopeType !== '') {
@@ -147,24 +148,154 @@ final class DataTableRegistry
 
         return [
             'permission' => 'location.view', 'export' => true, 'filename' => 'locations',
-            'with' => $geo['with'],
-            'from' => 'location l ' . $geo['joinLocation'] . ' JOIN location_type lt ON lt.id=l.location_type_id',
-            'select' => ['l.id', 'l.dad_number', 'l.official_code', 'l.name_en', 'l.name_si', 'l.name_ta', 'lt.name_en AS type_name', 'lt.system_key AS type_key', 'l.effective_from', 'l.operational_status', 'l.approval_status'],
+            'with' => self::locationHierarchyWith($geo['with'], $hierarchy['relationshipTypes']),
+            'from' => 'location l ' . $geo['joinLocation'] . ' JOIN location_type lt ON lt.id=l.location_type_id' . $hierarchy['joins'],
+            'select' => array_merge(
+                ['l.id', 'l.dad_number', 'l.official_code', 'l.name_en', 'l.name_si', 'l.name_ta', 'lt.name_en AS type_name', 'lt.system_key AS type_key', 'l.effective_from', 'l.operational_status', 'l.approval_status', 'l.created_by'],
+                $hierarchy['select']
+            ),
             'count' => 'l.id', 'baseWhere' => $baseWhere, 'baseParams' => $baseParams,
-            'searchable' => ['l.dad_number', 'l.official_code', 'l.name_en', 'l.name_si', 'l.name_ta', 'lt.name_en'],
+            'searchable' => array_merge(
+                ['l.dad_number', 'l.official_code', 'l.name_en', 'l.name_si', 'l.name_ta'],
+                $scopeType === '' ? ['lt.name_en'] : $hierarchy['searchable']
+            ),
             'filters' => $filters,
-            'columns' => [
+            'columns' => $scopeType === '' ? [
                 self::col('DAD Number', 'dad_number', 'l.dad_number', fn($r) => DataTableFormat::text($r['dad_number'])),
                 self::col('Official Code', 'official_code', 'l.official_code', fn($r) => DataTableFormat::text($r['official_code'])),
-                self::col('English Name', 'name_en', 'l.name_en', fn($r) => DataTableFormat::text($r['name_en'])),
+                self::col('Name', 'name_en', 'l.name_en', fn($r) => DataTableFormat::text($r['name_en'])),
                 self::col('Type', 'type_name', 'lt.name_en', fn($r) => DataTableFormat::text($r['type_name'])),
-                self::col('Effective From', 'effective_from', 'l.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
-                self::col('Operational', 'operational_status', 'l.operational_status', fn($r) => DataTableFormat::badge($r['operational_status'])),
+                self::col('Start Date', 'effective_from', 'l.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+                self::col('Status', 'operational_status', 'l.operational_status', fn($r) => DataTableFormat::badge($r['operational_status'])),
                 self::col('Approval', 'approval_status', 'l.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
-                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('locations/'.$r['id'])).'">View</a>'),
-            ],
-            'defaultOrder' => $scopeType === '' ? [0, 'ASC'] : [2, 'ASC'],
+                self::actionColumn(fn($r)=>self::locationActions($r)),
+            ] : array_merge(
+                [
+                    self::col('DAD Number', 'dad_number', 'l.dad_number', fn($r) => DataTableFormat::text($r['dad_number'])),
+                    self::col('Official Code', 'official_code', 'l.official_code', fn($r) => DataTableFormat::text($r['official_code'])),
+                ],
+                $hierarchy['columns'],
+                [
+                    self::col('Start Date', 'effective_from', 'l.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+                    self::col('Status', 'operational_status', 'l.operational_status', fn($r) => DataTableFormat::badge($r['operational_status'])),
+                    self::col('Approval', 'approval_status', 'l.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
+                    self::actionColumn(fn($r)=>self::locationActions($r)),
+                ]
+            ),
+            'defaultOrder' => [0, 'ASC'],
         ];
+    }
+
+    /**
+     * Type-specific lists follow the approved, effective hierarchy using one
+     * set-based join chain. Ambiguous relationship versions are left blank
+     * instead of multiplying a location row or choosing an arbitrary parent.
+     */
+    private static function locationTypeHierarchy(string $scopeType): array
+    {
+        if ($scopeType === '') {
+            return ['joins' => '', 'select' => [], 'searchable' => [], 'columns' => [], 'defaultOrder' => 0, 'relationshipTypes' => []];
+        }
+
+        $provinceJoin = " LEFT JOIN current_location_relationship province_district_rel ON province_district_rel.child_location_id=district_location.id AND province_district_rel.relationship_type='PROVINCE_DISTRICT'"
+            . " LEFT JOIN location province_location ON province_location.id=province_district_rel.parent_location_id";
+        $districtForDs = " LEFT JOIN current_location_relationship district_ds_rel ON district_ds_rel.child_location_id=l.id AND district_ds_rel.relationship_type='DISTRICT_DS_DIVISION'"
+            . " LEFT JOIN location district_location ON district_location.id=district_ds_rel.parent_location_id" . $provinceJoin;
+        $districtForAsc = " LEFT JOIN current_location_relationship district_asc_rel ON district_asc_rel.child_location_id=l.id AND district_asc_rel.relationship_type='DISTRICT_ASC'"
+            . " LEFT JOIN location district_location ON district_location.id=district_asc_rel.parent_location_id" . $provinceJoin;
+        $arpaChain = " LEFT JOIN current_location_relationship asc_arpa_rel ON asc_arpa_rel.child_location_id=l.id AND asc_arpa_rel.relationship_type='ASC_ARPA_DIVISION'"
+            . " LEFT JOIN location asc_location ON asc_location.id=asc_arpa_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship district_asc_rel ON district_asc_rel.child_location_id=asc_location.id AND district_asc_rel.relationship_type='DISTRICT_ASC'"
+            . " LEFT JOIN location district_location ON district_location.id=district_asc_rel.parent_location_id" . $provinceJoin;
+        $gnChain = " LEFT JOIN current_location_relationship arpa_gn_rel ON arpa_gn_rel.child_location_id=l.id AND arpa_gn_rel.relationship_type='ARPA_GN_DIVISION'"
+            . " LEFT JOIN location arpa_location ON arpa_location.id=arpa_gn_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship asc_arpa_rel ON asc_arpa_rel.child_location_id=arpa_location.id AND asc_arpa_rel.relationship_type='ASC_ARPA_DIVISION'"
+            . " LEFT JOIN location asc_location ON asc_location.id=asc_arpa_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship district_asc_rel ON district_asc_rel.child_location_id=asc_location.id AND district_asc_rel.relationship_type='DISTRICT_ASC'"
+            . " LEFT JOIN location district_location ON district_location.id=district_asc_rel.parent_location_id" . $provinceJoin;
+
+        $definition = match ($scopeType) {
+            'PROVINCE' => ['', [], 'Province', []],
+            'DISTRICT' => [
+                " LEFT JOIN current_location_relationship province_district_rel ON province_district_rel.child_location_id=l.id AND province_district_rel.relationship_type='PROVINCE_DISTRICT'"
+                    . " LEFT JOIN location province_location ON province_location.id=province_district_rel.parent_location_id",
+                [['Province', 'province_name', 'province_location.name_en']],
+                'District',
+                ['PROVINCE_DISTRICT'],
+            ],
+            'DS_DIVISION' => [$districtForDs, [
+                ['Province', 'province_name', 'province_location.name_en'],
+                ['District', 'district_name', 'district_location.name_en'],
+            ], 'DS Division', ['PROVINCE_DISTRICT','DISTRICT_DS_DIVISION']],
+            'ASC' => [$districtForAsc, [
+                ['Province', 'province_name', 'province_location.name_en'],
+                ['District', 'district_name', 'district_location.name_en'],
+            ], 'Agrarian Service Center', ['PROVINCE_DISTRICT','DISTRICT_ASC']],
+            'AI_RANGE' => ['', [
+                ['Province', 'province_name', 'NULL'],
+                ['District', 'district_name', 'NULL'],
+            ], 'AI Range', []],
+            'MAHAWELI_DIVISION' => ['', [
+                ['Province', 'province_name', 'NULL'],
+                ['District', 'district_name', 'NULL'],
+            ], 'Mahaweli Division', []],
+            'ARPA_DIVISION' => [$arpaChain, [
+                ['Province', 'province_name', 'province_location.name_en'],
+                ['District', 'district_name', 'district_location.name_en'],
+                ['Agrarian Service Center', 'asc_name', 'asc_location.name_en'],
+            ], 'ARPA Division', ['PROVINCE_DISTRICT','DISTRICT_ASC','ASC_ARPA_DIVISION']],
+            'GN_DIVISION' => [$gnChain, [
+                ['Province', 'province_name', 'province_location.name_en'],
+                ['District', 'district_name', 'district_location.name_en'],
+            ], 'GN Division', ['PROVINCE_DISTRICT','DISTRICT_ASC','ASC_ARPA_DIVISION','ARPA_GN_DIVISION']],
+            default => throw new RuntimeException('Unknown Location Type.'),
+        };
+
+        [$joins, $ancestors, $locationLabel, $relationshipTypes] = $definition;
+        $select = [];
+        $searchable = [];
+        $columns = [];
+        $sortParts = [];
+        foreach ($ancestors as [$label, $key, $expression]) {
+            $select[] = $expression . ' AS ' . $key;
+            if ($expression !== 'NULL') {
+                $searchable[] = $expression;
+                $sortParts[] = "COALESCE({$expression},'')";
+            }
+            $columns[] = self::col($label, $key, $expression === 'NULL' ? 'l.name_en' : $expression, fn($r) => DataTableFormat::text($r[$key] ?? null));
+        }
+        $sortParts[] = 'l.name_en';
+        $locationSort = count($sortParts) === 1 ? 'l.name_en' : 'CONCAT_WS(CHAR(31),' . implode(',', $sortParts) . ')';
+        $columns[] = self::col($locationLabel, 'name_en', $locationSort, fn($r) => DataTableFormat::text($r['name_en']));
+
+        return [
+            'joins' => $joins,
+            'select' => $select,
+            'searchable' => $searchable,
+            'columns' => $columns,
+            'defaultOrder' => count($columns) + 1,
+            'relationshipTypes' => $relationshipTypes,
+        ];
+    }
+
+    private static function locationHierarchyWith(string $baseWith, array $relationshipTypes): string
+    {
+        if ($relationshipTypes === []) {
+            return $baseWith;
+        }
+        $allowed = ['PROVINCE_DISTRICT','DISTRICT_DS_DIVISION','DISTRICT_ASC','ASC_ARPA_DIVISION','ARPA_GN_DIVISION'];
+        if (array_diff($relationshipTypes, $allowed) !== []) {
+            throw new RuntimeException('Unknown Location Relationship Type.');
+        }
+        $typeList = "'" . implode("','", $relationshipTypes) . "'";
+        $cte = "current_location_relationship AS ("
+            . "SELECT relationship_type,child_location_id,"
+            . "CASE WHEN COUNT(DISTINCT parent_location_id)=1 THEN MIN(parent_location_id) END parent_location_id"
+            . " FROM location_relationship WHERE relationship_type IN ({$typeList})"
+            . " AND active=1 AND approval_status='APPROVED'"
+            . " AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE())"
+            . " GROUP BY relationship_type,child_location_id)";
+        return $baseWith === '' ? 'WITH ' . $cte . ' ' : rtrim($baseWith) . ', ' . $cte . ' ';
     }
 
     private static function locationTypes(): array
@@ -210,8 +341,8 @@ final class DataTableRegistry
                 self::col('Parent', 'parent_name', 'p.name_en', fn($r) => DataTableFormat::text($r['parent_number'] . ' · ' . $r['parent_name']), fn($r) => $r['parent_number'] . ' - ' . $r['parent_name']),
                 self::col('Child', 'child_name', 'c.name_en', fn($r) => DataTableFormat::text($r['child_number'] . ' · ' . $r['child_name']), fn($r) => $r['child_number'] . ' - ' . $r['child_name']),
                 self::col('Relationship', 'relationship_type', 'lr.relationship_type', fn($r) => DataTableFormat::text($r['relationship_type'])),
-                self::col('Effective From', 'effective_from', 'lr.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
-                self::col('Effective To', 'effective_to', 'lr.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Open')),
+                self::col('Start Date', 'effective_from', 'lr.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+                self::col('End Date', 'effective_to', 'lr.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Current')),
             ],
             'defaultOrder' => [0, 'ASC'],
         ];
@@ -237,8 +368,8 @@ final class DataTableRegistry
                 self::col('Office Type', 'type_name', 'ot.name_en', fn($r) => DataTableFormat::text($r['type_name'])),
                 self::col('Linked Location', 'location_name', 'l.name_en', fn($r) => DataTableFormat::text($r['location_name'], 'National')),
                 self::col('Current Officers','current_officer_count',null,fn($r)=>DataTableFormat::text((string)$r['current_officer_count'])),
-                self::col('Effective From', 'effective_from', 'o.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
-                self::col('Operational', 'operational_status', 'o.operational_status', fn($r) => DataTableFormat::badge($r['operational_status'])),
+                self::col('Start Date', 'effective_from', 'o.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+                self::col('Status', 'operational_status', 'o.operational_status', fn($r) => DataTableFormat::badge($r['operational_status'])),
                 self::col('Approval', 'approval_status', 'o.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
                 self::actionColumn(fn($r) => self::officeActions($r)),
             ],
@@ -266,7 +397,7 @@ final class DataTableRegistry
                 'designation' => ['column' => 'o.primary_designation_id', 'pattern' => self::uuidPattern(), 'ui' => ['label' => 'Designation']],
                 'class' => ['column' => 'o.class_id', 'pattern' => self::uuidPattern(), 'ui' => ['label' => 'Class']],
                 'officer_status' => ['column' => 'o.officer_status_id', 'pattern' => self::uuidPattern(), 'ui' => ['label' => 'Officer Status']],
-                'service_permanency' => ['column'=>'o.arpa_service_permanency','allowed'=>['PERMANENT_IN_SERVICE','NOT_PERMANENT_IN_SERVICE'],'ui'=>['label'=>'Service Permanency','options'=>['PERMANENT_IN_SERVICE'=>'Permanent in Service','NOT_PERMANENT_IN_SERVICE'=>'Not Permanent in Service']]],
+                'service_permanency' => ['column'=>'o.arpa_service_permanency','allowed'=>['PERMANENT_IN_SERVICE','NOT_PERMANENT_IN_SERVICE'],'ui'=>['label'=>'Service Permanency','options'=>['PERMANENT_IN_SERVICE'=>'Permanent In Service','NOT_PERMANENT_IN_SERVICE'=>'Not Permanent In Service']]],
                 'gender' => ['column' => 'o.gender', 'allowed' => ['MALE', 'FEMALE'], 'ui' => ['label' => 'Gender', 'options' => ['MALE' => 'Male', 'FEMALE' => 'Female']]],
                 'office' => ['pattern' => self::uuidPattern(),'build'=>fn($value)=>["EXISTS(SELECT 1 FROM officer_office_assignment foa WHERE foa.officer_id=o.id AND foa.office_id=? AND foa.active=1 AND foa.approval_status='APPROVED' AND foa.effective_from<=CURRENT_DATE() AND (foa.effective_to IS NULL OR foa.effective_to>=CURRENT_DATE()))",[$value]], 'ui' => $access['with']===''?['label' => 'Office']:null],
                 'operational_status' => ['column' => 'o.operational_status', 'allowed' => ['ACTIVE', 'INACTIVE'], 'ui' => ['label' => 'Operational Status', 'options' => ['ACTIVE' => 'Active', 'INACTIVE' => 'Inactive']]],
@@ -277,15 +408,15 @@ final class DataTableRegistry
                 self::col('Name with Initials', 'name_with_initials', 'o.name_with_initials', fn($r) => DataTableFormat::text($r['name_with_initials'])),
                 self::col('NIC', 'nic', 'o.nic', fn($r) => DataTableFormat::text($r['nic'])),
                 self::col('Class', 'class_name', 'c.name_en', fn($r) => DataTableFormat::text($r['class_name'])),
-                self::col('Service Permanency','arpa_service_permanency','o.arpa_service_permanency',fn($r)=>DataTableFormat::text($r['arpa_service_permanency'],'Not set')),
+                self::col('Service Permanency','arpa_service_permanency','o.arpa_service_permanency',fn($r)=>DataTableFormat::enumText($r['arpa_service_permanency'],'Not set'),fn($r)=>DataTableFormat::enumLabel($r['arpa_service_permanency'],'Not set')),
                 self::col('First Appointment Date','initial_appointment_date','o.initial_appointment_date',fn($r)=>DataTableFormat::date($r['initial_appointment_date'])),
-                self::col('Current Office Assignment(s)','current_offices',null,fn($r)=>DataTableFormat::text($r['current_offices'],'None')),
-                self::col('Current Assignment(s)','current_assignments',null,fn($r)=>DataTableFormat::text($r['current_assignments'],'None')),
+                self::col('Current Offices','current_offices',null,fn($r)=>DataTableFormat::text($r['current_offices'],'None')),
+                self::col('Current Assignments','current_assignments',null,fn($r)=>DataTableFormat::text($r['current_assignments'],'None')),
                 self::col('Officer Status', 'officer_status_name', 'os.name_en', fn($r) => DataTableFormat::badge($r['officer_status_name']?:$r['operational_status'])),
                 self::actionColumn(fn($r) => self::officerActions($r)),
             ],
             'defaultOrder' => [0, 'ASC'],
-            'emptyMessage'=>$access['with']!==''?(ScopeService::scopeProfile((string)$user['id'])['level']==='ASC'?'No officers currently have an approved operational assignment within this Agrarian Service Center.':'No officers currently have an approved operational assignment within your authorized organizational scope.'):'No records found.',
+            'emptyMessage'=>$access['with']!==''?(ScopeService::scopeProfile((string)$user['id'])['level']==='ASC'?'No officers currently have an approved assignment to this Agrarian Service Center.':'No officers are available for your current access.'):'No records found for the selected filters.',
         ];
     }
 
@@ -306,22 +437,22 @@ final class DataTableRegistry
                 'asc' => ['column'=>'a.asc_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ASC']],
                 'arpa_division' => ['column'=>'a.arpa_division_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ARPA Division']],
                 'officer' => ['column'=>'a.officer_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'Officer']],
-                'service_permanency' => ['column'=>'a.service_permanency_snapshot','allowed'=>['PERMANENT_IN_SERVICE','NOT_PERMANENT_IN_SERVICE'],'ui'=>['label'=>'Service Permanency','options'=>['PERMANENT_IN_SERVICE'=>'Permanent in Service','NOT_PERMANENT_IN_SERVICE'=>'Not Permanent in Service']]],
+                'service_permanency' => ['column'=>'a.service_permanency_snapshot','allowed'=>['PERMANENT_IN_SERVICE','NOT_PERMANENT_IN_SERVICE'],'ui'=>['label'=>'Service Permanency','options'=>['PERMANENT_IN_SERVICE'=>'Permanent In Service','NOT_PERMANENT_IN_SERVICE'=>'Not Permanent In Service']]],
                 'appointment_type' => ['column'=>'a.appointment_type','allowed'=>['PERMANENT','ACTING','DUTY_COVERING','ATTEND_TO_DUTY'],'ui'=>['label'=>'Appointment Type','options'=>['PERMANENT'=>'Permanent','ACTING'=>'Acting','DUTY_COVERING'=>'Duty Covering','ATTEND_TO_DUTY'=>'Attend to the Duty']]],
                 'status' => ['allowed'=>['ACTIVE','SCHEDULED','ENDED'],'build'=>fn($v)=>["{$status}=?",[$v]],'ui'=>['label'=>'Status','options'=>['ACTIVE'=>'Active','SCHEDULED'=>'Scheduled','ENDED'=>'Ended']]],
-                'date_from' => ['column'=>'a.effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Effective From','type'=>'date']],
-                'date_to' => ['column'=>'a.effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Effective To','type'=>'date']],
+                'date_from' => ['column'=>'a.effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Start Date From','type'=>'date']],
+                'date_to' => ['column'=>'a.effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Start Date To','type'=>'date']],
             ],
             'columns' => [
                 self::col('Officer Number','officer_number','o.dad_number',fn($r)=>'<a href="'.e(url('hr/officers/'.$r['officer_id'])).'">'.e($r['officer_number']).'</a>'),
                 self::col('Officer','officer_name','o.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_name'])),
                 self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'])),
-                self::col('Service Permanency','arpa_service_permanency','o.arpa_service_permanency',fn($r)=>DataTableFormat::badge($r['arpa_service_permanency'])),
+                self::col('Service Permanency','arpa_service_permanency','o.arpa_service_permanency',fn($r)=>DataTableFormat::badge($r['arpa_service_permanency']),fn($r)=>DataTableFormat::enumLabel($r['arpa_service_permanency'],'Unknown')),
                 self::col('Type','appointment_type','a.appointment_type',fn($r)=>DataTableFormat::badge($r['appointment_type'])),
                 self::col('ASC','asc_name_snapshot','a.asc_name_snapshot',fn($r)=>DataTableFormat::text($r['asc_name_snapshot'])),
                 self::col('ARPA Division','arpa_name_snapshot','a.arpa_name_snapshot',fn($r)=>DataTableFormat::text($r['arpa_name_snapshot'])),
-                self::col('Effective From','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
-                self::col('Effective To','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Open')),
+                self::col('Start Date','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+                self::col('End Date','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Current')),
                 self::col('Status','operational_status',$status,fn($r)=>DataTableFormat::badge($r['operational_status'])),
                 self::col('Workflow','workflow_status','req.workflow_status',fn($r)=>DataTableFormat::badge($r['workflow_status'])),
                 self::col('Approved At','approved_at','a.approved_at',fn($r)=>DataTableFormat::dateTime($r['approved_at'])),
@@ -348,8 +479,8 @@ final class DataTableRegistry
                 'officer'=>['column'=>'a.officer_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'Officer']],
                 'subject_kind'=>['column'=>'a.subject_kind_snapshot','allowed'=>['NORMAL','AGRARIAN_BANK','SALES_SHOP','SITHAMU'],'ui'=>['label'=>'Subject Type','options'=>['NORMAL'=>'Normal Subject','AGRARIAN_BANK'=>'Agrarian Bank','SALES_SHOP'=>'Sales Shop','SITHAMU'=>'Sithamu']]],
                 'status'=>['allowed'=>['ACTIVE','SCHEDULED','ENDED'],'build'=>fn($v)=>["{$status}=?",[$v]],'ui'=>['label'=>'Status','options'=>['ACTIVE'=>'Active','SCHEDULED'=>'Scheduled','ENDED'=>'Ended']]],
-                'date_from'=>['column'=>'a.effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Effective From','type'=>'date']],
-                'date_to'=>['column'=>'a.effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Effective To','type'=>'date']],
+                'date_from'=>['column'=>'a.effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Start Date From','type'=>'date']],
+                'date_to'=>['column'=>'a.effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Start Date To','type'=>'date']],
             ],
             'columns'=>[
                 self::col('Officer Number','officer_number','o.dad_number',fn($r)=>DataTableFormat::text($r['officer_number'])),
@@ -357,8 +488,8 @@ final class DataTableRegistry
                 self::col('Subject / Function','subject_name_snapshot','a.subject_name_snapshot',fn($r)=>DataTableFormat::text($r['subject_name_snapshot'])),
                 self::col('Type','subject_kind_snapshot','a.subject_kind_snapshot',fn($r)=>DataTableFormat::badge($r['subject_kind_snapshot'])),
                 self::col('ASC','asc_name_snapshot','a.asc_name_snapshot',fn($r)=>DataTableFormat::text($r['asc_name_snapshot'])),
-                self::col('Effective From','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
-                self::col('Effective To','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Open')),
+                self::col('Start Date','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+                self::col('End Date','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Current')),
                 self::col('Status','operational_status',$status,fn($r)=>DataTableFormat::badge($r['operational_status'])),
                 self::actionColumn(fn($r)=>self::arpaSubjectActions($r)),
             ],
@@ -379,9 +510,9 @@ final class DataTableRegistry
                 self::col('Officer Number','officer_number','q.officer_number',fn($r)=>DataTableFormat::text($r['officer_number'])),
                 self::col('Officer','officer_name','q.officer_name',fn($r)=>DataTableFormat::text($r['officer_name'])),
                 self::col('Request','request_type','q.request_type',fn($r)=>DataTableFormat::text(ucwords(strtolower(str_replace('_',' ',$r['request_type']))))),
-                self::col('Context','context_name','q.context_name',fn($r)=>DataTableFormat::text($r['context_name'])),
+                self::col('Location','context_name','q.context_name',fn($r)=>DataTableFormat::text($r['context_name'])),
                 self::col('Detail','detail','q.detail',fn($r)=>DataTableFormat::text($r['detail'])),
-                self::col('Effective','effective_from','q.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+                self::col('Start Date','effective_from','q.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
                 self::col('Workflow','workflow_status','q.workflow_status',fn($r)=>DataTableFormat::badge($r['workflow_status'])),
                 self::actionColumn(fn($r)=>self::arpaWorkflowActions($r)),
             ],'defaultOrder'=>[6,'ASC'],
@@ -700,7 +831,7 @@ final class DataTableRegistry
                 ),
             ],
             'defaultOrder'=>[0,'ASC'],
-            'emptyMessage'=>'No Agrarian Service Centers are available in this scope.',
+            'emptyMessage'=>'No Agrarian Service Centers are available for your current access.',
         ];
     }
 
@@ -1007,7 +1138,7 @@ final class DataTableRegistry
                 self::col('ASC','asc_name','asc_l.name_en',fn($r)=>DataTableFormat::text($r['asc_name'])),
                 self::col('ARPA Division','arpa_name','arpa.name_en',fn($r)=>DataTableFormat::text($r['arpa_name'])),
                 self::col('Type','appointment_type','r.appointment_type',fn($r)=>DataTableFormat::badge($r['appointment_type'])),
-                self::col('Effective From','effective_from','r.requested_effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+                self::col('Start Date','effective_from','r.requested_effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
                 self::col('Action','action','w.action',fn($r)=>DataTableFormat::badge($r['stage'].' '.$r['action'])),
                 self::col('Result','resulting_status','w.new_status',fn($r)=>DataTableFormat::badge($r['resulting_status'])),
                 self::col('Action Officer','action_officer','actor.username',fn($r)=>DataTableFormat::text($r['action_officer'])),
@@ -1035,8 +1166,8 @@ final class DataTableRegistry
                 'officer'=>['column'=>'r.officer_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'Officer']],
                 'appointment_type'=>['column'=>'r.appointment_type','allowed'=>['PERMANENT','ACTING','DUTY_COVERING','ATTEND_TO_DUTY'],'ui'=>['label'=>'Appointment Type','options'=>['PERMANENT'=>'Permanent','ACTING'=>'Acting','DUTY_COVERING'=>'Duty Covering','ATTEND_TO_DUTY'=>'Attend to the Duty']]],
                 'workflow_status'=>['column'=>'r.workflow_status','allowed'=>['CREATED','SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED','RETURNED'],'ui'=>['label'=>'Workflow Stage','options'=>['CREATED'=>'Created','SUBMITTED'=>'Submitted','ASC_VERIFIED'=>'ASC Verified','ASC_APPROVED'=>'ASC Approved','DISTRICT_VERIFIED'=>'District Verified','DISTRICT_APPROVED'=>'District Approved','NATIONAL_VERIFIED'=>'National Verified','RETURNED'=>'Returned']]],
-                'date_from'=>['column'=>'r.requested_effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Effective From','type'=>'date']],
-                'date_to'=>['column'=>'r.requested_effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Effective To','type'=>'date']],
+                'date_from'=>['column'=>'r.requested_effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Start Date From','type'=>'date']],
+                'date_to'=>['column'=>'r.requested_effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Start Date To','type'=>'date']],
             ],
             'columns'=>[
                 self::col('Reference','id','r.id',fn($r)=>'<code>'.e(substr($r['id'],0,8)).'</code>'),
@@ -1046,7 +1177,7 @@ final class DataTableRegistry
                 self::col('ASC','asc_name','asc_l.name_en',fn($r)=>DataTableFormat::text($r['asc_name'])),
                 self::col('ARPA Division','arpa_name','arpa.name_en',fn($r)=>DataTableFormat::text($r['arpa_name'])),
                 self::col('Type','appointment_type','r.appointment_type',fn($r)=>DataTableFormat::badge($r['appointment_type'])),
-                self::col('Effective From','effective_from','r.requested_effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+                self::col('Start Date','effective_from','r.requested_effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
                 self::col('Workflow','workflow_status','r.workflow_status',fn($r)=>$r['workflow_status']==='RETURNED'?'<span class="badge bg-danger">RETURNED FOR CORRECTION</span>':DataTableFormat::badge($r['workflow_status'])),
                 self::col('Submitted By','submitted_by','submitter.username',fn($r)=>DataTableFormat::text($r['submitted_by'])),
                 self::col('Submitted At','submitted_at',null,fn($r)=>DataTableFormat::dateTime($r['submitted_at'])),
@@ -1074,7 +1205,7 @@ final class DataTableRegistry
             self::col('Officer Number','officer_number','o.dad_number',fn($r)=>'<a href="'.e(url('hr/officers/'.$r['officer_id'])).'">'.e($r['officer_number']).'</a>'),
             self::col('Officer','officer_name','o.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_name'])),
             self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'])),self::col('Type','appointment_type','a.appointment_type',fn($r)=>DataTableFormat::badge($r['appointment_type'])),
-            self::col('Effective From','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::col('Effective To','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'])),
+            self::col('Start Date','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::col('End Date','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'])),
             self::col('End Reason','end_reason','er.name_en',fn($r)=>DataTableFormat::text($r['end_reason'],'Not available')),self::col('Workflow','workflow_status','req.workflow_status',fn($r)=>DataTableFormat::badge($r['workflow_status'])),self::col('Source','record_origin','a.record_origin',fn($r)=>DataTableFormat::badge($r['record_origin'])),
             self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/officers/'.$r['officer_id'])).'">Officer Profile</a>')];
         $definition['defaultOrder']=[0,'ASC'];
@@ -1088,7 +1219,7 @@ final class DataTableRegistry
             'select'=>['v.id','v.dad_number','v.name_en','v.asc_location_id','v.asc_name','v.district_location_id','v.district_name','v.province_location_id','v.province_name','v.last_officer_id','v.last_officer','v.last_appointment_type','v.last_end_date','v.last_end_reason','v.vacancy_since'],'count'=>'v.id','baseParams'=>$geo['params'],
             'searchable'=>['v.dad_number','v.name_en','v.asc_name','v.district_name','v.province_name','v.last_officer'],
             'filters'=>['province'=>['column'=>'v.province_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'Province']],'district'=>['column'=>'v.district_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'District']],'asc'=>['column'=>'v.asc_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ASC']]],
-            'columns'=>[self::col('Province','province_name','v.province_name',fn($r)=>DataTableFormat::text($r['province_name'])),self::col('District','district_name','v.district_name',fn($r)=>DataTableFormat::text($r['district_name'])),self::col('ASC','asc_name','v.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),self::col('ARPA Division Number','dad_number','v.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'])),self::col('ARPA Division','name_en','v.name_en',fn($r)=>DataTableFormat::text($r['name_en'])),self::col('Last Officer','last_officer','v.last_officer',fn($r)=>DataTableFormat::text($r['last_officer'],'None')),self::col('Last Type','last_appointment_type','v.last_appointment_type',fn($r)=>DataTableFormat::text($r['last_appointment_type'])),self::col('Last End','last_end_date','v.last_end_date',fn($r)=>DataTableFormat::date($r['last_end_date'])),self::col('End Reason','last_end_reason','v.last_end_reason',fn($r)=>DataTableFormat::text($r['last_end_reason'])),self::col('Vacancy Since','vacancy_since','v.vacancy_since',fn($r)=>DataTableFormat::date($r['vacancy_since'])),self::actionColumn(fn($r)=>Auth::can('arpa.appointment.create')?'<a class="btn btn-sm btn-primary" href="'.e(url('hr/arpa-appointments/divisions/create?asc_location_id='.$r['asc_location_id'].'&arpa_division_location_id='.$r['id'])).'">New Appointment</a>':'')],
+            'columns'=>[self::col('Province','province_name','v.province_name',fn($r)=>DataTableFormat::text($r['province_name'])),self::col('District','district_name','v.district_name',fn($r)=>DataTableFormat::text($r['district_name'])),self::col('ASC','asc_name','v.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),self::col('ARPA Division Number','dad_number','v.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'])),self::col('ARPA Division','name_en','v.name_en',fn($r)=>DataTableFormat::text($r['name_en'])),self::col('Last Officer','last_officer','v.last_officer',fn($r)=>DataTableFormat::text($r['last_officer'],'None')),self::col('Last Type','last_appointment_type','v.last_appointment_type',fn($r)=>DataTableFormat::text($r['last_appointment_type'])),self::col('Last End','last_end_date','v.last_end_date',fn($r)=>DataTableFormat::date($r['last_end_date'])),self::col('End Reason','last_end_reason','v.last_end_reason',fn($r)=>DataTableFormat::text($r['last_end_reason'])),self::col('Vacancy Since','vacancy_since','v.vacancy_since',fn($r)=>DataTableFormat::date($r['vacancy_since'])),self::actionColumn(fn($r)=>Auth::can('arpa.appointment.create')?'<a class="btn btn-sm btn-primary" href="'.e(url('hr/arpa-appointments/new?asc_location_id='.$r['asc_location_id'].'&arpa_division_location_id='.$r['id'])).'">New Assignment</a>':'')],
             'defaultOrder'=>[2,'ASC']];
     }
 
@@ -1099,7 +1230,7 @@ final class DataTableRegistry
             'select'=>['q.row_key','q.issue_type','q.severity','q.officer_id','q.officer_number','q.officer_name','q.nic','q.asc_location_id','q.asc_name','q.arpa_divisions','q.appointment_types','q.effective_periods','q.related_ids','q.origin','q.explanation','q.recommended_action'],'count'=>'q.row_key','baseParams'=>$geo['params'],
             'searchable'=>['q.issue_type','q.officer_number','q.officer_name','q.nic','q.asc_name','q.arpa_divisions','q.appointment_types','q.explanation'],
             'filters'=>['category'=>['allowed'=>['CURRENT_ACTION_REQUIRED','HISTORICAL_EXCEPTIONS','LEGACY_DATA_WARNINGS'],'build'=>fn($v)=>match($v){'CURRENT_ACTION_REQUIRED'=>["{$current} AND {$reviewed}",[]],'HISTORICAL_EXCEPTIONS'=>["q.severity='HISTORICAL_EXCEPTION' AND {$reviewed}",[]],default=>["q.severity='WARNING' AND {$reviewed}",[]]},'ui'=>['label'=>'Show','options'=>['CURRENT_ACTION_REQUIRED'=>'Needs Attention','HISTORICAL_EXCEPTIONS'=>'Historical Records','LEGACY_DATA_WARNINGS'=>'Old Data Warnings']]],'severity'=>['column'=>'q.severity','allowed'=>['ERROR','WARNING','HISTORICAL_EXCEPTION'],'ui'=>['label'=>'Status','options'=>['ERROR'=>'Needs Correction','WARNING'=>'Please Check','HISTORICAL_EXCEPTION'=>'Old Data Warning']]],'issue_type'=>['column'=>'q.issue_type','pattern'=>'/^[A-Z_]{3,80}$/','ui'=>['label'=>'Issue','options'=>array_combine($types=['DIVISION_MULTIPLE_OPEN','OFFICER_MULTIPLE_PERMANENT','OFFICER_MULTIPLE_ACTING','OFFICER_MULTIPLE_ATTEND_TO_DUTY','DEPENDENT_WITHOUT_PERMANENT','PERMANENT_SERVICE_WITH_ATTEND_TO_DUTY','NON_PERMANENT_SERVICE_WITH_ACTING','EXCLUSIVE_FUNCTION_OVERLAP','MULTIPLE_EXCLUSIVE_FUNCTIONS','MISSING_ASC_OFFICE_ASSIGNMENT','APPOINTMENT_OUTSIDE_ASC','INVALID_DATE_RANGE','OPEN_APPOINTMENT_WITH_END_REASON','ENDED_APPOINTMENT_WITHOUT_END_REASON','FUTURE_OVERLAP_CONFLICT','LEGACY_HISTORICAL_EXCEPTION','MANUAL_REVIEW_REQUIRED'],array_map(fn($type)=>ArpaAppointmentIssuePresentation::for($type)['title'],$types))]],'asc'=>['column'=>'q.asc_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ASC']]],
-            'columns'=>[self::col('Issue','issue_type','q.issue_type',fn($r)=>'<div class="fw-semibold">'.e(ArpaAppointmentIssuePresentation::for($r['issue_type'])['title']).'</div>'.DataTableFormat::badge(ArpaAppointmentIssuePresentation::severity($r['severity']))),self::col('Officer','officer_name','q.officer_name',fn($r)=>DataTableFormat::text(trim($r['officer_number'].' - '.$r['officer_name']))),self::col('ASC','asc_name','q.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),self::col('ARPA Division','arpa_divisions','q.arpa_divisions',fn($r)=>DataTableFormat::text($r['arpa_divisions'])),self::col('Appointment Type','appointment_types','q.appointment_types',fn($r)=>DataTableFormat::text(str_replace('_',' ',$r['appointment_types']))),self::col('Appointment Period','effective_periods','q.effective_periods',fn($r)=>DataTableFormat::text($r['effective_periods'])),self::col('What to check','recommended_action','q.recommended_action',fn($r)=>DataTableFormat::text(ArpaAppointmentIssuePresentation::for($r['issue_type'])['what_to_check'])),self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/issues/'.rawurlencode($r['row_key']))).'">Review</a>')],
+            'columns'=>[self::col('Issue','issue_type','q.issue_type',fn($r)=>'<div class="fw-semibold">'.e(ArpaAppointmentIssuePresentation::for($r['issue_type'])['title']).'</div>'.DataTableFormat::badge(ArpaAppointmentIssuePresentation::severity($r['severity']))),self::col('Officer','officer_name','q.officer_name',fn($r)=>DataTableFormat::text(trim($r['officer_number'].' - '.$r['officer_name']))),self::col('ASC','asc_name','q.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),self::col('ARPA Division','arpa_divisions','q.arpa_divisions',fn($r)=>DataTableFormat::text($r['arpa_divisions'])),self::col('Appointment Type','appointment_types','q.appointment_types',fn($r)=>DataTableFormat::enumText($r['appointment_types'])),self::col('Appointment Period','effective_periods','q.effective_periods',fn($r)=>DataTableFormat::text($r['effective_periods'])),self::col('What to check','recommended_action','q.recommended_action',fn($r)=>DataTableFormat::text(ArpaAppointmentIssuePresentation::for($r['issue_type'])['what_to_check'])),self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/issues/'.rawurlencode($r['row_key']))).'">Review</a>')],
             'defaultOrder'=>[0,'ASC']];
     }
 
@@ -1129,7 +1260,7 @@ final class DataTableRegistry
         $id=self::requiredUuid($input,'officer_id');$access=self::arpaOfficerGeoAccess('h.officer_id');return [
             'permission'=>'arpa.appointment.view','export'=>false,'with'=>$access['with'],
             'from'=>'arpa_service_permanency_history h JOIN system_user u ON u.id=h.changed_by','select'=>['h.id','h.previous_status','h.new_status','h.effective_from','h.reason','u.username','h.changed_at'],'count'=>'h.id','baseWhere'=>array_merge(['h.officer_id=?'],$access['where']),'baseParams'=>array_merge($access['params'],[$id]),'searchable'=>['h.previous_status','h.new_status','h.reason','u.username'],
-            'columns'=>[self::col('Effective From','effective_from','h.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::col('Previous','previous_status','h.previous_status',fn($r)=>DataTableFormat::text($r['previous_status'])),self::col('New','new_status','h.new_status',fn($r)=>DataTableFormat::badge($r['new_status'])),self::col('Recorded By','username','u.username',fn($r)=>DataTableFormat::text($r['username'])),self::col('Reason','reason','h.reason',fn($r)=>DataTableFormat::text($r['reason']))],'defaultOrder'=>[0,'DESC'],
+            'columns'=>[self::col('Start Date','effective_from','h.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::col('Previous','previous_status','h.previous_status',fn($r)=>DataTableFormat::enumText($r['previous_status'])),self::col('New','new_status','h.new_status',fn($r)=>DataTableFormat::badge($r['new_status'])),self::col('Recorded By','username','u.username',fn($r)=>DataTableFormat::text($r['username'])),self::col('Reason','reason','h.reason',fn($r)=>DataTableFormat::text($r['reason']))],'defaultOrder'=>[0,'DESC'],
         ];
     }
 
@@ -1141,7 +1272,7 @@ final class DataTableRegistry
 
     private static function subjects():array
     {
-        return ['permission'=>'subject.master.view','export'=>true,'filename'=>'central-subject-master','from'=>'subject_master s','select'=>['s.id','s.dad_number','s.system_key','s.name_en','s.name_si','s.name_ta','s.subject_kind','s.active','s.approval_status','s.effective_from','s.effective_to'],'count'=>'s.id','searchable'=>['s.dad_number','s.system_key','s.name_en','s.name_si','s.name_ta','s.subject_kind'],'filters'=>['subject_kind'=>['column'=>'s.subject_kind','allowed'=>['NORMAL','AGRARIAN_BANK','SALES_SHOP','SITHAMU'],'ui'=>['label'=>'Subject Kind','options'=>['NORMAL'=>'Normal','AGRARIAN_BANK'=>'Agrarian Bank','SALES_SHOP'=>'Sales Shop','SITHAMU'=>'Sithamu']]],'active'=>['column'=>'s.active','allowed'=>['0','1'],'ui'=>['label'=>'Status','options'=>['1'=>'Active','0'=>'Inactive']]]],'columns'=>[self::col('DAD / Business Number','dad_number','s.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'],'Not assigned')),self::col('Subject','name_en','s.name_en',fn($r)=>DataTableFormat::text($r['name_en'])),self::col('System Key','system_key','s.system_key',fn($r)=>'<code>'.e($r['system_key']).'</code>'),self::col('Kind','subject_kind','s.subject_kind',fn($r)=>DataTableFormat::badge($r['subject_kind'])),self::col('Status','active','s.active',fn($r)=>DataTableFormat::badge($r['active']?'ACTIVE':'INACTIVE')),self::col('Effective From','effective_from','s.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::actionColumn(fn($r)=>Auth::can('subject.master.edit')?'<a class="btn btn-sm btn-outline-primary" href="'.e(url('subjects/'.$r['id'].'/edit')).'">Edit</a>':'')],'defaultOrder'=>[1,'ASC']];
+        return ['permission'=>'subject.master.view','export'=>true,'filename'=>'central-subject-master','from'=>'subject_master s','select'=>['s.id','s.dad_number','s.system_key','s.name_en','s.name_si','s.name_ta','s.subject_kind','s.active','s.approval_status','s.effective_from','s.effective_to'],'count'=>'s.id','searchable'=>['s.dad_number','s.system_key','s.name_en','s.name_si','s.name_ta','s.subject_kind'],'filters'=>['subject_kind'=>['column'=>'s.subject_kind','allowed'=>['NORMAL','AGRARIAN_BANK','SALES_SHOP','SITHAMU'],'ui'=>['label'=>'Subject Kind','options'=>['NORMAL'=>'Normal','AGRARIAN_BANK'=>'Agrarian Bank','SALES_SHOP'=>'Sales Shop','SITHAMU'=>'Sithamu']]],'active'=>['column'=>'s.active','allowed'=>['0','1'],'ui'=>['label'=>'Status','options'=>['1'=>'Active','0'=>'Inactive']]]],'columns'=>[self::col('DAD / Business Number','dad_number','s.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'],'Not assigned')),self::col('Subject','name_en','s.name_en',fn($r)=>DataTableFormat::text($r['name_en'])),self::col('System Key','system_key','s.system_key',fn($r)=>'<code>'.e($r['system_key']).'</code>'),self::col('Kind','subject_kind','s.subject_kind',fn($r)=>DataTableFormat::badge($r['subject_kind'])),self::col('Status','active','s.active',fn($r)=>DataTableFormat::badge($r['active']?'ACTIVE':'INACTIVE')),self::col('Start Date','effective_from','s.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::actionColumn(fn($r)=>Auth::can('subject.master.edit')?'<a class="btn btn-sm btn-outline-primary" href="'.e(url('subjects/'.$r['id'].'/edit')).'">Edit</a>':'')],'defaultOrder'=>[1,'ASC']];
     }
 
     private static function legacyArpaReview(string $itemType): array
@@ -1223,7 +1354,7 @@ final class DataTableRegistry
             'arpa_division'=>['column'=>'COALESCE(mr.selected_target_arpa_id,p.arpa_location_id)','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ARPA Division','searchable'=>true]],
             'assignment_category'=>['allowed'=>array_keys($assignmentLabels),'build'=>fn($v)=>$v==='ARPA_DIVISION'?["p.assignment_category='ARPA_DIVISION'",[]]:['p.subject_kind=?',[$v]],'ui'=>['label'=>'Assignment Category','options'=>$assignmentLabels]],
             'appointment_type'=>['column'=>'p.appointment_type','allowed'=>['PERMANENT','ACTING','DUTY_COVERING','ATTEND_TO_DUTY'],'ui'=>['label'=>'Appointment Type','options'=>['PERMANENT'=>'Permanent','ACTING'=>'Acting','DUTY_COVERING'=>'Duty Covering','ATTEND_TO_DUTY'=>'Attend to the Duty']]],
-            'effective_from'=>['column'=>'p.effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Effective From','type'=>'date']],
+            'effective_from'=>['column'=>'p.effective_from','operator'=>'>=','date'=>true,'ui'=>['label'=>'Start Date','type'=>'date']],
             'effective_to'=>['column'=>'p.effective_from','operator'=>'<=','date'=>true,'ui'=>['label'=>'Effective Through','type'=>'date']],
             'period_status'=>['allowed'=>['OPEN','ENDED'],'build'=>fn($v)=>[$v==='OPEN'?'p.effective_to IS NULL':'p.effective_to IS NOT NULL',[]],'ui'=>['label'=>'Open / Ended','options'=>['OPEN'=>'Open','ENDED'=>'Ended']]],
             'current_classification'=>['column'=>'p.current_classification','allowed'=>['CURRENT','HISTORICAL'],'ui'=>['label'=>'Current / Historical','options'=>['CURRENT'=>'Current candidate','HISTORICAL'=>'Historical / ended']]],
@@ -1241,12 +1372,12 @@ final class DataTableRegistry
             self::col('Officer DAD Number','officer_number','o.dad_number',fn($r)=>'<strong>'.e($r['officer_number']).'</strong>'),
             self::col('Officer Name','officer_name','o.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_name'])),
             self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'])),
-            self::col('Service Permanency','service_permanency_snapshot','p.service_permanency_snapshot',fn($r)=>DataTableFormat::text($r['service_permanency_snapshot'],'Unknown')),
+            self::col('Service Permanency','service_permanency_snapshot','p.service_permanency_snapshot',fn($r)=>DataTableFormat::enumText($r['service_permanency_snapshot'],'Unknown'),fn($r)=>DataTableFormat::enumLabel($r['service_permanency_snapshot'],'Unknown')),
             self::col('Assignment','assignment_display','p.assignment_category',fn($r)=>DataTableFormat::badge($r['assignment_category']==='ARPA_DIVISION'?$r['appointment_type']:$r['subject_kind']),fn($r)=>$r['assignment_category']==='ARPA_DIVISION'?$r['appointment_type']:$r['subject_kind']),
             self::col('ASC','asc_name','a.name_en',fn($r)=>DataTableFormat::text(trim((string)$r['asc_number'].' '.(string)$r['asc_name']),'Unresolved')),
-            self::col('ARPA Division / Subject','assignment_context','ar.name_en',fn($r)=>DataTableFormat::text($r['assignment_category']==='ARPA_DIVISION'?trim((string)$r['arpa_number'].' '.(string)$r['arpa_name']):str_replace('_',' ',$r['subject_kind']))),
-            self::col('Effective From','effective_from','p.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
-            self::col('Effective To','effective_to','p.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Open')),
+            self::col('ARPA Division / Subject','assignment_context','ar.name_en',fn($r)=>DataTableFormat::text($r['assignment_category']==='ARPA_DIVISION'?trim((string)$r['arpa_number'].' '.(string)$r['arpa_name']):DataTableFormat::enumLabel($r['subject_kind']))),
+            self::col('Start Date','effective_from','p.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+            self::col('End Date','effective_to','p.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Current')),
             self::col('Baseline Period','baseline_classification',$baselineClass,fn($r)=>DataTableFormat::badge(match($r['baseline_classification']){'PRE_BASELINE_CARRIED_FORWARD'=>'PRE-2025 CARRIED FORWARD','LEGACY_PERIOD'=>'2025+ LEGACY','PRE_BASELINE_HISTORY'=>'PRE-2025 HISTORY',default=>'DATE REVIEW REQUIRED'})),
             self::col('End Reason','legacy_reason_text','p.legacy_reason_text',fn($r)=>DataTableFormat::text($r['legacy_reason_text'],'None recorded')),
             self::col('Workflow','workflow_state','p.workflow_state',fn($r)=>DataTableFormat::badge($r['workflow_state'])),
@@ -1287,7 +1418,7 @@ final class DataTableRegistry
             $columns,
             self::col('Display Order', 'display_order', 'm.display_order'),
             self::col('Active', 'active', 'm.active', fn($r) => DataTableFormat::badge($r['active'] ? 'ACTIVE' : 'INACTIVE'), fn($r) => $r['active'] ? 'ACTIVE' : 'INACTIVE'),
-            self::col('Effective From', 'effective_from', 'm.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+            self::col('Start Date', 'effective_from', 'm.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
             self::col('Approval', 'approval_status', 'm.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
             self::actionColumn(fn($r) => self::hrActions($type, $r))
         );
@@ -1328,7 +1459,7 @@ final class DataTableRegistry
                 self::col('Account Status', 'account_status', 'su.account_status', fn($r) => DataTableFormat::badge($r['account_status'])),
                 self::col('Enabled', 'enabled', 'su.enabled', fn($r) => DataTableFormat::badge($r['enabled'] ? 'ENABLED' : 'DISABLED'), fn($r) => $r['enabled'] ? 'ENABLED' : 'DISABLED'),
                 self::col('Role(s)','effective_roles',$effectiveRoles,fn($r)=>DataTableFormat::text($r['effective_roles'],'None')),
-                self::col('Scope(s)','effective_scopes',$effectiveScopes,fn($r)=>DataTableFormat::text($r['effective_scopes'],'None')),
+                self::col('Assigned Locations','effective_scopes',$effectiveScopes,fn($r)=>DataTableFormat::accessLocations($r['effective_scopes'])),
                 self::col('Password Setup','password_setup_required','su.password_setup_required',fn($r)=>DataTableFormat::badge($r['password_setup_required']?'REQUIRED':'COMPLETE'),fn($r)=>$r['password_setup_required']?'REQUIRED':'COMPLETE'),
                 self::col('Last Password Changed','password_changed_at','su.password_changed_at',fn($r)=>DataTableFormat::dateTime($r['password_changed_at'],'Not recorded')),
                 self::actionColumn(function($r):string{
@@ -1466,10 +1597,10 @@ final class DataTableRegistry
             'columns' => [
                 self::col('Name', 'display_name', 'su.display_name', fn($r) => DataTableFormat::text($r['display_name'])),
                 self::col('Username', 'username', 'su.username', fn($r) => DataTableFormat::text($r['username'])),
-                self::col('Role', 'role_name', 'r.role_name', fn($r) => DataTableFormat::text($r['role_name'] . ' (' . $r['role_code'] . ')'), fn($r) => $r['role_name'] . ' (' . $r['role_code'] . ')'),
+                self::col('Role', 'role_name', 'r.role_name', fn($r) => DataTableFormat::text($r['role_name']), fn($r) => $r['role_name']),
                 self::col('Assigned Location', 'assigned_locations', 'sx.assigned_locations', fn($r) => DataTableFormat::text($r['assigned_locations'],'National / Not set')),
-                self::col('Effective From', 'effective_from', 'uar.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
-                self::col('Effective To', 'effective_to', 'uar.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Open')),
+                self::col('Start Date', 'effective_from', 'uar.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+                self::col('End Date', 'effective_to', 'uar.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Current')),
                 self::col('Approval', 'approval_status', 'uar.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
                 self::col('Active', 'active', 'uar.active', fn($r) => DataTableFormat::badge($r['active'] ? 'ACTIVE' : 'INACTIVE'), fn($r) => $r['active'] ? 'ACTIVE' : 'INACTIVE'),
                 self::actionColumn(fn($r) => self::roleAssignmentActions($r)),
@@ -1490,7 +1621,7 @@ final class DataTableRegistry
             'count' => 'uas.id','baseWhere'=>[$visibility],'baseParams'=>$ids,
             'searchable' => ['su.username', 'r.role_name', 'uas.scope_type', 'uas.scope_mode', 'l.dad_number', 'l.name_en'],
             'filters' => [
-                'scope_type' => ['column' => 'uas.scope_type', 'pattern' => '/^[A-Z0-9_]{1,50}$/', 'ui' => ['label' => 'Scope Type']],
+                'scope_type' => ['column' => 'uas.scope_type', 'pattern' => '/^[A-Z0-9_]{1,50}$/', 'ui' => ['label' => 'Location Type']],
                 'location' => ['column' => "CONCAT_WS(' ',l.dad_number,l.name_en)", 'operator' => 'LIKE', 'ui' => ['label' => 'Location', 'type' => 'text', 'placeholder' => 'DAD number or name']],
                 'approval_status' => ['column' => 'uas.approval_status', 'allowed' => self::workflowStatuses(), 'ui' => ['label' => 'Approval Status', 'options' => self::workflowOptions()]],
                 'effective_status' => ['allowed' => ['ACTIVE', 'EXPIRED', 'FUTURE', 'INACTIVE'], 'build' => fn($value) => self::effectiveClause('uas', $value), 'ui' => ['label' => 'Effective Status', 'options' => ['ACTIVE' => 'Currently Active', 'EXPIRED' => 'Expired', 'FUTURE' => 'Future', 'INACTIVE' => 'Inactive']]],
@@ -1498,11 +1629,11 @@ final class DataTableRegistry
             'columns' => [
                 self::col('User', 'username', 'su.username', fn($r) => DataTableFormat::text($r['username'])),
                 self::col('Role', 'role_name', 'r.role_name', fn($r) => DataTableFormat::text($r['role_name'])),
-                self::col('Type', 'scope_type', 'uas.scope_type', fn($r) => DataTableFormat::text($r['scope_type'])),
-                self::col('Target', 'location_name', 'l.name_en', fn($r) => DataTableFormat::text($r['location_name'] ? $r['location_number'] . ' · ' . $r['location_name'] : '', 'National'), fn($r) => $r['location_name'] ? $r['location_number'] . ' - ' . $r['location_name'] : 'National'),
-                self::col('Mode', 'scope_mode', 'uas.scope_mode', fn($r) => DataTableFormat::text($r['scope_mode'])),
-                self::col('Effective From', 'effective_from', 'uas.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
-                self::col('Effective To', 'effective_to', 'uas.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Open')),
+                self::col('Location Type', 'scope_type', 'uas.scope_type', fn($r) => DataTableFormat::scopeType($r['scope_type'])),
+                self::col('Assigned Location', 'location_name', 'l.name_en', fn($r) => DataTableFormat::text($r['location_name'] ? $r['location_number'] . ' · ' . $r['location_name'] : '', 'National Level'), fn($r) => $r['location_name'] ? $r['location_number'] . ' - ' . $r['location_name'] : 'National Level'),
+                self::col('Access', 'scope_mode', 'uas.scope_mode', fn($r) => DataTableFormat::scopeMode($r['scope_mode'])),
+                self::col('Start Date', 'effective_from', 'uas.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
+                self::col('End Date', 'effective_to', 'uas.effective_to', fn($r) => DataTableFormat::date($r['effective_to'], 'Current')),
                 self::col('Approval', 'approval_status', 'uas.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
                 self::actionColumn(fn($r) => self::scopeActions($r)),
             ],
@@ -1617,6 +1748,17 @@ final class DataTableRegistry
             'INACTIVE' => ["{$alias}.active=0", []],
             default => null,
         };
+    }
+
+    private static function locationActions(array $row): string
+    {
+        $actions=Auth::can('location.view')?'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('locations/'.$row['id'])).'">View</a>':'';
+        if($row['approval_status']==='DRAFT'&&Auth::can('location.submit')){
+            $actions.=DataTableFormat::actionForm('locations/'.$row['id'].'/submit','Submit','btn-outline-primary');
+        }elseif($row['approval_status']==='SUBMITTED'&&Auth::can('location.approve')&&!self::isMaker($row['created_by'])){
+            $actions.=DataTableFormat::actionForm('locations/'.$row['id'].'/approve','Approve','btn-success');
+        }
+        return $actions;
     }
 
     private static function officeActions(array $row): string

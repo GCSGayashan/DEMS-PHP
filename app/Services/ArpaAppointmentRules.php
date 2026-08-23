@@ -15,20 +15,40 @@ final class ArpaAppointmentRules
     public static function assertAppointmentTypeAllowed(string $permanency, string $type, bool $hasPermanent): void
     {
         if (!in_array($permanency, self::PERMANENCIES, true)) {
-            throw new DomainException('Service permanency must be recorded before an appointment is created.');
+            throw new DomainException('Service permanency must be recorded before an assignment is created.');
         }
         if (!in_array($type, self::APPOINTMENT_TYPES, true)) {
             throw new DomainException('Unsupported ARPA Division appointment type.');
         }
         if ($type !== 'PERMANENT' && !$hasPermanent) {
-            throw new DomainException('An active Permanent ARPA Division is required first.');
+            throw new DomainException('Assign a Permanent ARPA Division to this officer first.');
         }
         if ($permanency === 'PERMANENT_IN_SERVICE' && $type === 'ATTEND_TO_DUTY') {
-            throw new DomainException('Permanent-in-Service officers cannot receive Attend to the Duty appointments.');
+            throw new DomainException('Attend to the Duty can only be assigned to an officer who is not Permanent In Service.');
         }
         if ($permanency === 'NOT_PERMANENT_IN_SERVICE' && $type === 'ACTING') {
-            throw new DomainException('Not-Permanent-in-Service officers cannot receive Acting appointments.');
+            throw new DomainException('Acting can only be assigned to an officer who is Permanent In Service.');
         }
+    }
+
+    /** @return list<string> */
+    public static function allowedAppointmentTypes(
+        string $permanency,
+        bool $hasPermanent,
+        bool $permanentConflict,
+        bool $actingConflict,
+        bool $attendToDutyConflict
+    ): array {
+        if (!in_array($permanency, self::PERMANENCIES, true)) return [];
+
+        $allowed = [];
+        if (!$permanentConflict) $allowed[] = 'PERMANENT';
+        if (!$hasPermanent) return $allowed;
+
+        if ($permanency === 'PERMANENT_IN_SERVICE' && !$actingConflict) $allowed[] = 'ACTING';
+        $allowed[] = 'DUTY_COVERING';
+        if ($permanency === 'NOT_PERMANENT_IN_SERVICE' && !$attendToDutyConflict) $allowed[] = 'ATTEND_TO_DUTY';
+        return $allowed;
     }
 
     public static function subjectIsExclusive(string $kind): bool

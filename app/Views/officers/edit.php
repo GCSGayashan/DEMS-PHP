@@ -318,7 +318,7 @@ Optional. Upload only to replace current photograph.
 </div>
 
 <div class="col-md-6">
-<label class="form-label">Effective From *</label>
+<label class="form-label">Start Date *</label>
 <input
     type="date"
     class="form-control"

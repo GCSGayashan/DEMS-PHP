@@ -18,3 +18,24 @@ document.querySelectorAll('select[data-searchable-select]').forEach((select) => 
     });
     select.parentNode.insertBefore(search, select);
 });
+
+document.querySelectorAll('[data-context-search]').forEach((search) => {
+    const groups = Array.from(document.querySelectorAll('[data-context-group]'));
+    const noResults = document.querySelector('[data-context-no-results]');
+    const filterContexts = () => {
+        const term = search.value.trim().toLocaleLowerCase();
+        let visibleRows = 0;
+        groups.forEach((group) => {
+            let visibleInGroup = 0;
+            group.querySelectorAll('[data-context-row]').forEach((row) => {
+                const visible = term === '' || (row.dataset.contextSearchText || '').includes(term);
+                row.hidden = !visible;
+                if (visible) visibleInGroup++;
+            });
+            group.hidden = visibleInGroup === 0;
+            visibleRows += visibleInGroup;
+        });
+        if (noResults) noResults.hidden = visibleRows !== 0;
+    };
+    search.addEventListener('input', filterContexts);
+});

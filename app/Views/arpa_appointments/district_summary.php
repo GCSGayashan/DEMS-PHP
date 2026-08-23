@@ -3,7 +3,7 @@
 <div class="page-heading">
     <div>
         <div class="breadcrumb-lite">
-            Human Resource Management / ARPA Officer Appointments
+            Human Resource Management / ARPA Officer Assignments
         </div>
 
         <h1><?= e($title) ?></h1>

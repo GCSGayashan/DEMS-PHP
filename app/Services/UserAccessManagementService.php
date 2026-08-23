@@ -12,7 +12,21 @@ final class UserAccessManagementService
 {
     private const TECHNICAL_MANAGER_ROLES = ['SYSTEM_ADMIN', 'SECURITY_ADMIN', 'USER_ADMIN'];
     private const NATIONAL_MANAGEABLE_LEVELS = ['NATIONAL', 'DISTRICT'];
+    private const NATIONAL_SUBJECT_MANAGEABLE_ROLES = [
+        'NATIONAL_SUBJECT_OFFICER',
+        'NATIONAL_VIEWER',
+        'DISTRICT_SUBJECT_OFFICER',
+        'DISTRICT_VIEWER',
+        'ASC_SUBJECT_OFFICER',
+        'ASC_VIEWER',
+    ];
     private const DISTRICT_MANAGEABLE_LEVELS = ['DISTRICT', 'ASC'];
+    private const DISTRICT_SUBJECT_MANAGEABLE_ROLES = [
+        'DISTRICT_SUBJECT_OFFICER',
+        'DISTRICT_VIEWER',
+        'ASC_SUBJECT_OFFICER',
+        'ASC_VIEWER',
+    ];
     private array $authorityCache = [];
     private array $districtDescendantsCache = [];
 
@@ -24,7 +38,7 @@ final class UserAccessManagementService
         $date ??= date('Y-m-d');
         $context = Auth::activeContextForUser($actorId);
         if ($context === null && Auth::isCurrentUser($actorId)) {
-            throw new DomainException('Select an active working context before managing users.');
+            throw new DomainException('Choose a role and office before managing users.');
         }
         $cacheKey = $actorId . '|' . $date . '|' . ($context['role_assignment_id'] ?? 'aggregate') . '|' . ($context['scope_assignment_id'] ?? '');
         if (isset($this->authorityCache[$cacheKey])) {
@@ -71,6 +85,14 @@ final class UserAccessManagementService
             }
         }
 
+        foreach ($assignments as $assignment) {
+            if ($assignment['role_code'] === 'NATIONAL_SUBJECT_OFFICER'
+                && $assignment['scope_type'] === 'NATIONAL'
+                && $assignment['scope_mode'] === 'NATIONAL') {
+                return $this->authorityCache[$cacheKey] = ['kind' => 'NATIONAL_SUBJECT', 'is_system_admin' => false, 'district_ids' => []];
+            }
+        }
+
         $districtIds = [];
         foreach ($assignments as $assignment) {
             if ($assignment['role_code'] !== 'DISTRICT_ADMIN') {
@@ -87,7 +109,20 @@ final class UserAccessManagementService
             return $this->authorityCache[$cacheKey] = ['kind' => 'DISTRICT', 'is_system_admin' => false, 'district_ids' => $districtIds];
         }
 
-        throw new DomainException('An active approved user-management authority assignment is required.');
+        foreach ($assignments as $assignment) {
+            if ($assignment['role_code'] === 'DISTRICT_SUBJECT_OFFICER'
+                && $assignment['scope_type'] === 'DISTRICT'
+                && $assignment['scope_mode'] === 'INCLUDE_CHILDREN'
+                && $assignment['location_id'] !== null) {
+                return $this->authorityCache[$cacheKey] = [
+                    'kind' => 'DISTRICT_SUBJECT',
+                    'is_system_admin' => false,
+                    'district_ids' => [(string)$assignment['location_id']],
+                ];
+            }
+        }
+
+        throw new DomainException('You do not have an active approved role for User Management.');
     }
 
     public function assertActorPermissions(string $actorId, array $permissions, ?string $date = null): void
@@ -99,7 +134,7 @@ final class UserAccessManagementService
         $placeholders = implode(',', array_fill(0, count($permissions), '?'));
         $context = Auth::activeContextForUser($actorId);
         if ($context === null && Auth::isCurrentUser($actorId)) {
-            throw new DomainException('Select an active working context before managing users.');
+            throw new DomainException('Choose a role and office before managing users.');
         }
         $assignmentClause = $context === null ? '' : ' AND uar.id=?';
         $sql = "SELECT DISTINCT p.permission_key
@@ -121,7 +156,7 @@ final class UserAccessManagementService
         $actual = array_column($stmt->fetchAll(), 'permission_key');
         foreach ($permissions as $permission) {
             if (!in_array($permission, $actual, true)) {
-                throw new DomainException("Administrative permission {$permission} is required.");
+                throw new DomainException('You do not have permission to perform this action.');
             }
         }
     }
@@ -146,6 +181,9 @@ final class UserAccessManagementService
         }
         if ($authority['kind'] === 'NATIONAL') {
             return $this->locationRows(['DISTRICT'], $date);
+        }
+        if ($authority['kind'] === 'NATIONAL_SUBJECT') {
+            return $this->locationRows(['DISTRICT', 'ASC'], $date);
         }
 
         $districts = $authority['district_ids'];
@@ -208,7 +246,7 @@ final class UserAccessManagementService
         $stmt->execute([$roleId]);
         $role = $stmt->fetch();
         if (!$role || !$this->roleAllowed($authority, $role)) {
-            throw new DomainException('The selected role is outside your user-management authority.');
+            throw new DomainException('You do not have permission to assign this role.');
         }
         $type = ['DISTRICT'=>'DISTRICT','ASC'=>'ASC','ARPA'=>'ARPA_DIVISION'][(string)$role['role_level']] ?? null;
         if ($type === null) {
@@ -218,7 +256,7 @@ final class UserAccessManagementService
         $searchSql = $query === '' ? '' : " AND CONCAT_WS(' ',l.dad_number,l.name_en,l.official_code) LIKE ?";
         $searchParams = $query === '' ? [] : ['%' . $query . '%'];
 
-        if ($authority['kind'] !== 'DISTRICT') {
+        if (!in_array($authority['kind'], ['DISTRICT', 'DISTRICT_SUBJECT'], true)) {
             $sql = "SELECT l.id,l.dad_number,l.name_en,l.official_code,lt.system_key location_type
                     FROM location l JOIN location_type lt ON lt.id=l.location_type_id
                     WHERE lt.system_key=? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
@@ -253,7 +291,7 @@ final class UserAccessManagementService
     public function assertCanManageUser(string $actorId, string $targetUserId, ?string $date = null): void
     {
         if (!$this->canManageUser($actorId, $targetUserId, $date)) {
-            throw new DomainException('The selected user is outside your user-management authority.');
+            throw new DomainException('You do not have permission to manage this user.');
         }
     }
 
@@ -283,7 +321,17 @@ final class UserAccessManagementService
                 }
                 continue;
             }
-            if (!in_array($level, self::DISTRICT_MANAGEABLE_LEVELS, true)) {
+            if ($authority['kind'] === 'NATIONAL_SUBJECT') {
+                if (!in_array((string)$assignment['role_code'], self::NATIONAL_SUBJECT_MANAGEABLE_ROLES, true)) {
+                    return false;
+                }
+                continue;
+            }
+            if ($authority['kind'] === 'DISTRICT_SUBJECT') {
+                if (!in_array((string)$assignment['role_code'], self::DISTRICT_SUBJECT_MANAGEABLE_ROLES, true)) {
+                    return false;
+                }
+            } elseif (!in_array($level, self::DISTRICT_MANAGEABLE_LEVELS, true)) {
                 return false;
             }
             $scopes = $this->effectiveScopes((string)$assignment['id'], $date);
@@ -314,7 +362,7 @@ final class UserAccessManagementService
         $stmt->execute([$roleId]);
         $role = $stmt->fetch();
         if (!$role || !$this->roleAllowed($authority, $role)) {
-            throw new DomainException('The selected role is outside your user-management authority.');
+            throw new DomainException('You do not have permission to assign this role.');
         }
         return ['role' => $role] + $this->validateScope($authority, (string)$role['role_level'], $locationId, $effectiveFrom);
     }
@@ -338,18 +386,18 @@ final class UserAccessManagementService
         $stmt->execute([$assignmentId]);
         $assignment = $stmt->fetch();
         if (!$assignment) {
-            throw new DomainException('Role assignment was not found.');
+            throw new DomainException('The selected user role was not found.');
         }
         $authority = $this->authority($actorId);
         if (!$this->roleAllowed($authority, $assignment)) {
-            throw new DomainException('The role assignment is outside your user-management authority.');
+            throw new DomainException('You do not have permission to manage this user role.');
         }
         if (in_array((string)$assignment['role_level'], ['NATIONAL', 'DISTRICT', 'ASC', 'ARPA'], true)) {
             $scopeStmt = $this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? AND user_id=?');
             $scopeStmt->execute([$assignmentId, $assignment['user_id']]);
             $scopes = $scopeStmt->fetchAll();
             if ($scopes === []) {
-                throw new DomainException('The role assignment does not have its required explicit scope.');
+                throw new DomainException('This role does not have a valid location assigned.');
             }
             foreach ($scopes as $scope) {
                 $this->validateAssignment($actorId, (string)$assignment['role_id'], $scope['location_id'], date('Y-m-d'));
@@ -365,12 +413,12 @@ final class UserAccessManagementService
         $stmt->execute([$scopeId]);
         $scope = $stmt->fetch();
         if (!$scope) {
-            throw new DomainException('Scope assignment was not found.');
+            throw new DomainException('The assigned location was not found.');
         }
         $this->assertCanManageRoleAssignment($actorId, (string)$scope['role_assignment_id']);
         $validated = $this->validateAssignment($actorId, (string)$scope['role_id'], $scope['location_id'], (string)$scope['effective_from']);
         if ($validated['scope_type'] !== $scope['scope_type'] || $validated['scope_mode'] !== $scope['scope_mode']) {
-            throw new DomainException('The scope is incompatible with its role assignment.');
+            throw new DomainException('The selected location is not valid for this role.');
         }
         return $scope;
     }
@@ -410,11 +458,11 @@ final class UserAccessManagementService
         $this->assertTargetMayReceiveAssignment($actorId,$userId,$from);
         $to = $to === null || trim($to) === '' ? null : $this->date($to);
         if ($to !== null && $to < $from) {
-            throw new DomainException('Effective To cannot be before Effective From.');
+            throw new DomainException('The end date cannot be before the start date.');
         }
         $reason = trim($reason);
         if ($reason === '') {
-            throw new DomainException('Assignment reason is required.');
+            throw new DomainException('Reason is required.');
         }
         $validated = $this->validateAssignment($actorId, $roleId, $locationId, $from);
         $replacesAssignmentId = $this->optional($replacesAssignmentId);
@@ -439,7 +487,7 @@ final class UserAccessManagementService
         $duplicateParams=[$userId,$roleId,$to,$from,$validated['location_id'],$validated['location_id']];
         if($replacesAssignmentId!==null){$duplicateSql.=' AND uar.id<>?';$duplicateParams[]=$replacesAssignmentId;}
         $duplicate=$this->pdo->prepare($duplicateSql);$duplicate->execute($duplicateParams);
-        if((int)$duplicate->fetchColumn()>0)throw new DomainException('An overlapping assignment already exists for this role and location.');
+        if((int)$duplicate->fetchColumn()>0)throw new DomainException('This user already has this role at the selected location for the same period.');
         $assignmentId = $this->uuid();
 
         $this->transaction(function () use ($actorId, $userId, $roleId, $from, $to, $reason, $reference, $validated, $assignmentId, $replacesAssignmentId): void {
@@ -451,6 +499,15 @@ final class UserAccessManagementService
             }
         });
         return $assignmentId;
+    }
+
+    public function createSubmittedAssignment(string $actorId, string $userId, string $roleId, ?string $locationId, string $from, ?string $to, string $reason, ?string $reference, ?string $replacesAssignmentId = null): string
+    {
+        return $this->transaction(function () use ($actorId, $userId, $roleId, $locationId, $from, $to, $reason, $reference, $replacesAssignmentId): string {
+            $id = $this->createDraftAssignment($actorId, $userId, $roleId, $locationId, $from, $to, $reason, $reference, $replacesAssignmentId);
+            $this->submitAssignment($actorId, $id);
+            return $id;
+        });
     }
 
     public function endAssignment(string $actorId, string $assignmentId, string $effectiveTo, string $reason, ?string $reference): void
@@ -489,7 +546,7 @@ final class UserAccessManagementService
         $this->transaction(function()use($actorId,$assignmentId):void{
             $stmt=$this->pdo->prepare("UPDATE user_account_role SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND created_by=? AND approval_status='DRAFT'");
             $stmt->execute([$actorId,$assignmentId,$actorId]);
-            if($stmt->rowCount()!==1)throw new DomainException('Only the maker can submit a draft role assignment.');
+            if($stmt->rowCount()!==1)throw new DomainException('Only the person who created this draft can submit it.');
             $this->pdo->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE role_assignment_id=? AND created_by=? AND approval_status='DRAFT'")->execute([$actorId,$assignmentId,$actorId]);
         });
     }
@@ -501,8 +558,8 @@ final class UserAccessManagementService
         $this->transaction(function()use($actorId,$assignmentId):void{
             $stmt=$this->pdo->prepare('SELECT created_by,approval_status,replaces_assignment_id,effective_from,user_id FROM user_account_role WHERE id=? FOR UPDATE');
             $stmt->execute([$assignmentId]);$row=$stmt->fetch();
-            if(!$row||$row['approval_status']!=='SUBMITTED')throw new DomainException('Only submitted role assignments can be approved.');
-            if((string)$row['created_by']===$actorId)throw new DomainException('Maker cannot approve their own role assignment.');
+            if(!$row||$row['approval_status']!=='SUBMITTED')throw new DomainException('Only submitted user roles can be approved.');
+            if((string)$row['created_by']===$actorId)throw new DomainException('You cannot approve a user role you created.');
             $this->pdo->prepare("UPDATE user_account_role SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([$actorId,$assignmentId]);
             $this->pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE role_assignment_id=? AND approval_status='SUBMITTED'")->execute([$actorId,$assignmentId]);
             if($row['replaces_assignment_id']){
@@ -526,6 +583,12 @@ final class UserAccessManagementService
         if ($authority['kind'] === 'NATIONAL') {
             return in_array($level, self::NATIONAL_MANAGEABLE_LEVELS, true);
         }
+        if ($authority['kind'] === 'NATIONAL_SUBJECT') {
+            return in_array((string)$role['role_code'], self::NATIONAL_SUBJECT_MANAGEABLE_ROLES, true);
+        }
+        if ($authority['kind'] === 'DISTRICT_SUBJECT') {
+            return in_array((string)$role['role_code'], self::DISTRICT_SUBJECT_MANAGEABLE_ROLES, true);
+        }
         return in_array($level, self::DISTRICT_MANAGEABLE_LEVELS, true);
     }
 
@@ -544,27 +607,28 @@ final class UserAccessManagementService
         $locationId = trim((string)$locationId);
         if (in_array($roleLevel, ['SYSTEM', 'NATIONAL'], true)) {
             if ($locationId !== '') {
-                throw new DomainException("{$roleLevel} roles use NATIONAL scope and cannot select a location.");
+                throw new DomainException('National roles do not use a specific location.');
             }
             return ['scope_type' => 'NATIONAL', 'scope_mode' => 'NATIONAL', 'location_id' => null];
         }
         if (in_array($roleLevel, ['FARMER', 'CUSTOM'], true)) {
             if ($locationId !== '') {
-                throw new DomainException("{$roleLevel} roles do not accept an administrative geographic scope here.");
+                throw new DomainException('This role does not use an assigned administrative location.');
             }
             return ['scope_type' => null, 'scope_mode' => null, 'location_id' => null];
         }
         $expected = ['DISTRICT' => 'DISTRICT', 'ASC' => 'ASC', 'ARPA' => 'ARPA_DIVISION'][$roleLevel] ?? null;
         if ($expected === null || $locationId === '') {
-            throw new DomainException("{$roleLevel} roles require an explicit compatible location.");
+            throw new DomainException('Select a valid location for this role.');
         }
         $stmt = $this->pdo->prepare("SELECT COUNT(*) FROM location l JOIN location_type lt ON lt.id=l.location_type_id WHERE l.id=? AND lt.system_key=? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)");
         $stmt->execute([$locationId, $expected, $date, $date]);
         if ((int)$stmt->fetchColumn() !== 1) {
-            throw new DomainException("The selected location is not an approved active {$expected}.");
+            throw new DomainException('The selected location is not available.');
         }
-        if ($authority['kind'] === 'DISTRICT' && !$this->withinAnyDistrict($locationId, $authority['district_ids'], $date)) {
-            throw new DomainException('The selected location is outside your District authority.');
+        if (in_array($authority['kind'], ['DISTRICT', 'DISTRICT_SUBJECT'], true)
+            && !$this->withinAnyDistrict($locationId, $authority['district_ids'], $date)) {
+            throw new DomainException('You can only select locations within your District.');
         }
         return [
             'scope_type' => $expected,
@@ -641,7 +705,7 @@ final class UserAccessManagementService
     {
         $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
         if (!$date || $date->format('Y-m-d') !== $value) {
-            throw new DomainException('Enter a valid effective date.');
+            throw new DomainException('Enter a valid start date.');
         }
         return $value;
     }

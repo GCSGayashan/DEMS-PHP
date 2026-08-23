@@ -26,7 +26,9 @@ final class DataTableQuery
         [$filteredWhere, $filteredParams] = $this->filteredWhere();
 
         $total = $this->count($baseWhere, $baseParams);
-        $filtered = $this->count($filteredWhere, $filteredParams);
+        $filtered = $filteredWhere === $baseWhere && $filteredParams === $baseParams
+            ? $total
+            : $this->count($filteredWhere, $filteredParams);
         $rows = $this->fetchRows($filteredWhere, $filteredParams, true);
 
         return [

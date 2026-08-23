@@ -17,7 +17,7 @@ final class ScopedOfficerDirectoryTest
     private function testNavigationAndChart():void
     {
         $layout=file_get_contents(BASE_PATH.'/app/Views/layouts/admin.php');$view=file_get_contents(BASE_PATH.'/app/Views/dashboard/index.php');$js=file_get_contents(BASE_PATH.'/public/assets/js/dems-charts.js');
-        $this->contains("organizationScope['level']!=='ASC'",$layout,'ASC condition hides Location Hierarchy');$this->contains('My Agrarian Service Center',$layout,'ASC Organization menu retained');$this->contains("Auth::can('officer.view')",$layout,'Officers menu is permission-controlled');$this->contains('ARPA Officer Appointments',$layout,'ARPA menu retained');
+        $this->contains("organizationScope['level']!=='ASC'",$layout,'ASC condition hides Location Hierarchy');$this->contains('My Service Center',$layout,'ASC Organization menu retained');$this->contains("Auth::can('officer.view')",$layout,'Officers menu is permission-controlled');$this->contains('ARPA Officer Assignments',$layout,'ARPA menu retained');
         $this->contains('data-chart-type="horizontalBar"',$view,'coverage is horizontal');foreach(['Total ARPA Divisions','With Current Officer','Without Current Officer'] as $label)$this->contains($label,file_get_contents(BASE_PATH.'/app/Services/ScopedDashboardService.php'),"full {$label} label");$this->contains('measureText',$js,'left margin measures complete labels');$this->contains('ResizeObserver',$js,'chart is responsive');$this->same(false,str_contains($js,'ellipsis'),'labels are not truncated with ellipsis');$this->same(false,str_contains($js,'.rotate('),'labels are never rotated');
     }
     private function testPermissions():void
@@ -34,7 +34,7 @@ final class ScopedOfficerDirectoryTest
             $this->same(true,ScopeService::canAccessOfficer($this->userId,$visible['id']),'current ASC-related officer detail is accessible');$this->same(false,ScopeService::canAccessOfficer($this->userId,$unrelated['id']),'unrelated officer detail is rejected');
             $search=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>25,'search'=>['value'=>$unrelated['dad_number']]])))->response();$this->same(0,$search['recordsFiltered'],'search cannot reveal unrelated Officer');$export=iterator_to_array((new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>25])))->exportRows());$this->same(7,count($export),'CSV contains only the seven scoped Officers');
             $candidates=(new ArpaAppointmentCandidateService($this->pdo))->options();$this->same(true,count($candidates)>1,'new appointment candidate discovery remains separate from current directory');$this->same(true,in_array($unrelated['id'],array_column($candidates,'id'),true),'an unrelated current Officer may remain an eligible incoming candidate');
-            $definition=DataTableRegistry::definition('officers');$this->same('No officers currently have an approved operational assignment within this Agrarian Service Center.',$definition['emptyMessage'],'scoped empty state is explicit');
+            $definition=DataTableRegistry::definition('officers');$this->same('No officers currently have an approved assignment to this Agrarian Service Center.',$definition['emptyMessage'],'scoped empty state is explicit');
             $controller=file_get_contents(BASE_PATH.'/app/Controllers/OfficerController.php');$this->contains("currentOfficerAccess(\$userId,'o.id')",$controller,'Officer autocomplete reuses authoritative Office-assignment scope');
         }finally{$this->pdo->rollBack();}
     }

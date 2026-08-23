@@ -66,11 +66,29 @@ final class ActiveAccessContextTest
         [$subjectRole,$subjectScope]=$this->createAssignment($nationalMixed,'DISTRICT_SUBJECT_OFFICER',$districtX);
         $this->authenticateAs($nationalMixed);
         $service->select($nationalMixed,$subjectRole,$subjectScope);Auth::forgetRequestCache();
-        $this->same(false,Auth::can('user.activate'),'District Subject Officer context cannot borrow National Admin permissions');
-        $this->throws(fn()=>(new UserAccessManagementService($this->pdo))->authority($nationalMixed),'District Subject Officer context cannot borrow National management authority');
+        $this->same(true,Auth::can('user.view'),'District Subject Officer context can display User Management');
+        $this->same(true,Auth::can('user.activate'),'District Subject Officer receives its own User Management permission');
+        $subjectAuthority=(new UserAccessManagementService($this->pdo))->authority($nationalMixed);
+        $this->same('DISTRICT_SUBJECT',$subjectAuthority['kind'],'District Subject Officer context does not borrow National Admin authority');
+        $this->same([$districtX],$subjectAuthority['district_ids'],'District Subject Officer context retains only its linked District scope');
+        $subjectRoles=array_column((new UserAccessManagementService($this->pdo))->manageableRoles($nationalMixed),'role_code');
+        $this->same(false,in_array('NATIONAL_ADMIN',$subjectRoles,true),'District Subject Officer context cannot borrow National assignable roles');
         $service->select($nationalMixed,$nationalRole,$nationalScope);Auth::forgetRequestCache();
         $this->same(true,Auth::can('user.activate'),'National Admin permission returns after explicit context switch');
         $this->same('NATIONAL',(new UserAccessManagementService($this->pdo))->authority($nationalMixed)['kind'],'National authority returns only in National context');
+
+        $nationalSubjectMixed=$this->createUser('context.national.subject.mixed');
+        [$nationalSubjectRole,$nationalSubjectScope]=$this->createAssignment($nationalSubjectMixed,'NATIONAL_SUBJECT_OFFICER',null);
+        [$nationalSubjectViewerRole,$nationalSubjectViewerScope]=$this->createAssignment($nationalSubjectMixed,'ASC_VIEWER',$ascY);
+        $this->authenticateAs($nationalSubjectMixed);
+        $service->select($nationalSubjectMixed,$nationalSubjectViewerRole,$nationalSubjectViewerScope);Auth::forgetRequestCache();
+        $this->same(false,Auth::can('user.view'),'ASC Viewer context hides User Management immediately');
+        $this->same(false,Auth::can('user.activate'),'ASC Viewer context cannot borrow National Subject Officer User Management permissions');
+        $this->throws(fn()=>(new UserAccessManagementService($this->pdo))->authority($nationalSubjectMixed),'ASC Viewer context cannot borrow National Subject Officer management authority');
+        $service->select($nationalSubjectMixed,$nationalSubjectRole,$nationalSubjectScope);Auth::forgetRequestCache();
+        $this->same(true,Auth::can('user.view'),'National Subject Officer context can display User Management');
+        $this->same(true,Auth::can('user.activate'),'National Subject Officer permission returns after explicit context switch');
+        $this->same('NATIONAL_SUBJECT',(new UserAccessManagementService($this->pdo))->authority($nationalSubjectMixed)['kind'],'restricted National Subject authority returns only in its selected context');
 
         $other=$this->createUser('context.other');
         [$otherRole,$otherScope]=$this->createAssignment($other,'ASC_VIEWER',$ascX);
@@ -127,8 +145,16 @@ final class ActiveAccessContextTest
         $view=(string)file_get_contents(dirname(__DIR__).'/app/Views/auth/select_context.php');
         $layout=(string)file_get_contents(dirname(__DIR__).'/app/Views/layouts/admin.php');
         $this->same(true,str_contains($view,'Csrf::field()'),'context selection POST uses CSRF protection');
-        $this->same(true,str_contains($layout,'Current Context'),'authenticated header displays active context');
+        $this->same(true,str_contains($view,'working-context-group'),'selection page groups contexts by role');
+        $this->same(true,str_contains($view,"count(\$contexts)>5"),'context search appears only for larger context lists');
+        $this->same(true,str_contains($view,'Search role or location'),'context search uses user-facing wording');
+        $this->same(true,str_contains($view,'location_dad_number'),'selection page displays location DAD numbers');
+        $this->same(true,str_contains($view,'Signed in as'),'selection page identifies the signed-in user');
+        $this->same(true,str_contains($view,'Access unavailable'),'selection page retains a clear empty state');
+        $this->same(true,str_contains($layout,'context-switcher')&&str_contains($layout,'Change Role or Office'),'authenticated header displays the compact role and location selector');
+        $this->same(true,str_contains($layout,'availableContextGroups'),'authenticated header groups contexts by role');
         $this->same(true,str_contains($layout,"url('select-context')"),'authenticated header supports context switching');
+        $this->same(true,str_contains((string)file_get_contents(dirname(__DIR__).'/public/assets/js/app.js'),'contextSearchText'),'context filtering uses the authorized rendered context list');
         $this->same(true,str_contains((string)file_get_contents(dirname(__DIR__).'/app/Controllers/AuthController.php'),'initializeContextAfterLogin'),'login initializes or requests a working context');
     }
 

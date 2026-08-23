@@ -55,10 +55,35 @@ final class LocationController extends Controller
         $catStmt=$pdo=Database::pdo();
         $ts=$pdo->prepare('SELECT system_key FROM location_type WHERE id=?'); $ts->execute([$typeId]); $typeKey=$ts->fetchColumn();
         $dad = NumberService::next('LOCATION_'.(string)$typeKey);
-        $stmt = Database::pdo()->prepare("INSERT INTO location (id,dad_number,location_type_id,official_code,name_en,name_si,name_ta,effective_from,operational_status,approval_status,created_by,created_at) VALUES (UUID(),?,?,?,?,?,?,?,'INACTIVE','DRAFT',?,NOW())");
+        $stmt = Database::pdo()->prepare("INSERT INTO location (id,dad_number,location_type_id,official_code,name_en,name_si,name_ta,effective_from,operational_status,approval_status,created_by,created_at) VALUES (UUID(),?,?,?,?,?,?,?,'INACTIVE','SUBMITTED',?,NOW())");
         $stmt->execute([$dad,$typeId,trim((string)($_POST['official_code']??'')) ?: null,$name,trim((string)($_POST['name_si']??'')) ?: null,trim((string)($_POST['name_ta']??'')) ?: null,$effective,Auth::user()['id']]);
         Audit::record('location.create','LOCATION',null,['dad_number'=>$dad]);
-        $this->flash('success','Location draft created: '.$dad); redirect('/locations');
+        Audit::record('workflow.submit','LOCATION',null,['dad_number'=>$dad]);
+        $this->flash('success','Location submitted: '.$dad); redirect('/locations');
+    }
+
+    public function submit(string $id): void
+    {
+        Auth::requirePermission('location.submit'); Csrf::validate();
+        $actor=(string)Auth::user()['id'];$this->assertLocationScope($actor,$id);
+        $stmt=Database::pdo()->prepare("UPDATE location SET approval_status='SUBMITTED',updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND approval_status='DRAFT'");
+        $stmt->execute([$actor,$id]);
+        if($stmt->rowCount()!==1){$this->flash('danger','Only a draft Location can be submitted.');redirect('/locations');}
+        Audit::record('workflow.submit','LOCATION',$id);
+        $this->flash('success','Location submitted.');redirect('/locations');
+    }
+
+    public function approve(string $id): void
+    {
+        Auth::requirePermission('location.approve'); Csrf::validate();
+        $actor=(string)Auth::user()['id'];$this->assertLocationScope($actor,$id);$pdo=Database::pdo();
+        $stmt=$pdo->prepare('SELECT created_by,approval_status,effective_from FROM location WHERE id=?');$stmt->execute([$id]);$row=$stmt->fetch();
+        if(!$row){http_response_code(404);$this->render('partials/not-found');return;}
+        if($row['approval_status']!=='SUBMITTED'){$this->flash('danger','Only a submitted Location can be approved.');redirect('/locations');}
+        if((string)$row['created_by']===$actor){$this->flash('danger','You cannot approve a Location you created.');redirect('/locations');}
+        $pdo->prepare("UPDATE location SET approval_status='APPROVED',operational_status=CASE WHEN effective_from<=CURRENT_DATE() THEN 'ACTIVE' ELSE 'INACTIVE' END,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND approval_status='SUBMITTED'")->execute([$actor,$id]);
+        Audit::record('workflow.approve','LOCATION',$id);
+        $this->flash('success','Location approved.');redirect('/locations');
     }
 
     public function show(string $id):void
@@ -79,5 +104,10 @@ final class LocationController extends Controller
         if(!$type){http_response_code(404);exit('Location type not found.');}
         $dataTable=DataTableRegistry::viewModel('locations',['scope_type'=>$systemKey]);
         $this->render('locations/index',compact('dataTable','type'));
+    }
+
+    private function assertLocationScope(string $userId,string $locationId):void
+    {
+        if(!ScopeService::canAccessLocation($userId,$locationId)){http_response_code(404);$this->render('partials/not-found');exit;}
     }
 }

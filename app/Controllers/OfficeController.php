@@ -41,12 +41,14 @@ final class OfficeController extends Controller
         if($type===''||$name===''){ $this->flash('danger','Office type and English name are required.'); redirect('/offices/create');}
         $typeRow=$pdo->prepare('SELECT system_key FROM office_type WHERE id=? AND active=1');$typeRow->execute([$type]);$typeData=$typeRow->fetch();if(!$typeData){$this->flash('danger','Invalid Office Type.');redirect('/offices/create');}
         $location=($_POST['linked_location_id']??'')?:null;if($typeData['system_key']!=='HEAD_OFFICE'&&$location===null){$this->flash('danger','District and ASC Offices require their organizational Location.');redirect('/offices/create');}
-        if($location!==null&&!ScopeService::canAccessLocation((string)Auth::user()['id'],$location)){$this->flash('danger','The selected Location is outside your authorized scope.');redirect('/offices/create');}
+        if($location!==null&&!ScopeService::canAccessLocation((string)Auth::user()['id'],$location)){$this->flash('danger','You cannot select this location.');redirect('/offices/create');}
         $pdo->beginTransaction();try{$dad=NumberService::nextUsing($pdo,'OFFICE');
-        $stmt=$pdo->prepare("INSERT INTO office (id,dad_number,office_type_id,name_en,name_si,name_ta,short_name,linked_location_id,address,telephone,email,effective_from,requested_status,operational_status,approval_status,created_by,created_at) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','INACTIVE','DRAFT',?,NOW())");
-        $stmt->execute([$dad,$type,$name,trim((string)($_POST['name_si']??''))?:null,trim((string)($_POST['name_ta']??''))?:null,trim((string)($_POST['short_name']??''))?:null,$location,trim((string)($_POST['address']??''))?:null,trim((string)($_POST['telephone']??''))?:null,trim((string)($_POST['email']??''))?:null,(string)($_POST['effective_from']??date('Y-m-d')),Auth::user()['id']]);$pdo->commit();}catch(\Throwable $e){if($pdo->inTransaction())$pdo->rollBack();error_log('Office create failed: '.$e->getMessage());$this->flash('danger','Office could not be created. Please review the selected type and location.');redirect('/offices/create');}
+        $stmt=$pdo->prepare("INSERT INTO office (id,dad_number,office_type_id,name_en,name_si,name_ta,short_name,linked_location_id,address,telephone,email,effective_from,requested_status,operational_status,approval_status,created_by,created_at,submitted_by,submitted_at) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,?,'ACTIVE','INACTIVE','SUBMITTED',?,NOW(),?,NOW())");
+        $actor=(string)Auth::user()['id'];
+        $stmt->execute([$dad,$type,$name,trim((string)($_POST['name_si']??''))?:null,trim((string)($_POST['name_ta']??''))?:null,trim((string)($_POST['short_name']??''))?:null,$location,trim((string)($_POST['address']??''))?:null,trim((string)($_POST['telephone']??''))?:null,trim((string)($_POST['email']??''))?:null,(string)($_POST['effective_from']??date('Y-m-d')),$actor,$actor]);$pdo->commit();}catch(\Throwable $e){if($pdo->inTransaction())$pdo->rollBack();error_log('Office create failed: '.$e->getMessage());$this->flash('danger','Office could not be created. Please review the selected type and location.');redirect('/offices/create');}
         Audit::record('office.create','OFFICE',null,['dad_number'=>$dad]);
-        $this->flash('success','Office draft created: '.$dad); redirect('/offices');
+        Audit::record('workflow.submit','OFFICE',null,['dad_number'=>$dad]);
+        $this->flash('success','Office submitted: '.$dad); redirect('/offices');
     }
 
     public function submit(string $id): void { Auth::requirePermission('office.submit'); Csrf::validate(); WorkflowService::submit('office',$id); $this->flash('success','Office submitted.'); redirect('/offices'); }

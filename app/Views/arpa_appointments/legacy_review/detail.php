@@ -18,7 +18,7 @@ $isSelected=static fn(string $expected,string $actual):string=>$expected===$actu
     <dt class="col-sm-4">Classification</dt><dd class="col-sm-8"><?= DataTableFormat::badge($item['current_classification']) ?></dd>
     <dt class="col-sm-4">Confidence</dt><dd class="col-sm-8"><?= DataTableFormat::badge($item['source_confidence']) ?></dd>
     <dt class="col-sm-4">Workflow state</dt><dd class="col-sm-8"><?= DataTableFormat::badge($context['workflow_state']??'') ?></dd>
-    <dt class="col-sm-4">Service permanency</dt><dd class="col-sm-8"><?= e(($context['service_permanency']??'Unknown').' / '.($context['service_permanency_source']??'Unknown')) ?></dd>
+    <dt class="col-sm-4">Service permanency</dt><dd class="col-sm-8"><?= e(DataTableFormat::enumLabel($context['service_permanency']??null,'Unknown').' / '.DataTableFormat::enumLabel($context['service_permanency_source']??null,'Unknown')) ?></dd>
   </dl></div></div>
   <div class="col-lg-5"><div class="form-section h-100"><h2 class="h5">Candidate and evidence</h2>
     <p><strong><?= e(trim((string)($item['candidate_asc_number']??'').' '.(string)($item['candidate_asc_name']??''))?:'No candidate ASC') ?></strong></p>
@@ -38,7 +38,7 @@ $isSelected=static fn(string $expected,string $actual):string=>$expected===$actu
 <?php if($item['item_type']==='SPECIAL_ASC'&&$item['current_classification']==='CURRENT'): ?><div class="alert alert-info">Leaving this current record unresolved preserves it for historical review but does not clear its operational-activation blocker. A confirmed ASC is required for migration readiness.</div><?php endif; ?>
 <?php if($item['item_type']==='CURRENT_CONFLICT'): ?>
 <div class="form-section mb-4"><h2 class="h5">Complete Officer appointment context</h2><div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Source</th><th>Type</th><th>Location</th><th>From</th><th>To</th><th>State</th><th>Permanency</th></tr></thead><tbody>
-<?php foreach($context['officer_appointment_context']??[] as $row): ?><tr><td><code><?= e(implode('|',$row['source_references'])) ?></code></td><td><?= e($row['appointment_type']?:$row['level']) ?></td><td><?= e((string)($row['legacy_context']['arpa_name']??$row['legacy_context']['asc_name']??'Unknown')) ?></td><td><?= e((string)$row['effective_from']) ?></td><td><?= e((string)($row['effective_to']??'Open')) ?></td><td><?= DataTableFormat::badge($row['current']?'CURRENT':'HISTORICAL') ?></td><td><?= e(($row['service_permanency']??'Unknown').' / '.($row['service_permanency_source']??'Unknown')) ?></td></tr><?php endforeach; ?>
+<?php foreach($context['officer_appointment_context']??[] as $row): ?><tr><td><code><?= e(implode('|',$row['source_references'])) ?></code></td><td><?= e($row['appointment_type']?:$row['level']) ?></td><td><?= e((string)($row['legacy_context']['arpa_name']??$row['legacy_context']['asc_name']??'Unknown')) ?></td><td><?= e((string)$row['effective_from']) ?></td><td><?= e((string)($row['effective_to']??'Open')) ?></td><td><?= DataTableFormat::badge($row['current']?'CURRENT':'HISTORICAL') ?></td><td><?= e(DataTableFormat::enumLabel($row['service_permanency']??null,'Unknown').' / '.DataTableFormat::enumLabel($row['service_permanency_source']??null,'Unknown')) ?></td></tr><?php endforeach; ?>
 </tbody></table></div></div>
 <?php endif; ?>
 <?php if($canDecide): ?>

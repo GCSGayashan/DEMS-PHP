@@ -24,12 +24,21 @@ final class UserAccessManagementTest
         [$districtX,$ascX,$districtY,$ascY]=$this->districtFixtures();
         $system=$this->systemAdmin();$checker=$this->createActor('SYSTEM_ADMIN',null,'system-checker');
         $national=$this->createActor('NATIONAL_ADMIN',null,'national-manager');
+        $nationalSubject=$this->createActor('NATIONAL_SUBJECT_OFFICER',null,'national-subject-manager');
         $district=$this->createActor('DISTRICT_ADMIN',$districtX,'district-manager');
+        $districtSubject=$this->createActor('DISTRICT_SUBJECT_OFFICER',$districtX,'district-subject-manager');
         $policy=new UserAccessManagementService($this->pdo);
 
         $this->same('SYSTEM',$policy->authority($system)['kind'],'SYSTEM_ADMIN remains unrestricted');
         $this->same('NATIONAL',$policy->authority($national)['kind'],'NATIONAL_ADMIN requires and resolves its own National scope');
+        $this->same('NATIONAL_SUBJECT',$policy->authority($nationalSubject)['kind'],'NATIONAL_SUBJECT_OFFICER resolves its own restricted National management authority');
         $this->same([$districtX],$policy->authority($district)['district_ids'],'DISTRICT_ADMIN resolves only its linked District scope');
+        $this->same('DISTRICT_SUBJECT',$policy->authority($districtSubject)['kind'],'DISTRICT_SUBJECT_OFFICER resolves restricted District management authority');
+        $this->same([$districtX],$policy->authority($districtSubject)['district_ids'],'District Subject Officer authority uses only its linked District scope');
+
+        $requiredPermissions=['user.view','user.activate','user.block','user.reset-password','user.assign-role','user.revoke-role','user.assign-scope','user.revoke-scope'];
+        $permissionPlaceholders=implode(',',array_fill(0,count($requiredPermissions),'?'));
+        $this->same(count($requiredPermissions)*2,$this->count("SELECT COUNT(*) FROM application_role r JOIN application_role_permission rp ON rp.role_id=r.id JOIN application_permission p ON p.id=rp.permission_id WHERE r.role_code IN ('NATIONAL_SUBJECT_OFFICER','DISTRICT_SUBJECT_OFFICER') AND p.permission_key IN ({$permissionPlaceholders})",$requiredPermissions),'both Subject Officer roles have the requested User Management permissions');
 
         $queryPolicy=new UserAccessManagementService($this->pdo);$beforeQuestions=$this->questions();
         $manageableUsers=$queryPolicy->manageableUsers($district);$userQueryCount=$this->questions()-$beforeQuestions;
@@ -49,6 +58,51 @@ final class UserAccessManagementTest
         $policy->validateAssignment($national,$nationalViewer,null,date('Y-m-d'));
         $policy->validateAssignment($national,$districtViewer,$districtY,date('Y-m-d'));
         $this->assertions+=2;
+
+        foreach(['NATIONAL_SUBJECT_OFFICER'=>null,'NATIONAL_VIEWER'=>null,'DISTRICT_SUBJECT_OFFICER'=>$districtY,'DISTRICT_VIEWER'=>$districtY,'ASC_SUBJECT_OFFICER'=>$ascY,'ASC_VIEWER'=>$ascY] as $roleCode=>$locationId){
+            $policy->validateAssignment($nationalSubject,$this->roleId($roleCode),$locationId,date('Y-m-d'));
+            $this->assertions++;
+        }
+        foreach(['SYSTEM_ADMIN','NATIONAL_ADMIN','DISTRICT_ADMIN','ASC_ADMIN'] as $roleCode){
+            $locationId=['DISTRICT_ADMIN'=>$districtY,'ASC_ADMIN'=>$ascY][$roleCode]??null;
+            $this->throws(fn()=>$policy->validateAssignment($nationalSubject,$this->roleId($roleCode),$locationId,date('Y-m-d')),"National Subject Officer cannot assign {$roleCode}");
+        }
+        $nationalSubjectRoles=array_column($policy->manageableRoles($nationalSubject),'role_code');
+        sort($nationalSubjectRoles);
+        $expectedNationalSubjectRoles=['ASC_SUBJECT_OFFICER','ASC_VIEWER','DISTRICT_SUBJECT_OFFICER','DISTRICT_VIEWER','NATIONAL_SUBJECT_OFFICER','NATIONAL_VIEWER'];
+        sort($expectedNationalSubjectRoles);
+        $this->same($expectedNationalSubjectRoles,$nationalSubjectRoles,'National Subject Officer sees only the approved manageable role matrix');
+        $allowedTarget=$this->createUser('national-subject-target');
+        $this->createAssignment($allowedTarget,'DISTRICT_SUBJECT_OFFICER',$districtY);
+        $this->createAssignment($allowedTarget,'ASC_VIEWER',$ascY);
+        $this->same(true,$policy->canManageUser($nationalSubject,$allowedTarget),'National Subject Officer can manage users whose roles are all permitted');
+        $adminTarget=$this->createActor('ASC_ADMIN',$ascY,'national-subject-blocked-admin');
+        $this->same(false,$policy->canManageUser($nationalSubject,$adminTarget),'National Subject Officer cannot manage an ASC Administrator account');
+
+        foreach(['DISTRICT_SUBJECT_OFFICER'=>$districtX,'DISTRICT_VIEWER'=>$districtX,'ASC_SUBJECT_OFFICER'=>$ascX,'ASC_VIEWER'=>$ascX] as $roleCode=>$locationId){
+            $policy->validateAssignment($districtSubject,$this->roleId($roleCode),$locationId,date('Y-m-d'));
+            $this->assertions++;
+        }
+        foreach(['SYSTEM_ADMIN'=>null,'NATIONAL_SUBJECT_OFFICER'=>null,'NATIONAL_VIEWER'=>null,'DISTRICT_ADMIN'=>$districtX,'ASC_ADMIN'=>$ascX] as $roleCode=>$locationId){
+            $this->throws(fn()=>$policy->validateAssignment($districtSubject,$this->roleId($roleCode),$locationId,date('Y-m-d')),"District Subject Officer cannot assign {$roleCode}");
+        }
+        $districtSubjectRoles=array_column($policy->manageableRoles($districtSubject),'role_code');
+        sort($districtSubjectRoles);
+        $expectedDistrictSubjectRoles=['ASC_SUBJECT_OFFICER','ASC_VIEWER','DISTRICT_SUBJECT_OFFICER','DISTRICT_VIEWER'];
+        sort($expectedDistrictSubjectRoles);
+        $this->same($expectedDistrictSubjectRoles,$districtSubjectRoles,'District Subject Officer sees only its approved manageable role matrix');
+        $policy->validateAssignment($districtSubject,$this->roleId('DISTRICT_VIEWER'),$districtX,date('Y-m-d'));
+        $policy->validateAssignment($districtSubject,$this->roleId('ASC_VIEWER'),$ascX,date('Y-m-d'));
+        $this->assertions+=2;
+        $this->throws(fn()=>$policy->validateAssignment($districtSubject,$this->roleId('DISTRICT_VIEWER'),$districtY,date('Y-m-d')),'District Subject Officer cannot post another District');
+        $this->throws(fn()=>$policy->validateAssignment($districtSubject,$this->roleId('ASC_VIEWER'),$ascY,date('Y-m-d')),'District Subject Officer cannot post an ASC outside its District');
+        $districtSubjectTarget=$this->createUser('district-subject-target');
+        $districtSubjectAssignment=$this->createAssignment($districtSubjectTarget,'DISTRICT_VIEWER',$districtX);
+        $this->createAssignment($districtSubjectTarget,'ASC_SUBJECT_OFFICER',$ascX);
+        $this->same(true,$policy->canManageUser($districtSubject,$districtSubjectTarget),'District Subject Officer can manage permitted users in its District');
+        $policy->assertCanManageRoleAssignment($districtSubject,$districtSubjectAssignment);$this->assertions++;
+        $outsideDistrictSubjectTarget=$this->createActor('ASC_VIEWER',$ascY,'district-subject-outside-target');
+        $this->same(false,$policy->canManageUser($districtSubject,$outsideDistrictSubjectTarget),'District Subject Officer cannot manage a user in another District');
 
         $districtLocations=$policy->manageableLocations($district);$districtLocationIds=array_column($districtLocations,'id');
         $this->same(true,in_array($districtX,$districtLocationIds,true),'District location read includes own District');
@@ -91,8 +145,9 @@ final class UserAccessManagementTest
         $policy->assertCanManageRoleAssignment($district,$districtAssignment);$this->assertions++;
 
         $future=date('Y-m-d',strtotime('+10 days'));
-        $replacement=$policy->createDraftAssignment($system,$target,$districtViewer,$districtY,$future,null,'Transfer to another District','TEST/TRANSFER',$districtAssignment);
-        $policy->submitAssignment($system,$replacement);
+        $replacement=$policy->createSubmittedAssignment($system,$target,$districtViewer,$districtY,$future,null,'Transfer to another District','TEST/TRANSFER',$districtAssignment);
+        $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM user_account_role WHERE id=?',[$replacement]),'new user role is submitted directly');
+        $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM user_account_scope WHERE role_assignment_id=?',[$replacement]),'linked assigned location is submitted in the same transaction');
         $this->throws(fn()=>$policy->approveAssignment($system,$replacement),'maker cannot approve replacement');
         $policy->approveAssignment($checker,$replacement);
         $expectedEnd=date('Y-m-d',strtotime($future.' -1 day'));

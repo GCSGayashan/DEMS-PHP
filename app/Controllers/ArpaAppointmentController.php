@@ -28,35 +28,12 @@ final class ArpaAppointmentController extends Controller
 
     public function newAppointments():void
     {
-        Auth::requirePermission('arpa.appointment.create');
-
-        if($this->appointmentHierarchySummary(
-            'New Appointments',
-            'arpa-new-appointments-summary',
-            'hr/arpa-appointments/divisions/create',
-            'New Appointment',
-            'Requests still controlled by their ASC creator or returned for correction.'
-        ))return;
-
-        $this->appointmentList(
-            'New Appointments',
-            'arpa-new-appointments',
-            'hr/arpa-appointments/divisions/create',
-            'New Appointment',
-            'Requests still controlled by their ASC creator or returned for correction.'
-        );
+        $this->createDivision();
     }
 
     public function newAppointmentsAsc(string $id):void
     {
-        Auth::requirePermission('arpa.appointment.create');
-        $this->appointmentAscList(
-            'New Appointments',
-            'arpa-new-appointments',
-            'hr/arpa-appointments/new',
-            $id,
-            'Requests still controlled by their ASC creator or returned for correction.'
-        );
+        redirect('/hr/arpa-appointments/submitted/asc/'.$id);
     }
 
     public function submittedAppointments():void
@@ -69,19 +46,19 @@ final class ArpaAppointmentController extends Controller
         }
 
         if($this->appointmentHierarchySummary(
-            'Submitted Appointments',
+            'Submitted',
             'arpa-submitted-appointments-summary',
             null,
             null,
-            'Your current actionable inbox. Each request leaves this list immediately after you complete your required workflow action.'
+            'Assignments waiting for your review or approval.'
         ))return;
 
         $this->appointmentList(
-            'Submitted Appointments',
+            'Submitted',
             'arpa-submitted-appointments',
             null,
             null,
-            'Your current actionable inbox. Each request leaves this list immediately after you complete your required workflow action.'
+            'Assignments waiting for your review or approval.'
         );
     }
 
@@ -95,11 +72,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Submitted Appointments',
+            'Submitted',
             'arpa-submitted-appointments',
             'hr/arpa-appointments/submitted',
             $id,
-            'Actionable appointment requests for the selected Agrarian Service Center.'
+            'Assignments waiting for action at the selected Agrarian Service Center.'
         );
     }
 
@@ -113,19 +90,19 @@ final class ArpaAppointmentController extends Controller
         }
 
         if($this->appointmentHierarchySummary(
-            'Approval / Verification',
+            'Review & Approve',
             'arpa-approval-verification-summary',
             null,
             null,
-            'Completed verification and approval actions performed by your account. Later workflow progress remains visible here as audit history.'
+            'Assignments you reviewed or approved during the current review cycle.'
         ))return;
 
         $this->appointmentList(
-            'Approval / Verification',
+            'Review & Approve',
             'arpa-approval-verification',
             null,
             null,
-            'Completed verification and approval actions performed by your account. Later workflow progress remains visible here as audit history.'
+            'Assignments you reviewed or approved during the current review cycle.'
         );
     }
 
@@ -139,11 +116,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Approval / Verification',
+            'Review & Approve',
             'arpa-approval-verification',
             'hr/arpa-appointments/approval',
             $id,
-            'Completed verification and approval actions for the selected Agrarian Service Center.'
+            'Completed reviews and approvals for the selected Agrarian Service Center.'
         );
     }
 
@@ -152,19 +129,19 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
 
         if($this->appointmentHierarchySummary(
-            'Open Appointments',
+            'Current Assignments',
             'arpa-open-appointments-summary',
-            'hr/arpa-appointments/divisions/create',
-            'New Appointment',
-            'Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.'
+            'hr/arpa-appointments/new',
+            'New Assignment',
+            'Current and scheduled ARPA Division assignments.'
         ))return;
 
         $this->appointmentList(
-            'Open Appointments',
+            'Current Assignments',
             'arpa-open-appointments',
-            'hr/arpa-appointments/divisions/create',
-            'New Appointment',
-            'Operational Division appointments without a formal closure. Future-effective records are labelled Scheduled.'
+            'hr/arpa-appointments/new',
+            'New Assignment',
+            'Current and scheduled ARPA Division assignments.'
         );
     }
 
@@ -172,11 +149,11 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.view');
         $this->appointmentAscList(
-            'Open Appointments',
+            'Current Assignments',
             'arpa-open-appointments',
             'hr/arpa-appointments/open',
             $id,
-            'Open and scheduled operational appointments for the selected Agrarian Service Center.'
+            'Current and scheduled assignments for the selected Agrarian Service Center.'
         );
     }
     public function vacantDivisions():void
@@ -231,19 +208,19 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
 
         if($this->appointmentHierarchySummary(
-            'Historical Appointments',
+            'Assignment History',
             'arpa-historical-appointments-summary',
             null,
             null,
-            'Closed ARPA Division appointments in chronological, immutable history.'
+            'Previous ARPA Division assignments in date order.'
         ))return;
 
         $this->appointmentList(
-            'Historical Appointments',
+            'Assignment History',
             'arpa-historical-appointments',
             null,
             null,
-            'Closed ARPA Division appointments in chronological, immutable history.'
+            'Previous ARPA Division assignments in date order.'
         );
     }
 
@@ -251,27 +228,17 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.view');
         $this->appointmentAscList(
-            'Historical Appointments',
+            'Assignment History',
             'arpa-historical-appointments',
             'hr/arpa-appointments/history',
             $id,
-            'Closed appointment history for the selected Agrarian Service Center.'
+            'Previous assignments for the selected Agrarian Service Center.'
         );
     }
 
     public function newAppointmentsDistrict(string $id):void
     {
-        Auth::requirePermission('arpa.appointment.create');
-
-        $this->appointmentDistrictSummary(
-            'New Appointments',
-            'arpa-new-appointments-summary',
-            'hr/arpa-appointments/new',
-            $id,
-            'Requests still controlled by their ASC creator or returned for correction.',
-            'hr/arpa-appointments/divisions/create',
-            'New Appointment'
-        );
+        redirect('/hr/arpa-appointments/submitted/district/'.$id);
     }
 
     public function newAppointmentsDistrictAsc(
@@ -279,16 +246,7 @@ final class ArpaAppointmentController extends Controller
         string $ascId
     ):void
     {
-        Auth::requirePermission('arpa.appointment.create');
-
-        $this->appointmentAscList(
-            'New Appointments',
-            'arpa-new-appointments',
-            'hr/arpa-appointments/new',
-            $ascId,
-            'Requests still controlled by their ASC creator or returned for correction.',
-            $districtId
-        );
+        redirect('/hr/arpa-appointments/submitted/district/'.$districtId.'/asc/'.$ascId);
     }
 
     public function submittedAppointmentsDistrict(string $id):void
@@ -301,11 +259,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentDistrictSummary(
-            'Submitted Appointments',
+            'Submitted',
             'arpa-submitted-appointments-summary',
             'hr/arpa-appointments/submitted',
             $id,
-            'Actionable appointment requests grouped by ASC within the selected District.'
+            'Assignments waiting for action, grouped by Agrarian Service Center in the selected District.'
         );
     }
 
@@ -322,11 +280,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Submitted Appointments',
+            'Submitted',
             'arpa-submitted-appointments',
             'hr/arpa-appointments/submitted',
             $ascId,
-            'Actionable appointment requests for the selected Agrarian Service Center.',
+            'Assignments waiting for action at the selected Agrarian Service Center.',
             $districtId
         );
     }
@@ -341,7 +299,7 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentDistrictSummary(
-            'Approval / Verification',
+            'Review & Approve',
             'arpa-approval-verification-summary',
             'hr/arpa-appointments/approval',
             $id,
@@ -362,7 +320,7 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Approval / Verification',
+            'Review & Approve',
             'arpa-approval-verification',
             'hr/arpa-appointments/approval',
             $ascId,
@@ -376,13 +334,13 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
 
         $this->appointmentDistrictSummary(
-            'Open Appointments',
+            'Current Assignments',
             'arpa-open-appointments-summary',
             'hr/arpa-appointments/open',
             $id,
-            'Open and scheduled operational appointments grouped by ASC within the selected District.',
-            'hr/arpa-appointments/divisions/create',
-            'New Appointment'
+            'Current and scheduled assignments grouped by Agrarian Service Center in the selected District.',
+            'hr/arpa-appointments/new',
+            'New Assignment'
         );
     }
 
@@ -394,11 +352,11 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
 
         $this->appointmentAscList(
-            'Open Appointments',
+            'Current Assignments',
             'arpa-open-appointments',
             'hr/arpa-appointments/open',
             $ascId,
-            'Open and scheduled operational appointments for the selected Agrarian Service Center.',
+            'Current and scheduled assignments for the selected Agrarian Service Center.',
             $districtId
         );
     }
@@ -408,11 +366,11 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
 
         $this->appointmentDistrictSummary(
-            'Historical Appointments',
+            'Assignment History',
             'arpa-historical-appointments-summary',
             'hr/arpa-appointments/history',
             $id,
-            'Closed appointment history grouped by ASC within the selected District.'
+            'Previous assignments grouped by Agrarian Service Center in the selected District.'
         );
     }
 
@@ -424,33 +382,53 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
 
         $this->appointmentAscList(
-            'Historical Appointments',
+            'Assignment History',
             'arpa-historical-appointments',
             'hr/arpa-appointments/history',
             $ascId,
-            'Closed appointment history for the selected Agrarian Service Center.',
+            'Previous assignments for the selected Agrarian Service Center.',
             $districtId
         );
     }
     public function createDivision(): void
     {
         Auth::requirePermission('arpa.appointment.create');
-        $selectedAsc=trim((string)($_GET['asc_location_id']??''));
-        $selectedDivision=trim((string)($_GET['arpa_division_location_id']??''));
+        $ascContext=$this->activeAscCreationContext();
+        $systemContext=$this->isSystemCreationContext();
+        if($ascContext===null&&!$systemContext){
+            http_response_code(403);
+            $this->render('partials/forbidden',['permission'=>'an active Agrarian Service Center working context']);
+            return;
+        }
+        $selectedAsc=$ascContext===null?trim((string)($_GET['asc_location_id']??'')):(string)$ascContext['location_id'];
         $effectiveDate=trim((string)($_GET['effective_from']??date('Y-m-d')));
         if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$effectiveDate))$effectiveDate=date('Y-m-d');
         if($selectedAsc!=='')$this->assertArpaStageScope('ASC',$selectedAsc,$effectiveDate);
-        $this->render('arpa_appointments/division_form',$this->divisionFormOptions($selectedAsc,$effectiveDate)+compact('selectedAsc','selectedDivision','effectiveDate'));
+        $this->render('arpa_appointments/division_form',$this->divisionFormOptions($selectedAsc,$effectiveDate,$systemContext)+[
+            'selectedAsc'=>$selectedAsc,
+            'effectiveDate'=>$effectiveDate,
+            'ascDerivedFromContext'=>$ascContext!==null,
+            'activeAsc'=>$ascContext,
+        ]);
     }
 
     public function storeDivision(): void
     {
         Auth::requirePermission('arpa.appointment.create'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor):void {
-            $this->assertArpaStageScope('ASC',(string)($_POST['asc_location_id']??''),(string)($_POST['effective_from']??''));
-            $service->createDivisionAppointmentRequest($_POST,$actor);
-            $this->flash('success','ARPA Division appointment request created. Submit it from Pending My Actions.');
-        },'/hr/arpa-appointments/divisions/create','/hr/arpa-appointments/new');
+            $data=$_POST;$ascContext=$this->activeAscCreationContext();$submittedAsc=trim((string)($data['asc_location_id']??''));
+            if($ascContext!==null){
+                $ascId=(string)$ascContext['location_id'];
+                if($submittedAsc!==''&&$submittedAsc!==$ascId)throw new DomainException('The submitted Agrarian Service Center does not match your current working context.');
+                $data['asc_location_id']=$ascId;
+            }else{
+                if(!$this->isSystemCreationContext())throw new DomainException('Select an Agrarian Service Center working context before creating an assignment.');
+                $ascId=$submittedAsc;
+            }
+            $this->assertArpaStageScope('ASC',$ascId,(string)($data['effective_from']??''));
+            $service->createAndSubmitDivisionAppointmentRequest($data,$actor);
+            $this->flash('success','Assignment submitted successfully.');
+        },'/hr/arpa-appointments/new','/hr/arpa-appointments/submitted');
     }
 
     public function subjects(): void
@@ -483,9 +461,9 @@ final class ArpaAppointmentController extends Controller
         $this->perform(function(ArpaAppointmentService $service,string $actor):void {
             $asc=(string)($_POST['asc_location_id']??'');
             $this->assertArpaStageScope('ASC',$asc,(string)($_POST['effective_from']??''));
-            $service->createSubjectAssignmentRequest($_POST,$actor);
-            $this->flash('success','Subject assignment request created.');
-        },'/hr/arpa-appointments/subjects/create','/hr/arpa-appointments/pending');
+            $service->createAndSubmitSubjectAssignmentRequest($_POST,$actor);
+            $this->flash('success','Assignment submitted successfully.');
+        },'/hr/arpa-appointments/subjects/create','/hr/arpa-appointments/submitted');
     }
 
     public function pending(): void
@@ -522,7 +500,7 @@ final class ArpaAppointmentController extends Controller
     public function updateRequest(string $entity,string $id):void
     {
         Auth::requirePermission($entity==='subject'?'arpa.subject.create':'arpa.appointment.edit');Csrf::validate();
-        $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id):void{$asc=(string)($_POST['asc_location_id']??'');$date=(string)($_POST['effective_from']??$_POST['new_effective_from']??$_POST['effective_to']??date('Y-m-d'));if($asc===''){$request=$this->workflowRequest($entity,$id);$asc=(string)$request['asc_location_id'];}$this->assertArpaStageScope('ASC',$asc,$date);if($entity==='subject')$service->updateSubjectRequest($id,$_POST,$actor);else $service->updateDivisionRequest($id,$_POST,$actor);$this->flash('success','Returned/draft request updated. It must be submitted again.');},'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/edit','/hr/arpa-appointments/pending');
+        $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id):void{$asc=(string)($_POST['asc_location_id']??'');$date=(string)($_POST['effective_from']??$_POST['new_effective_from']??$_POST['effective_to']??date('Y-m-d'));if($asc===''){$request=$this->workflowRequest($entity,$id);$asc=(string)$request['asc_location_id'];}$this->assertArpaStageScope('ASC',$asc,$date);$service->updateAndResubmitRequest($entity,$id,$_POST,$actor);$this->flash('success','Assignment corrected and resubmitted successfully.');},'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/edit','/hr/arpa-appointments/submitted');
     }
 
     public function editStageReview(string $entity,string $id,string $stage):void
@@ -575,9 +553,9 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.end'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
             $record=$this->divisionRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id'],(string)($_POST['effective_to']??''));
-            $service->createEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
-            $this->flash('success','Appointment ending request created. Dependent appointments will be closed as separate historical events after final approval.');
-        },'/hr/arpa-appointments/divisions/'.$id.'/end','/hr/arpa-appointments/pending');
+            $service->createAndSubmitEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
+            $this->flash('success','Assignment ending submitted. Dependent appointments will be closed as separate historical events after final approval.');
+        },'/hr/arpa-appointments/divisions/'.$id.'/end','/hr/arpa-appointments/submitted');
     }
 
     public function transfer(string $id): void
@@ -594,9 +572,9 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.transfer'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
             $this->assertArpaStageScope('ASC',(string)($_POST['asc_location_id']??''),(string)($_POST['new_effective_from']??''));
-            $service->createTransferRequest($id,(string)($_POST['asc_location_id']??''),(string)($_POST['arpa_division_location_id']??''),(string)($_POST['old_effective_to']??''),(string)($_POST['new_effective_from']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
-            $this->flash('success','Transfer request created with its closure impact snapshot.');
-        },'/hr/arpa-appointments/divisions/'.$id.'/transfer','/hr/arpa-appointments/pending');
+            $service->createAndSubmitTransferRequest($id,(string)($_POST['asc_location_id']??''),(string)($_POST['arpa_division_location_id']??''),(string)($_POST['old_effective_to']??''),(string)($_POST['new_effective_from']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
+            $this->flash('success','Transfer submitted successfully.');
+        },'/hr/arpa-appointments/divisions/'.$id.'/transfer','/hr/arpa-appointments/submitted');
     }
 
     public function endSubject(string $id): void
@@ -611,9 +589,9 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.subject.end'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
             $record=$this->subjectRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id'],(string)($_POST['effective_to']??''));
-            $service->createSubjectEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
-            $this->flash('success','Subject ending request created.');
-        },'/hr/arpa-appointments/subjects/'.$id.'/end','/hr/arpa-appointments/pending');
+            $service->createAndSubmitSubjectEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
+            $this->flash('success','Subject assignment ending submitted successfully.');
+        },'/hr/arpa-appointments/subjects/'.$id.'/end','/hr/arpa-appointments/submitted');
     }
 
     public function officerProfile(string $id): void
@@ -643,10 +621,27 @@ final class ArpaAppointmentController extends Controller
         return ['officers'=>$this->appointmentCandidateOptions(),'ascs'=>$this->locations('ASC'),'arpaDivisions'=>$this->locations('ARPA_DIVISION')];
     }
 
-    private function divisionFormOptions(string $ascId,string $effectiveDate):array
+    private function divisionFormOptions(string $ascId,string $effectiveDate,bool $includeAscOptions=false):array
     {
         $read=new ArpaAppointmentReadService(Database::pdo());$userId=(string)Auth::user()['id'];
-        return ['officers'=>$ascId===''?[]:(new ArpaAppointmentCandidateService(Database::pdo()))->optionsForAsc($userId,$ascId,$effectiveDate),'ascs'=>$this->locations('ASC'),'arpaDivisions'=>$ascId===''?[]:$read->vacantDivisionsForAsc($userId,$ascId,$effectiveDate)];
+        return ['officers'=>$ascId===''?[]:(new ArpaAppointmentCandidateService(Database::pdo()))->optionsForAsc($userId,$ascId,$effectiveDate),'ascs'=>$includeAscOptions?$this->locations('ASC'):[],'arpaDivisions'=>$ascId===''?[]:$read->vacantDivisionsForAsc($userId,$ascId,$effectiveDate)];
+    }
+
+    private function activeAscCreationContext():?array
+    {
+        $context=Auth::activeContext();
+        return $context!==null
+            &&(string)$context['role_level']==='ASC'
+            &&(string)($context['scope_type']??'')==='ASC'
+            &&(string)($context['scope_mode']??'')==='EXACT'
+            &&trim((string)($context['location_id']??''))!==''
+            ?$context
+            :null;
+    }
+
+    private function isSystemCreationContext():bool
+    {
+        return (string)(Auth::activeContext()['role_level']??'')==='SYSTEM';
     }
 
     private function appointmentList(

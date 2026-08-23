@@ -3,7 +3,7 @@
 <div class="page-heading">
     <div>
         <div class="breadcrumb-lite">
-            Human Resource Management / ARPA Officer Appointments
+            Human Resource Management / ARPA Officer Assignments
             <?php if(isset($district)): ?>
                 / <?= e($district['name_en']) ?>
             <?php endif; ?>

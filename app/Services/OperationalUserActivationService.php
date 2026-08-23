@@ -32,7 +32,7 @@ final class OperationalUserActivationService
         $this->transaction(function()use($userId,$actorId,$username,$passwordHash,$email,$reason,$officialReference,$effectiveFrom,$selections):void{
             $stmt=$this->pdo->prepare('SELECT * FROM system_user WHERE id=? FOR UPDATE');$stmt->execute([$userId]);$user=$stmt->fetch();
             if(!$user)throw new DomainException('User identity was not found.');
-            if((int)$user['enabled']===1||$user['account_status']==='ACTIVE')throw new DomainException('This identity is already operationally active.');
+            if((int)$user['enabled']===1||$user['account_status']==='ACTIVE')throw new DomainException('This user is already active.');
             if((int)$user['historical_identity']!==1)throw new DomainException('Selective historical activation requires an imported legacy identity.');
             $reference=$this->pdo->prepare('SELECT COUNT(*) FROM legacy_user_reference WHERE system_user_id=?');$reference->execute([$userId]);
             if((int)$reference->fetchColumn()===0)throw new DomainException('The legacy identity reference is missing.');
@@ -56,7 +56,7 @@ final class OperationalUserActivationService
         if($userId===$actorId)throw new DomainException('Administrators cannot deactivate their own account.');
         $this->transaction(function()use($userId,$reason,$officialReference,$actorId):void{
             $stmt=$this->pdo->prepare('SELECT * FROM system_user WHERE id=? FOR UPDATE');$stmt->execute([$userId]);$user=$stmt->fetch();
-            if(!$user||$user['identity_type']!=='STAFF'||(int)$user['enabled']!==1||$user['account_status']!=='ACTIVE')throw new DomainException('Only an active operational staff identity can be deactivated.');
+            if(!$user||$user['identity_type']!=='STAFF'||(int)$user['enabled']!==1||$user['account_status']!=='ACTIVE')throw new DomainException('Only an active staff user can be deactivated.');
             $protected=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND r.role_code IN('SYSTEM_ADMIN','SECURITY_ADMIN','USER_ADMIN')");$protected->execute([$userId]);
             if((int)$protected->fetchColumn()>0)throw new DomainException('Protected administration accounts must be handled through the dedicated security process.');
             $roles=$this->activeAssignments('user_account_role',$userId);$scopes=$this->activeAssignments('user_account_scope',$userId);
@@ -72,9 +72,9 @@ final class OperationalUserActivationService
         $roleRows=[];$scopeRows=[];
         foreach($selections as $roleCode=>$locationId){
             $roleStmt=$this->pdo->prepare("SELECT id,role_code,role_level FROM application_role WHERE role_code=? AND active=1 AND assignable=1 AND approval_status='APPROVED' FOR UPDATE");$roleStmt->execute([$roleCode]);$role=$roleStmt->fetch();
-            if(!$role||!in_array($role['role_code'],self::ROLE_CODES,true))throw new DomainException('An unsupported operational role was selected.');
+            if(!$role||!in_array($role['role_code'],self::ROLE_CODES,true))throw new DomainException('The selected role is not available.');
             $active=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_role WHERE user_id=? AND role_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=? AND (effective_to IS NULL OR effective_to>=?)");$active->execute([$userId,$role['id'],$from,$from]);
-            if((int)$active->fetchColumn()>0)throw new DomainException("The user already has active role {$roleCode}.");
+            if((int)$active->fetchColumn()>0)throw new DomainException('The user already has this active role.');
             [$scopeType,$scopeMode,$validatedLocation]=$this->validateScope((string)$role['role_level'],$locationId);
             $roleAssignmentId=$this->uuid();$scopeId=$this->uuid();
             $this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason,official_reference,created_by,created_at,approved_by,approved_at) VALUES(?,?,?,?,'APPROVED',1,?,?,?,NOW(),?,NOW())")->execute([$roleAssignmentId,$userId,$role['id'],$from,$reason,$reference,$actorId,$actorId]);
@@ -86,18 +86,18 @@ final class OperationalUserActivationService
 
     private function validateScope(string $roleLevel,?string $locationId):array
     {
-        if($roleLevel==='NATIONAL'){if($locationId!==null&&trim($locationId)!=='')throw new DomainException('National roles require NATIONAL scope without a location.');return ['NATIONAL','NATIONAL',null];}
+        if($roleLevel==='NATIONAL'){if($locationId!==null&&trim($locationId)!=='')throw new DomainException('National roles do not use a specific location.');return ['NATIONAL','NATIONAL',null];}
         $expected=$roleLevel==='ASC'?'ASC':($roleLevel==='DISTRICT'?'DISTRICT':null);if($expected===null)throw new DomainException('Only ASC, District, and National operational roles are supported.');
-        $locationId=trim((string)$locationId);if($locationId==='')throw new DomainException("{$expected} roles require an explicit {$expected} location.");
+        $locationId=trim((string)$locationId);if($locationId==='')throw new DomainException('Select a location for this role.');
         $stmt=$this->pdo->prepare("SELECT COUNT(*) FROM location l JOIN location_type t ON t.id=l.location_type_id WHERE l.id=? AND t.system_key=? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'");$stmt->execute([$locationId,$expected]);if((int)$stmt->fetchColumn()!==1)throw new DomainException("The selected location is not an approved active {$expected}.");
         return [$expected,$expected==='ASC'?'EXACT':'INCLUDE_CHILDREN',$locationId];
     }
 
     private function roleSelections(mixed $input,mixed $enabled):array
     {
-        if(!is_array($input)||!is_array($enabled))throw new DomainException('Select at least one operational role and scope.');$out=[];
+        if(!is_array($input)||!is_array($enabled))throw new DomainException('Select at least one role and location.');$out=[];
         foreach($enabled as $rawCode){$code=strtoupper(trim((string)$rawCode));if(!in_array($code,self::ROLE_CODES,true))throw new DomainException('An unsupported operational role was selected.');$location=$input[$code]??null;$out[$code]=is_string($location)?trim($location):null;}
-        if($out===[])throw new DomainException('Select at least one operational role and scope.');return $out;
+        if($out===[])throw new DomainException('Select at least one role and location.');return $out;
     }
 
     private function recordEvent(string $userId,string $type,array $previous,string $newIdentity,string $newStatus,string $username,array $roles,array $scopes,string $reason,?string $reference,string $actor):void
@@ -112,7 +112,7 @@ final class OperationalUserActivationService
         (new UserAccessManagementService($this->pdo))->assertActorPermissions($actorId,$required);
     }
     private function email(mixed $value):?string{$email=strtolower(trim((string)$value));if($email==='')return null;if(filter_var($email,FILTER_VALIDATE_EMAIL)===false)throw new DomainException('Enter a valid current email address.');return $email;}
-    private function date(string $value):string{$d=\DateTimeImmutable::createFromFormat('!Y-m-d',$value);if(!$d||$d->format('Y-m-d')!==$value)throw new DomainException('Enter a valid effective date.');return $value;}
+    private function date(string $value):string{$d=\DateTimeImmutable::createFromFormat('!Y-m-d',$value);if(!$d||$d->format('Y-m-d')!==$value)throw new DomainException('Enter a valid start date.');return $value;}
     private function requiredText(mixed $v,string $label):string{$v=trim((string)$v);if($v==='')throw new DomainException("{$label} is required.");return $v;}
     private function text(mixed $v):?string{$v=trim((string)$v);return $v===''?null:$v;}
     private function uuid():string{$hex=bin2hex(random_bytes(16));return substr($hex,0,8).'-'.substr($hex,8,4).'-4'.substr($hex,13,3).'-'.dechex((hexdec($hex[16])&3)|8).substr($hex,17,3).'-'.substr($hex,20);}

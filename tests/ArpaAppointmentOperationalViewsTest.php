@@ -244,7 +244,8 @@ final class ArpaAppointmentOperationalViewsTest
             $this->same(false,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id'),true),'scheduled future appointment prevents vacancy');
             $this->throws(fn()=>$read->assertDivisionVacant($asc,$division,$today),'forged request for occupied Division is rejected');
             $this->close($scheduled,$future);
-            $this->same(true,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id'),true),'formally ended Division becomes vacant using the same service');
+            $afterScheduledEnd=date('Y-m-d',strtotime($future.' +1 day'));
+            $this->same(true,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$afterScheduledEnd),'id'),true),'formally ended Division becomes vacant after its inclusive end date');
 
             $first=$this->appointment((string)$ids[0],$asc,$division,'PERMANENT',$today);$second=$this->appointment((string)$ids[1],$asc,$division,'ACTING',$today);
             $issues=$this->rawIssues();$this->same(true,in_array('DIVISION_MULTIPLE_OPEN',$issues,true),'same Division with multiple open appointments is detected');$this->same(true,in_array('DEPENDENT_WITHOUT_PERMANENT',$issues,true),'Acting without the same Officer Permanent is detected');

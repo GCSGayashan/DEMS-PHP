@@ -32,7 +32,7 @@ final class ScopedDashboardOrganizationTest
         $config=DataTableRegistry::definition('locations');$query=new DataTableQuery($this->pdo,$config,new DataTableRequest(['length'=>100]));$response=$query->response();$this->same(true,$response['recordsTotal']<18181,'national location total is not returned');
         $export=iterator_to_array($query->exportRows());$numbers=array_column($export,'dad_number');$this->same(true,in_array('70004-0000389',$numbers,true),'own ASC included in CSV query');
         $unrelated=$this->pdo->query("SELECT dad_number FROM location WHERE dad_number<>'70004-0000389' AND location_type_id=(SELECT id FROM location_type WHERE system_key='ASC') LIMIT 1")->fetchColumn();$this->same(false,in_array($unrelated,$numbers,true),'unrelated ASC excluded from CSV query');
-        $arpaConfig=DataTableRegistry::definition('locations',['scope_type'=>'ARPA_DIVISION']);$arpa=(new DataTableQuery($this->pdo,$arpaConfig,new DataTableRequest(['length'=>100])))->response();$this->same(16,$arpa['recordsTotal'],'ARPA DataTable is scoped');
+        $arpaConfig=DataTableRegistry::definition('locations',['scope_type'=>'ARPA_DIVISION']);$arpa=(new DataTableQuery($this->pdo,$arpaConfig,new DataTableRequest(['length'=>100])))->response();$this->same(16,$arpa['recordsTotal'],'ARPA DataTable is scoped');$this->same(false,in_array('Type',array_column($arpaConfig['columns'],'label'),true),'scoped ARPA table removes redundant Type');$this->same(true,in_array('Agrarian Service Center',array_column($arpaConfig['columns'],'label'),true),'scoped ARPA table includes parent ASC');$this->same(true,count(array_unique(array_column($arpa['data'],'dad_number')))===count($arpa['data']),'scoped hierarchy joins do not duplicate ARPA rows');
         $hierarchy=DataTableRegistry::definition('location-hierarchy');$hier=(new DataTableQuery($this->pdo,$hierarchy,new DataTableRequest(['length'=>100])))->response();$this->same(true,$hier['recordsTotal']>0,'scoped hierarchy has contextual relationships');
     }
     private function roleBoundaries():void
@@ -42,7 +42,7 @@ final class ScopedDashboardOrganizationTest
     }
     private function uiContract():void
     {
-        $view=file_get_contents(BASE_PATH.'/app/Views/dashboard/index.php');$layout=file_get_contents(BASE_PATH.'/app/Views/layouts/admin.php');$chart=file_get_contents(BASE_PATH.'/public/assets/js/dems-charts.js');$this->contains('No operational appointment data is available',$view,'zero-data message');$this->contains('My Agrarian Service Center',$layout,'scoped menu');$this->contains('server-scoped',$chart,'local chart consumes server-scoped data');
+        $view=file_get_contents(BASE_PATH.'/app/Views/dashboard/index.php');$layout=file_get_contents(BASE_PATH.'/app/Views/layouts/admin.php');$chart=file_get_contents(BASE_PATH.'/public/assets/js/dems-charts.js');$this->contains('No current ARPA assignment information is available',$view,'zero-data message');$this->contains('My Service Center',$layout,'scoped menu');$this->contains('server-scoped',$chart,'local chart consumes server-scoped data');
     }
     private function same(mixed $e,mixed $a,string $m):void{$this->assertions++;if($e!==$a)throw new RuntimeException("{$m}: expected ".var_export($e,true).', got '.var_export($a,true));}
     private function contains(string $n,string $h,string $m):void{$this->assertions++;if(!str_contains($h,$n))throw new RuntimeException("{$m}: missing {$n}");}

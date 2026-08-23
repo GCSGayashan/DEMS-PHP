@@ -6,7 +6,7 @@ $before=json_decode((string)$correction['before_json'],true)?:[];
 $after=json_decode((string)$correction['after_json'],true)?:[];
 $presentation=ArpaAppointmentIssuePresentation::for((string)$correction['issue_type']);
 ?>
-<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Appointments / Data Issues / Review History</div><h1><?= e($presentation['title']) ?></h1><p>This record shows what was reviewed or corrected. The previous information is kept for audit.</p></div><?= DataTableFormat::badge(ArpaAppointmentIssuePresentation::resolution((string)$correction['resolution_status'])) ?></div>
+<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Data Issues / Review History</div><h1><?= e($presentation['title']) ?></h1><p>This record shows what was reviewed or corrected. The previous information is kept for audit.</p></div><?= DataTableFormat::badge(ArpaAppointmentIssuePresentation::resolution((string)$correction['resolution_status'])) ?></div>
 <div class="row g-3 mb-4">
   <div class="col-lg-6"><div class="form-section h-100"><h2 class="h5">Review</h2><dl class="row mb-0">
     <dt class="col-5">Action</dt><dd class="col-7"><?= e(ArpaAppointmentIssuePresentation::action((string)$correction['correction_action'])) ?></dd>

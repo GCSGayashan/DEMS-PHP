@@ -44,14 +44,14 @@ final class UserManagementController extends Controller
     public function activateHistorical(string $id):void
     {
         $this->requireActivationPermissions();Csrf::validate();
-        try{(new OperationalUserActivationService(Database::pdo()))->activate($id,$_POST,(string)Auth::user()['id']);$this->flash('success','Historical identity activated as an operational STAFF user. A password change is required at first login.');redirect('/access-management/users');}
+        try{(new OperationalUserActivationService(Database::pdo()))->activate($id,$_POST,(string)Auth::user()['id']);$this->flash('success','User activated. A password change is required at first sign-in.');redirect('/access-management/users');}
         catch(Throwable $e){error_log('Operational user activation failed: '.$e->getMessage());$this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to activate the selected identity.');redirect('/access-management/users/'.$id.'/activate');}
     }
 
     public function deactivateUser(string $id):void
     {
         Auth::requirePermission('user.block');Csrf::validate();
-        try{(new OperationalUserActivationService(Database::pdo()))->deactivate($id,(string)($_POST['reason']??''),$_POST['official_reference']??null,(string)Auth::user()['id']);$this->flash('success','Operational login disabled and current role/scope periods ended.');}
+        try{(new OperationalUserActivationService(Database::pdo()))->deactivate($id,(string)($_POST['reason']??''),$_POST['official_reference']??null,(string)Auth::user()['id']);$this->flash('success','User deactivated. Current roles and assigned locations have ended.');}
         catch(Throwable $e){error_log('Operational user deactivation failed: '.$e->getMessage());$this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to deactivate the selected user.');}
         redirect('/access-management/users');
     }
@@ -104,10 +104,12 @@ final class UserManagementController extends Controller
         }catch(\DomainException $e){
             $this->flash('danger',$e->getMessage()); redirect('/access-management/users');
         }
-        $stmt=Database::pdo()->prepare("INSERT INTO `system_user`(id,officer_id,identity_type,username,password_hash,account_status,approval_status,enabled,mfa_method,password_setup_required,mfa_enrolled,requested_by,requested_at,created_at) VALUES(UUID(),?,'STAFF',?,?,'REQUESTED','DRAFT',0,?,1,0,?,NOW(),NOW())");
-        $stmt->execute([$_POST['officer_id'],$username,$passwordHash,$_POST['mfa_method']??'AUTHENTICATOR_APP',Auth::user()['id']]);
+        $actor=(string)Auth::user()['id'];
+        $stmt=Database::pdo()->prepare("INSERT INTO `system_user`(id,officer_id,identity_type,username,password_hash,account_status,approval_status,enabled,mfa_method,password_setup_required,mfa_enrolled,requested_by,requested_at,submitted_by,submitted_at,created_at) VALUES(UUID(),?,'STAFF',?,?,'REQUESTED','SUBMITTED',0,?,1,0,?,NOW(),?,NOW(),NOW())");
+        $stmt->execute([$_POST['officer_id'],$username,$passwordHash,$_POST['mfa_method']??'AUTHENTICATOR_APP',$actor,$actor]);
         Audit::record('user.request','SYSTEM_USER',null,['username'=>$username]);
-        $this->flash('success','User account request created.'); redirect('/access-management/account-requests');
+        Audit::record('user.submit','SYSTEM_USER',null,['username'=>$username]);
+        $this->flash('success','User request submitted.'); redirect('/access-management/account-requests');
     }
 
     public function requests(): void
@@ -130,7 +132,7 @@ final class UserManagementController extends Controller
         Auth::requirePermission('user.approve'); Csrf::validate();
         $pdo=Database::pdo(); $stmt=$pdo->prepare('SELECT requested_by,approval_status FROM `system_user` WHERE id=?'); $stmt->execute([$id]); $row=$stmt->fetch();
         if(!$row||$row['approval_status']!=='SUBMITTED'){ $this->flash('danger','Only submitted requests can be approved.'); redirect('/access-management/account-requests'); }
-        if((string)$row['requested_by']===(string)Auth::user()['id']){ $this->flash('danger','Maker cannot approve their own account request.'); redirect('/access-management/account-requests'); }
+        if((string)$row['requested_by']===(string)Auth::user()['id']){ $this->flash('danger','You cannot approve a user request you created.'); redirect('/access-management/account-requests'); }
         $pdo->prepare("UPDATE `system_user` SET approval_status='APPROVED',account_status='ACTIVE',enabled=1,approved_by=?,approved_at=NOW(),activated_by=?,activated_at=NOW() WHERE id=?")->execute([Auth::user()['id'],Auth::user()['id'],$id]);
         Audit::record('user.approve','SYSTEM_USER',$id); $this->flash('success','User account approved and activated.'); redirect('/access-management/users');
     }
@@ -152,11 +154,12 @@ final class UserManagementController extends Controller
         if($name===''||!preg_match('/^[A-Z][A-Z0-9_]{2,99}$/',$code)){ $this->flash('danger','Role name and a valid uppercase system key are required.'); redirect('/access-management/roles'); }
         $pdo->beginTransaction();
         try{
-            $pdo->prepare("INSERT INTO application_role(id,role_code,role_name,description,role_level,protected_role,assignable,legacy,approval_status,active,effective_from,created_by,created_at) VALUES(UUID(),?,?,?,'CUSTOM',0,1,0,'DRAFT',1,CURRENT_DATE(),?,NOW())")->execute([$code,$name,trim((string)($_POST['description']??''))?:null,Auth::user()['id']]);
+            $actor=(string)Auth::user()['id'];
+            $pdo->prepare("INSERT INTO application_role(id,role_code,role_name,description,role_level,protected_role,assignable,legacy,approval_status,active,effective_from,created_by,created_at,submitted_by,submitted_at) VALUES(UUID(),?,?,?,'CUSTOM',0,1,0,'SUBMITTED',0,CURRENT_DATE(),?,NOW(),?,NOW())")->execute([$code,$name,trim((string)($_POST['description']??''))?:null,$actor,$actor]);
             $rid=$pdo->prepare('SELECT id FROM application_role WHERE role_code=?'); $rid->execute([$code]); $roleId=$rid->fetchColumn();
             $ins=$pdo->prepare('INSERT IGNORE INTO application_role_permission(role_id,permission_id) VALUES(?,?)');
             foreach((array)($_POST['permissions']??[]) as $pid) $ins->execute([$roleId,$pid]);
-            $pdo->commit(); Audit::record('role.create','APPLICATION_ROLE',(string)$roleId,['role_code'=>$code]); $this->flash('success','Custom role draft created.');
+            $pdo->commit(); Audit::record('role.create','APPLICATION_ROLE',(string)$roleId,['role_code'=>$code]); Audit::record('role.submit','APPLICATION_ROLE',(string)$roleId); $this->flash('success','Custom role submitted.');
         }catch(\Throwable $e){ $pdo->rollBack(); $this->flash('danger',$e->getMessage()); }
         redirect('/access-management/roles');
     }
@@ -174,7 +177,7 @@ final class UserManagementController extends Controller
         $stmt=$pdo->prepare('SELECT created_by,approval_status FROM application_role WHERE id=?'); $stmt->execute([$id]); $r=$stmt->fetch();
         if(!$r||$r['approval_status']!=='SUBMITTED'){ $this->flash('danger','Only submitted custom roles can be approved.'); redirect('/access-management/roles'); }
         if((string)$r['created_by']===(string)Auth::user()['id']){ $this->flash('danger','Maker cannot approve their own role.'); redirect('/access-management/roles'); }
-        $pdo->prepare("UPDATE application_role SET approval_status='APPROVED',approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
+        $pdo->prepare("UPDATE application_role SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
         Audit::record('role.approve','APPLICATION_ROLE',$id); $this->flash('success','Custom role approved.'); redirect('/access-management/roles');
     }
 
@@ -204,7 +207,7 @@ final class UserManagementController extends Controller
     {
         Auth::requirePermission('user.assign-role'); Csrf::validate();
         try{
-            $id=$this->managementPolicy()->createDraftAssignment(
+            $id=$this->managementPolicy()->createSubmittedAssignment(
                 (string)Auth::user()['id'],(string)($_POST['user_id']??''),(string)($_POST['role_id']??''),
                 isset($_POST['location_id'])?(string)$_POST['location_id']:null,
                 (string)(($_POST['effective_from']??'')?:date('Y-m-d')),
@@ -213,7 +216,8 @@ final class UserManagementController extends Controller
                 isset($_POST['replaces_assignment_id'])?(string)$_POST['replaces_assignment_id']:null
             );
             Audit::record('user.role.assign','USER_ROLE',$id,['user_id'=>$_POST['user_id']??null,'role_id'=>$_POST['role_id']??null]);
-            $this->flash('success','Role and matching scope assignment draft created.');
+            Audit::record('user.role.submit','USER_ROLE',$id);
+            $this->flash('success','User role submitted.');
         }catch(DomainException $e){$this->flash('danger',$e->getMessage());}
         redirect('/access-management/role-assignments');
     }
@@ -228,7 +232,7 @@ final class UserManagementController extends Controller
     public function approveRoleAssignment(string $id): void
     {
         Auth::requirePermission('user.assign-role'); Csrf::validate();try{$this->managementPolicy()->approveAssignment((string)Auth::user()['id'],$id);}catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments');}
-        Audit::record('user.role.approve','USER_ROLE',$id); $this->flash('success','Role assignment approved.'); redirect('/access-management/role-assignments');
+        Audit::record('user.role.approve','USER_ROLE',$id); $this->flash('success','User role approved.'); redirect('/access-management/role-assignments');
     }
 
     public function endRoleAssignmentForm(string $id):void
@@ -277,15 +281,16 @@ final class UserManagementController extends Controller
         Auth::requirePermission('user.assign-scope'); Csrf::validate(); $pdo=Database::pdo();
         $stmt=$pdo->prepare("SELECT uar.user_id,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to,r.role_level FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.id=? AND uar.active=1 AND uar.approval_status='APPROVED'");
         $stmt->execute([$_POST['role_assignment_id']??'']); $assignment=$stmt->fetch();
-        if(!$assignment){$this->flash('danger','Select an approved active role assignment.');redirect('/access-management/scope-assignments');}
+        if(!$assignment){$this->flash('danger','Select an approved active user role.');redirect('/access-management/scope-assignments');}
         $actor=(string)Auth::user()['id'];$policy=$this->managementPolicy();$this->authorize(fn()=>$policy->assertCanManageRoleAssignment($actor,(string)$_POST['role_assignment_id']));
-        $from=(string)(($_POST['effective_from']??'')?:date('Y-m-d'));$to=(string)($_POST['effective_to']??'');if($from<(string)$assignment['role_effective_from']||($to!==''&&($to<$from||($assignment['role_effective_to']!==null&&$to>(string)$assignment['role_effective_to'])))){$this->flash('danger','Scope dates must remain inside the selected role assignment period.');redirect('/access-management/scope-assignments');}$validated=$this->authorize(fn()=>$policy->validateAssignment($actor,(string)$assignment['role_id'],isset($_POST['location_id'])?(string)$_POST['location_id']:null,$from));
+        $from=(string)(($_POST['effective_from']??'')?:date('Y-m-d'));$to=(string)($_POST['effective_to']??'');if($from<(string)$assignment['role_effective_from']||($to!==''&&($to<$from||($assignment['role_effective_to']!==null&&$to>(string)$assignment['role_effective_to'])))){$this->flash('danger',"The location dates must be within the role's start and end dates.");redirect('/access-management/scope-assignments');}$validated=$this->authorize(fn()=>$policy->validateAssignment($actor,(string)$assignment['role_id'],isset($_POST['location_id'])?(string)$_POST['location_id']:null,$from));
         $type=(string)$validated['scope_type'];$mode=(string)$validated['scope_mode'];$location=$validated['location_id'];
-        if($type===''||$mode===''){$this->flash('danger','This role does not use an administrative geographic scope.');redirect('/access-management/scope-assignments');}
-        $stmt=$pdo->prepare("INSERT INTO user_account_scope (id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,effective_to,approval_status,active,created_by,created_at) VALUES(UUID(),?,?,?,?,?,?,?,'DRAFT',0,?,NOW())");
-        $stmt->execute([$assignment['user_id'],$_POST['role_assignment_id'],$type,$mode,$location,$from,$to?:null,Auth::user()['id']]);
+        if($type===''||$mode===''){$this->flash('danger','This role does not use an assigned location.');redirect('/access-management/scope-assignments');}
+        $stmt=$pdo->prepare("INSERT INTO user_account_scope (id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,effective_to,approval_status,active,created_by,created_at,submitted_by,submitted_at) VALUES(UUID(),?,?,?,?,?,?,?,'SUBMITTED',0,?,NOW(),?,NOW())");
+        $stmt->execute([$assignment['user_id'],$_POST['role_assignment_id'],$type,$mode,$location,$from,$to?:null,$actor,$actor]);
         Audit::record('user.scope.create','USER_SCOPE',null,['user_id'=>$assignment['user_id'],'scope_type'=>$type,'location_id'=>$location]);
-        $this->flash('success','Scope assignment draft created.'); redirect('/access-management/scope-assignments');
+        Audit::record('user.scope.submit','USER_SCOPE',null,['user_id'=>$assignment['user_id'],'scope_type'=>$type,'location_id'=>$location]);
+        $this->flash('success','Assigned location submitted.'); redirect('/access-management/scope-assignments');
     }
 
     public function submitScope(string $id): void
@@ -299,10 +304,10 @@ final class UserManagementController extends Controller
     public function approveScope(string $id): void
     {
         Auth::requirePermission('user.assign-scope'); Csrf::validate();$this->authorize(fn()=>$this->managementPolicy()->assertCanManageScopeAssignment((string)Auth::user()['id'],$id));$pdo=Database::pdo();$stmt=$pdo->prepare('SELECT created_by,approval_status FROM user_account_scope WHERE id=?');$stmt->execute([$id]);$row=$stmt->fetch();
-        if(!$row||$row['approval_status']!=='SUBMITTED'){$this->flash('danger','Only submitted scope assignments can be approved.');redirect('/access-management/scope-assignments');}
-        if((string)$row['created_by']===(string)Auth::user()['id']){$this->flash('danger','Maker cannot approve their own scope assignment.');redirect('/access-management/scope-assignments');}
+        if(!$row||$row['approval_status']!=='SUBMITTED'){$this->flash('danger','Only submitted assigned locations can be approved.');redirect('/access-management/scope-assignments');}
+        if((string)$row['created_by']===(string)Auth::user()['id']){$this->flash('danger','You cannot approve an assigned location you created.');redirect('/access-management/scope-assignments');}
         $pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
-        Audit::record('user.scope.approve','USER_SCOPE',$id);$this->flash('success','Scope assignment approved.');redirect('/access-management/scope-assignments');
+        Audit::record('user.scope.approve','USER_SCOPE',$id);$this->flash('success','Assigned location approved.');redirect('/access-management/scope-assignments');
     }
 
     public function provisioningFailures(): void

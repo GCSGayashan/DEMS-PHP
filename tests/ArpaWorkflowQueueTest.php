@@ -24,7 +24,7 @@ final class ArpaWorkflowQueueTest
     private function layoutTest():void
     {
         $_SERVER['REQUEST_URI']='/DEMS-PHP/public/hr/arpa-appointments';ob_start();(new ArpaAppointmentController())->dashboard();$html=(string)ob_get_clean();
-        foreach(['<!doctype html>','class="topbar"','class="sidebar"','ARPA Appointment Dashboard','assets/css/app.css','assets/js/dems-charts.js','Submitted Appointments','Approval / Verification'] as $needle)$this->same(true,str_contains($html,$needle),"dashboard layout contains {$needle}");
+        foreach(['<!doctype html>','class="topbar"','class="sidebar"','ARPA Officer Assignments','assets/css/app.css','assets/js/dems-charts.js','Submitted','Review &amp; Approve'] as $needle)$this->same(true,str_contains($html,$needle),"dashboard layout contains {$needle}");
         $this->same(false,str_contains($html,'asset('),'dashboard output has no unresolved asset helper call');
     }
 
@@ -149,7 +149,7 @@ final class ArpaWorkflowQueueTest
             $completed=DataTableRegistry::definition('arpa-approval-verification');$completed['baseWhere'][]='r.id=?';$completed['baseParams'][]=$request;
             $response=(new DataTableQuery($this->pdo,$completed,new DataTableRequest(['length'=>10])))->response();
             $this->same(1,$response['recordsFiltered'],'completed-actions DataTable retains asctest ASC verification after later stages');
-            $this->same('ASC_VERIFIED',strip_tags($response['data'][0]['resulting_status']),'completed DataTable reports the resulting stage');
+            $this->same('ASC Verified',strip_tags($response['data'][0]['resulting_status']),'completed DataTable reports the resulting stage');
 
             $controller=file_get_contents(BASE_PATH.'/app/Controllers/DataTableController.php');
             $this->same(true,str_contains($controller,"isset(\$config['authorize'])"),'direct DataTable endpoint enforces queue-specific authorization');

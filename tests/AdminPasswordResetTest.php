@@ -76,12 +76,12 @@ final class AdminPasswordResetTest
             $this->same(true,substr_count($controller,"Auth::requirePermission('user.reset-password')")>=2,'GET and POST require reset permission');
             $this->same(true,str_contains($controller,'Csrf::validate()'),'POST controller validates CSRF');
             $this->same(true,str_contains($view,'Csrf::field()'),'reset form contains CSRF token');
-            $this->same(true,str_contains($dashboard,'Active / Operational Users')&&str_contains($dashboard,'Account Requests'),'System Administration dashboard links User Management');
+            $this->same(true,str_contains($dashboard,'Active Users')&&str_contains($dashboard,'User Requests'),'System Administration dashboard links User Management');
             $this->same(true,str_contains($dashboard,"Auth::can('user.view')"),'dashboard User Management cards are permission driven');
             $this->same(true,str_contains($layout,"Auth::can('user.view')"),'sidebar User Management links remain permission driven');
             $definition=DataTableRegistry::definition('users');
             $labels=array_column($definition['columns'],'label');
-            foreach(['Username','Display Name','Identity Type','Account Status','Enabled','Role(s)','Scope(s)','Password Setup','Last Password Changed','Actions'] as $label)$this->same(true,in_array($label,$labels,true),"active directory includes {$label}");
+            foreach(['Username','Display Name','Identity Type','Account Status','Enabled','Role(s)','Assigned Locations','Password Setup','Last Password Changed','Actions'] as $label)$this->same(true,in_array($label,$labels,true),"active directory includes {$label}");
             $this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM system_user WHERE username='asctest' AND enabled=1 AND account_status='ACTIVE'")->fetchColumn(),'asctest remains in Active Users');
         }finally{
             $this->pdo->prepare('DELETE FROM audit_event WHERE actor_user_id IN (?,?) OR target_id IN (?,?)')->execute([$this->adminId,$this->targetId,$this->adminId,$this->targetId]);

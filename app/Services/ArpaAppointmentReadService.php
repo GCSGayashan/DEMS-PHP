@@ -10,6 +10,9 @@ use PDO;
 /** Shared operational read rules for ARPA appointment lists, selectors and diagnostics. */
 final class ArpaAppointmentReadService
 {
+    private const RESERVING_REQUEST_STATUSES = [
+        'SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED',
+    ];
     public const CURRENT_ACTION_ISSUES=[
         'DIVISION_MULTIPLE_OPEN','OFFICER_MULTIPLE_PERMANENT','OFFICER_MULTIPLE_ACTING',
         'OFFICER_MULTIPLE_ATTEND_TO_DUTY','DEPENDENT_WITHOUT_PERMANENT',
@@ -78,22 +81,29 @@ final class ArpaAppointmentReadService
                 AND o.effective_from<=? AND (o.effective_to IS NULL OR o.effective_to>=?)
               ORDER BY o.name_with_initials,o.dad_number";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$effectiveDate,$effectiveDate,$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);
-        return $stmt->fetchAll();
+        return $this->withAppointmentTypeAvailability($stmt->fetchAll(),$effectiveDate);
     }
 
     /** @return array<int,array<string,mixed>> */
     public function vacantDivisionsForAsc(string $userId, string $ascLocationId, string $effectiveDate): array
     {
         if (!ScopeService::canAccessArpaStage($userId, 'ASC', $ascLocationId, $effectiveDate)) return [];
+        $statuses=$this->reservingStatusSql();
         $sql="SELECT l.id,l.dad_number,l.name_en FROM location l JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
               JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION'
                 AND lr.active=1 AND lr.approval_status='APPROVED' AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
               WHERE l.approval_status='APPROVED' AND l.operational_status='ACTIVE' AND l.effective_from<=?
                 AND (l.effective_to IS NULL OR l.effective_to>=?)
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
-                  WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0 AND c.id IS NULL)
+                  WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0
+                    AND (c.effective_to IS NULL OR c.effective_to>=?))
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r
+                  WHERE r.arpa_division_location_id=l.id AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND r.requested_effective_from IS NOT NULL
+                    AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?))
               ORDER BY l.name_en,l.dad_number";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);return $stmt->fetchAll();
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);return $stmt->fetchAll();
     }
 
     public function assertEligibleOfficer(string $officerId, string $ascLocationId, string $effectiveDate): void
@@ -110,18 +120,158 @@ final class ArpaAppointmentReadService
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Officer does not have an approved current assignment to the selected ASC Office.');
     }
 
-    public function assertDivisionVacant(string $ascLocationId, string $divisionId, string $effectiveDate, bool $lock = false): void
+    public function assertDivisionVacant(
+        string $ascLocationId,
+        string $divisionId,
+        string $effectiveDate,
+        bool $lock = false,
+        ?string $excludeRequestId = null,
+        ?string $excludeAppointmentId = null
+    ): void
     {
         if($lock){$lockStmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$lockStmt->execute([$divisionId]);if(!$lockStmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');}
+        $statuses=$this->reservingStatusSql();
         $sql="SELECT COUNT(*) FROM location l JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
               JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION'
                 AND lr.active=1 AND lr.approval_status='APPROVED' AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
               WHERE l.id=? AND l.approval_status='APPROVED' AND l.operational_status='ACTIVE'
                 AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
-                  WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0 AND c.id IS NULL)";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$divisionId,$effectiveDate,$effectiveDate]);
+                  WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0 AND a.id<>COALESCE(?, '')
+                    AND (c.effective_to IS NULL OR c.effective_to>=?))
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r
+                  WHERE r.arpa_division_location_id=l.id AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND r.requested_effective_from IS NOT NULL AND r.id<>COALESCE(?, '')
+                    AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?))";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$divisionId,$effectiveDate,$effectiveDate,$excludeAppointmentId,$effectiveDate,$excludeRequestId,$effectiveDate]);
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Division is outside the ASC, inactive, or already has an open or scheduled appointment.');
+    }
+
+    /** @return array<string,mixed> */
+    public function appointmentTypeAvailability(
+        string $officerId,
+        string $effectiveFrom,
+        ?string $effectiveTo = null,
+        ?string $excludeRequestId = null,
+        ?string $excludeAppointmentId = null
+    ): array
+    {
+        $stmt=$this->pdo->prepare('SELECT id,arpa_service_permanency FROM officer WHERE id=?');
+        $stmt->execute([$officerId]);$officer=$stmt->fetch();
+        if(!$officer)throw new DomainException('ARPA Officer was not found.');
+        return $this->availabilityForOfficerRows([$officer],$effectiveFrom,$effectiveTo,$excludeRequestId,$excludeAppointmentId)[0];
+    }
+
+    public function assertAppointmentTypeAvailable(
+        string $officerId,
+        string $appointmentType,
+        string $divisionId,
+        string $effectiveFrom,
+        ?string $effectiveTo = null,
+        ?string $excludeRequestId = null,
+        ?string $excludeAppointmentId = null
+    ): void {
+        $availability=$this->appointmentTypeAvailability($officerId,$effectiveFrom,$effectiveTo,$excludeRequestId,$excludeAppointmentId);
+        ArpaAppointmentRules::assertAppointmentTypeAllowed(
+            (string)$availability['service_permanency'],
+            $appointmentType,
+            (bool)$availability['has_qualifying_permanent']
+        );
+        if($appointmentType==='PERMANENT'&&$availability['conflicts']['PERMANENT']){
+            throw new DomainException('This officer already has a Permanent ARPA Division assignment.');
+        }
+        if($appointmentType==='ACTING'&&$availability['conflicts']['ACTING']){
+            throw new DomainException('This officer already has an Acting assignment.');
+        }
+        if($appointmentType==='ATTEND_TO_DUTY'&&$availability['conflicts']['ATTEND_TO_DUTY']){
+            throw new DomainException('This officer already has an Attend to the Duty assignment.');
+        }
+        if($appointmentType==='DUTY_COVERING'&&in_array($divisionId,$availability['duty_covering_division_ids'],true)){
+            throw new DomainException('This officer already covers this ARPA Division for the selected period.');
+        }
+    }
+
+    /** @param array<int,array<string,mixed>> $officers @return array<int,array<string,mixed>> */
+    private function withAppointmentTypeAvailability(array $officers,string $effectiveDate):array
+    {
+        if($officers===[])return [];
+        $availability=$this->availabilityForOfficerRows($officers,$effectiveDate);
+        $byId=[];foreach($availability as $row)$byId[(string)$row['officer_id']]=$row;
+        foreach($officers as &$officer)$officer['allowed_appointment_types']=$byId[(string)$officer['id']]['allowed_types']??[];
+        unset($officer);
+        return $officers;
+    }
+
+    /** @param array<int,array<string,mixed>> $officers @return array<int,array<string,mixed>> */
+    private function availabilityForOfficerRows(
+        array $officers,
+        string $effectiveFrom,
+        ?string $effectiveTo=null,
+        ?string $excludeRequestId=null,
+        ?string $excludeAppointmentId=null
+    ):array
+    {
+        $ids=array_values(array_unique(array_map(static fn(array $row):string=>(string)$row['id'],$officers)));
+        $periods=$this->appointmentPeriods($ids,$effectiveFrom,$effectiveTo,$excludeRequestId,$excludeAppointmentId);$byOfficer=[];
+        foreach($periods as $period)$byOfficer[(string)$period['officer_id']][]=$period;
+        $result=[];
+        foreach($officers as $officer){
+            $officerId=(string)$officer['id'];$hasPermanent=false;
+            $conflicts=['PERMANENT'=>false,'ACTING'=>false,'ATTEND_TO_DUTY'=>false];$dutyDivisions=[];
+            foreach($byOfficer[$officerId]??[] as $period){
+                $type=(string)$period['appointment_type'];
+                if($type==='PERMANENT'&&$period['source_kind']==='OPERATIONAL'
+                    &&(string)$period['effective_from']<=$effectiveFrom
+                    &&($period['effective_to']===null||(string)$period['effective_to']>=$effectiveFrom))$hasPermanent=true;
+                if(isset($conflicts[$type]))$conflicts[$type]=true;
+                if($type==='DUTY_COVERING')$dutyDivisions[]=(string)$period['arpa_division_location_id'];
+            }
+            $permanency=(string)($officer['arpa_service_permanency']??'');
+            $result[]=[
+                'officer_id'=>$officerId,'service_permanency'=>$permanency,
+                'has_qualifying_permanent'=>$hasPermanent,'conflicts'=>$conflicts,
+                'duty_covering_division_ids'=>array_values(array_unique($dutyDivisions)),
+                'allowed_types'=>ArpaAppointmentRules::allowedAppointmentTypes($permanency,$hasPermanent,$conflicts['PERMANENT'],$conflicts['ACTING'],$conflicts['ATTEND_TO_DUTY']),
+            ];
+        }
+        return $result;
+    }
+
+    /** @param list<string> $officerIds @return array<int,array<string,mixed>> */
+    private function appointmentPeriods(
+        array $officerIds,
+        string $effectiveFrom,
+        ?string $effectiveTo,
+        ?string $excludeRequestId,
+        ?string $excludeAppointmentId
+    ):array
+    {
+        if($officerIds===[])return [];
+        $officerPlaceholders=implode(',',array_fill(0,count($officerIds),'?'));
+        $statusPlaceholders=implode(',',array_fill(0,count(self::RESERVING_REQUEST_STATUSES),'?'));
+        $proposedEnd=$effectiveTo??'9999-12-31';
+        $sql="SELECT a.officer_id,a.appointment_type,a.arpa_division_location_id,a.effective_from,c.effective_to,'OPERATIONAL' source_kind
+              FROM arpa_division_appointment a
+              LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+              WHERE a.officer_id IN({$officerPlaceholders}) AND a.legacy_history_only=0 AND a.id<>COALESCE(?, '')
+                AND a.effective_from<=? AND (c.effective_to IS NULL OR c.effective_to>=?)
+              UNION ALL
+              SELECT r.officer_id,r.appointment_type,r.arpa_division_location_id,r.requested_effective_from,
+                     CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'REQUEST'
+              FROM arpa_division_appointment_request r
+              WHERE r.officer_id IN({$officerPlaceholders}) AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+                AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statusPlaceholders})
+                AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?
+                AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)
+                AND r.id<>COALESCE(?, '')";
+        $params=array_merge($officerIds,[$excludeAppointmentId,$proposedEnd,$effectiveFrom],$officerIds,self::RESERVING_REQUEST_STATUSES,[$proposedEnd,$effectiveFrom,$excludeRequestId]);
+        $stmt=$this->pdo->prepare($sql);$stmt->execute($params);return $stmt->fetchAll();
+    }
+
+    private function reservingStatusSql():string
+    {
+        return "'".implode("','",self::RESERVING_REQUEST_STATUSES)."'";
     }
 
     public static function issueSource(string $divisionAppointmentTable = 'arpa_division_appointment'): string

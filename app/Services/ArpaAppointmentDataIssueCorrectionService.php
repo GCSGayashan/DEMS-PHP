@@ -61,7 +61,7 @@ final class ArpaAppointmentDataIssueCorrectionService
             if(!$s->fetchColumn())throw new DomainException('Appointment data issue was not found.');
             $issue=$this->issueFromLedger($rowKey);
         }
-        if(!ScopeService::canAccessLocation($viewerId,(string)$issue['asc_location_id'],date('Y-m-d')))throw new DomainException('This issue is outside your authorized geographic scope.');
+        if(!ScopeService::canAccessLocation($viewerId,(string)$issue['asc_location_id'],date('Y-m-d')))throw new DomainException('You cannot view issues outside your assigned location.');
         $ids=$this->relatedIds((string)$issue['related_ids']);$appointments=$this->appointments($ids);$singleAsc=$this->allAppointmentsBelongToAsc($appointments,(string)$issue['asc_location_id']);
         $presentation=ArpaAppointmentIssuePresentation::for((string)$issue['issue_type']);
         $hierarchyContexts=[];
@@ -97,7 +97,7 @@ final class ArpaAppointmentDataIssueCorrectionService
             $issue=$this->issue($rowKey);
             if(!$issue)throw new DomainException('The issue is no longer active. Refresh the diagnostic before correcting it.');
             if(!in_array($issue['issue_type'],self::CORRECTABLE_ISSUES,true))throw new DomainException('This record cannot be corrected on this page. Use the normal appointment process.');
-            if(!$this->canCorrect($actorId,(string)$issue['asc_location_id']))throw new DomainException('Only an ASC Subject Officer with an active exact scope may correct this issue.');
+            if(!$this->canCorrect($actorId,(string)$issue['asc_location_id']))throw new DomainException('Only the assigned ASC Subject Officer can correct this issue.');
             $related=$this->relatedIds((string)$issue['related_ids']);
             if($related===[])throw new DomainException('No appointment record is linked to this issue.');
             $this->lockAppointments($related);
@@ -138,7 +138,7 @@ final class ArpaAppointmentDataIssueCorrectionService
     public function correction(string $id,string $viewerId):array
     {
         $s=$this->pdo->prepare('SELECT c.*,u.username,u.display_name,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,l.dad_number asc_number,l.name_en asc_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by JOIN officer o ON o.id=c.officer_id JOIN location l ON l.id=c.asc_location_id WHERE c.id=?');$s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('Correction record was not found.');
-        if(!ScopeService::canAccessLocation($viewerId,(string)$row['asc_location_id'],date('Y-m-d')))throw new DomainException('This correction is outside your authorized geographic scope.');
+        if(!ScopeService::canAccessLocation($viewerId,(string)$row['asc_location_id'],date('Y-m-d')))throw new DomainException('You cannot view corrections outside your assigned location.');
         $row['technical_details_allowed']=$this->canViewTechnicalDetails($viewerId);
         return $row;
     }

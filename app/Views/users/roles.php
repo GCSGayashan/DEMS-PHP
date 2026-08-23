@@ -14,5 +14,5 @@
         <div class="col-12"><label class="form-label">Description</label><input class="form-control" name="description"></div>
         <div class="col-12"><label class="form-label">Permissions</label><div class="row g-2 border rounded p-2" style="max-height:320px;overflow:auto"><?php foreach ($permissions as $permission): ?><div class="col-md-4"><label class="form-check"><input class="form-check-input" type="checkbox" name="permissions[]" value="<?= e($permission['id']) ?>"> <span class="form-check-label"><code><?= e($permission['permission_key']) ?></code><br><small class="text-muted"><?= e($permission['description']) ?></small></span></label></div><?php endforeach; ?></div></div>
     </div></div>
-    <div class="modal-footer"><button class="btn btn-primary">Save Draft</button></div>
+    <div class="modal-footer"><button class="btn btn-primary">Submit</button></div>
 </form></div></div>

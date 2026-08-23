@@ -9,7 +9,7 @@ $clientConfig = [
         'className' => $column['className'],
     ], $dataTable['columns']),
     'defaultOrder' => $dataTable['defaultOrder'],
-    'emptyMessage' => $dataTable['emptyMessage'] ?? 'No records found.',
+    'emptyMessage' => $dataTable['emptyMessage'] ?? 'No records found for the selected filters.',
 ];
 ?>
 <div class="table-card dems-datatable-card">
@@ -45,7 +45,7 @@ $clientConfig = [
     <div class="table-responsive dems-table-responsive p-3 pt-2">
         <table id="<?= e($dataTable['id']) ?>" class="table table-striped table-hover align-middle w-100 js-dems-datatable" data-dems-config="<?= e(json_encode($clientConfig, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)) ?>">
             <thead><tr><?php foreach ($dataTable['columns'] as $column): ?><th scope="col"><?= e($column['label']) ?></th><?php endforeach; ?></tr></thead>
-            <tbody><tr><td colspan="<?= count($dataTable['columns']) ?>" class="text-center text-muted py-4">Loading records…</td></tr></tbody>
+            <tbody><tr><td colspan="<?= count($dataTable['columns']) ?>" class="text-center text-muted py-4">Loading…</td></tr></tbody>
         </table>
     </div>
 </div>

@@ -30,8 +30,8 @@ final class ArpaAppointmentAuthorizationTest
         $this->same(0,$this->scalar("SELECT COUNT(*) FROM application_role_permission rp JOIN application_permission p ON p.id=rp.permission_id JOIN application_role r ON r.id=rp.role_id WHERE p.permission_key='arpa.appointment.data-issue.correct' AND r.role_code<>'ASC_SUBJECT_OFFICER'"),'direct data correction is not mapped to administrators, viewers, or broader geographic roles');
         $this->same(1,$this->scalar("SELECT COUNT(*) FROM application_permission WHERE permission_key='arpa.subject.manage'"),'obsolete permission master is retained for reference integrity');
         $this->same(0,$this->scalar("SELECT COUNT(*) FROM system_user WHERE identity_type='HISTORICAL' AND enabled=1"),'historical users remain disabled');
-        $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_request WHERE record_origin='NATIVE'"),'legacy import creates no native appointment requests');
-        $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_subject_assignment_request WHERE record_origin='NATIVE'"),'legacy import creates no native subject requests');
+        $this->same(0,$this->scalar("SELECT COUNT(*) FROM legacy_arpa_appointment_source_reference sr JOIN arpa_division_appointment_request r ON r.id=sr.target_appointment_request_id WHERE r.record_origin<>'LEGACY_IMPORT'"),'legacy source references never point to native appointment requests');
+        $this->same(0,$this->scalar("SELECT COUNT(*) FROM legacy_arpa_appointment_source_reference sr JOIN arpa_subject_assignment_request r ON r.id=sr.target_subject_request_id WHERE r.record_origin<>'LEGACY_IMPORT'"),'legacy source references never point to native subject requests');
         $controller=file_get_contents(dirname(__DIR__).'/app/Controllers/ArpaAppointmentController.php');
         $this->same(true,str_contains($controller,'Auth::requirePermission($permission)')&&str_contains($controller,'assertArpaStageScope'),'workflow endpoints enforce permission and scope server-side');
         $this->testScopeEnforcement();

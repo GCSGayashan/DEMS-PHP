@@ -12,9 +12,9 @@ final class UserContextController
     public function select():void
     {
         Auth::requireLogin(false);
-        $contexts=Auth::availableContexts();$activeContext=Auth::activeContext();
+        $contexts=Auth::availableContexts();$activeContext=Auth::activeContext();$user=Auth::user();
         if(count($contexts)===1&&$activeContext!==null){redirect('/dashboard');}
-        View::render('auth/select_context',compact('contexts','activeContext'),'layouts/auth');
+        View::render('auth/select_context',compact('contexts','activeContext','user'),'layouts/auth');
     }
 
     public function activate():void

@@ -1,10 +1,10 @@
 <?php use App\Core\Csrf; ?>
-<div class="page-heading"><div><div class="breadcrumb-lite">Organization Management / Offices / Add</div><h1>Add Office</h1></div></div>
+<div class="page-heading"><div><div class="breadcrumb-lite">Organization / Offices / Add</div><h1>Add Office</h1></div></div>
 <form method="post" action="<?= e(url('offices')) ?>"><?= Csrf::field() ?><div class="form-section"><div class="row g-3">
 <div class="col-md-4"><label class="form-label">Office Type *</label><select class="form-select" name="office_type_id" required><option value="">Select</option><?php foreach($types as $r): ?><option value="<?= e($r['id']) ?>"><?= e($r['name_en']) ?></option><?php endforeach; ?></select></div>
 <div class="col-md-4"><label class="form-label">English Name *</label><input class="form-control" name="name_en" required></div><div class="col-md-4"><label class="form-label">Short Name</label><input class="form-control" name="short_name"></div>
 <div class="col-md-4"><label class="form-label">Linked Location</label><select class="form-select" name="linked_location_id"><option value="">National / None</option><?php foreach($locations as $r): ?><option value="<?= e($r['id']) ?>"><?= e($r['dad_number'].' - '.$r['name_en'].' ('.$r['type_key'].')') ?></option><?php endforeach; ?></select></div>
 <div class="col-md-4"><label class="form-label">Telephone</label><input class="form-control" name="telephone"></div><div class="col-md-4"><label class="form-label">Email</label><input type="email" class="form-control" name="email"></div>
 <div class="col-md-6"><label class="form-label">Sinhala Name</label><input class="form-control" name="name_si"></div><div class="col-md-6"><label class="form-label">Tamil Name</label><input class="form-control" name="name_ta"></div><div class="col-12"><label class="form-label">Address</label><textarea class="form-control" name="address" rows="2"></textarea></div>
-<div class="col-md-4"><label class="form-label">Effective From *</label><input type="date" class="form-control" name="effective_from" value="<?= date('Y-m-d') ?>" required></div>
-</div></div><button class="btn btn-primary">Save Draft</button> <a class="btn btn-outline-secondary" href="<?= e(url('offices')) ?>">Cancel</a></form>
+<div class="col-md-4"><label class="form-label">Start Date *</label><input type="date" class="form-control" name="effective_from" value="<?= date('Y-m-d') ?>" required></div>
+</div></div><button class="btn btn-primary">Submit</button> <a class="btn btn-outline-secondary" href="<?= e(url('offices')) ?>">Cancel</a></form>

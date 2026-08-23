@@ -84,7 +84,7 @@ final class UserContextService
     {
         $context=$this->resolve($userId,$roleAssignmentId,$scopeAssignmentId);
         if($context===null){
-            throw new DomainException('The selected access context is no longer available.');
+            throw new DomainException('The selected role or office is no longer available.');
         }
         $_SESSION['access_context']=[
             'role_assignment_id'=>(string)$context['role_assignment_id'],
