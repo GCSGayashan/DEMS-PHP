@@ -119,6 +119,7 @@ final class UserAccessManagementTest
         $this->same(false,in_array($arpaY,array_column($arpaResults,'id'),true),'ASC location lookup excludes another ASC');
 
         $this->activeUserVisibilityCases($actors,$system,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
+        $this->effectiveDateAndInactiveCases($actors,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
 
         $expired=$this->createActor('ASC_ADMIN',$ascX,'expired-manager',1,'APPROVED',date('Y-m-d',strtotime('-2 days')));
         $inactive=$this->createActor('ASC_ADMIN',$ascX,'inactive-manager',0,'APPROVED');
@@ -246,10 +247,98 @@ final class UserAccessManagementTest
         $this->same(true,in_array($multiScope,$nationalIds,true),'National actor may see compatible multi-location lower-role user');
     }
 
+    private function effectiveDateAndInactiveCases(array $actors,string $districtX,string $ascX,string $arpaX,string $districtY,string $ascY,string $arpaY):void
+    {
+        $policy=new UserAccessManagementService($this->pdo);
+        $target=$this->createUser('effective.date.target');
+        $arpaAssignment=$this->createAssignment($target,'ARPA_OFFICER',$arpaX);
+        $farmerAssignment=$this->createAssignment($target,'FARMER',$ascX);
+        $this->pdo->prepare('UPDATE user_account_role SET effective_from=? WHERE id=?')->execute(['2026-01-01',$arpaAssignment]);
+        $this->pdo->prepare('UPDATE user_account_scope SET effective_from=? WHERE role_assignment_id=?')->execute(['2026-01-01',$arpaAssignment]);
+        $this->pdo->prepare('UPDATE user_account_role SET effective_from=? WHERE id=?')->execute(['2026-03-15',$farmerAssignment]);
+        $this->pdo->prepare('UPDATE user_account_scope SET effective_from=? WHERE role_assignment_id=?')->execute(['2026-03-15',$farmerAssignment]);
+        $unrelatedScope=$this->uuid();
+        $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason) VALUES(?,?,?,'ARPA_DIVISION','EXACT',?,'2026-02-01','APPROVED',1,'Separate scope period')")
+            ->execute([$unrelatedScope,$target,$arpaAssignment,$arpaX]);
+
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $definition=DataTableRegistry::definition('users');
+        $before=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['search'=>['value'=>'effective.date.target']])))->response();
+        $this->same(1,$before['recordsFiltered'],'Active Users includes the manageable multi-role target');
+        $this->same(true,str_contains((string)$before['data'][0]['effective_roles'],'ARPA'), 'Active Users displays the specific role names');
+        $this->same(true,str_contains((string)$before['data'][0]['effective_from_dates'],'01 Jan 2026'),'Active Users displays the ARPA assignment Effective From date');
+        $this->same(true,str_contains((string)$before['data'][0]['effective_from_dates'],'15 Mar 2026'),'multiple roles retain their matching Effective From dates');
+        $this->same(true,str_contains((string)$before['data'][0]['actions'],$arpaAssignment),'Effective From action targets a specific role assignment');
+
+        $auditBefore=$this->count("SELECT COUNT(*) FROM audit_event WHERE action_key='user.role.effective-from.update' AND target_id=?",[$arpaAssignment]);
+        $policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$arpaAssignment,'2025-01-01');
+        $this->same('2025-01-01',(string)$this->value('SELECT effective_from FROM user_account_role WHERE id=?',[$arpaAssignment]),'higher-level actor edits a lower role start date');
+        $this->same(1,$this->count('SELECT COUNT(*) FROM user_account_scope WHERE role_assignment_id=? AND effective_from=?',[$arpaAssignment,'2025-01-01']),'scope sharing the original start date is synchronized');
+        $this->same('2026-02-01',(string)$this->value('SELECT effective_from FROM user_account_scope WHERE id=?',[$unrelatedScope]),'unrelated scope period is not modified');
+        $this->same('2026-03-15',(string)$this->value('SELECT effective_from FROM user_account_role WHERE id=?',[$farmerAssignment]),'editing one role does not alter another role');
+        $this->same($auditBefore+1,$this->count("SELECT COUNT(*) FROM audit_event WHERE action_key='user.role.effective-from.update' AND target_id=?",[$arpaAssignment]),'Effective From edit appends an audit event');
+        $audit=json_decode((string)$this->value("SELECT details_json FROM audit_event WHERE action_key='user.role.effective-from.update' AND target_id=? ORDER BY id DESC LIMIT 1",[$arpaAssignment]),true,512,JSON_THROW_ON_ERROR);
+        $this->same('2026-01-01',$audit['old_effective_from'],'audit preserves the old Effective From date');
+        $this->same('2025-01-01',$audit['new_effective_from'],'audit records the new Effective From date');
+
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$arpaAssignment,'2024-12-31'),'date before the HR baseline is rejected');
+        $endedTarget=$this->createUser('effective.ended.target');$endedAssignment=$this->createAssignment($endedTarget,'ARPA_OFFICER',$arpaX,1,'APPROVED','2026-09-01');
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$endedAssignment,'2026-09-02'),'start date after end date is rejected');
+        $peer=$this->createActor('ASC_SUBJECT_OFFICER',$ascX,'effective.peer');
+        $peerAssignment=(string)$this->value('SELECT id FROM user_account_role WHERE user_id=?',[$peer]);
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$peerAssignment,'2025-01-01'),'same-level actor cannot edit Effective From');
+        $higher=$this->createActor('ASC_ADMIN',$ascX,'effective.higher');
+        $higherAssignment=(string)$this->value('SELECT id FROM user_account_role WHERE user_id=?',[$higher]);
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$higherAssignment,'2025-01-01'),'lower actor cannot edit a higher role');
+        $outside=$this->createActor('ARPA_OFFICER',$arpaY,'effective.outside');
+        $outsideAssignment=(string)$this->value('SELECT id FROM user_account_role WHERE user_id=?',[$outside]);
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$outsideAssignment,'2025-01-01'),'forged role assignment outside active ASC is rejected');
+        $this->createAssignment($actors['ASC_SUBJECT_OFFICER'],'NATIONAL_ADMIN',null);
+        $districtTarget=$this->createActor('DISTRICT_ADMIN',$districtX,'effective.district.target');
+        $districtAssignment=(string)$this->value('SELECT id FROM user_account_role WHERE user_id=?',[$districtTarget]);
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$districtAssignment,'2025-01-01'),'Active Working Context prevents Effective From privilege borrowing');
+
+        $inactiveOwn=$this->createActor('ARPA_OFFICER',$arpaX,'inactive.visibility.own');
+        $inactiveOutside=$this->createActor('ARPA_OFFICER',$arpaY,'inactive.visibility.outside');
+        $inactivePeer=$this->createActor('ASC_SUBJECT_OFFICER',$ascX,'inactive.visibility.peer');
+        foreach([$inactiveOwn,$inactiveOutside,$inactivePeer] as $inactiveUser)$this->deactivateFixture($inactiveUser);
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $activeDefinition=DataTableRegistry::definition('users');
+        $activeResult=(new DataTableQuery($this->pdo,$activeDefinition,new DataTableRequest(['search'=>['value'=>'inactive.visibility.own']])))->response();
+        $this->same(0,$activeResult['recordsFiltered'],'deactivated account disappears from Active Users');
+        $inactiveDefinition=DataTableRegistry::definition('historical-users');
+        $inactiveResult=(new DataTableQuery($this->pdo,$inactiveDefinition,new DataTableRequest(['search'=>['value'=>'inactive.visibility.own']])))->response();
+        $this->same(1,$inactiveResult['recordsFiltered'],'deactivated account appears in Inactive Users');
+        $this->same(true,str_contains((string)$inactiveResult['data'][0]['last_roles'],'ARPA'),'Inactive Users displays the last role');
+        $this->same(true,str_contains((string)$inactiveResult['data'][0]['effective_from_dates'],date('d M Y')),'Inactive Users displays historical role Effective From');
+        $outsideResult=(new DataTableQuery($this->pdo,$inactiveDefinition,new DataTableRequest(['search'=>['value'=>'inactive.visibility.outside']])))->response();
+        $this->same(0,$outsideResult['recordsFiltered'],'ASC inactive query excludes another ASC');
+        $peerResult=(new DataTableQuery($this->pdo,$inactiveDefinition,new DataTableRequest(['search'=>['value'=>'inactive.visibility.peer']])))->response();
+        $this->same(0,$peerResult['recordsFiltered'],'same-level inactive identity remains hidden');
+        $inactiveExport=iterator_to_array((new DataTableQuery($this->pdo,$inactiveDefinition,new DataTableRequest(['search'=>['value'=>'inactive.visibility.']])))->exportRows(),false);
+        $this->same(1,count($inactiveExport),'Inactive Users CSV applies the same ASC hierarchy and scope');
+        $this->same(true,$policy->canManageUser($actors['ASC_SUBJECT_OFFICER'],$inactiveOwn),'ended role and scope history still establishes management authority');
+        $this->same(false,$policy->canManageUser($actors['ASC_SUBJECT_OFFICER'],$inactiveOutside),'direct inactive-user authorization rejects another ASC');
+
+        $districtOwn=$this->createActor('ASC_ADMIN',$ascX,'inactive.district.own');$this->deactivateFixture($districtOwn);
+        $districtOutside=$this->createActor('ASC_ADMIN',$ascY,'inactive.district.outside');$this->deactivateFixture($districtOutside);
+        $this->useContext($actors['DISTRICT_SUBJECT_OFFICER'],'DISTRICT_SUBJECT_OFFICER');
+        $districtDefinition=DataTableRegistry::definition('historical-users');
+        $districtOwnResult=(new DataTableQuery($this->pdo,$districtDefinition,new DataTableRequest(['search'=>['value'=>'inactive.district.own']])))->response();
+        $districtOutsideResult=(new DataTableQuery($this->pdo,$districtDefinition,new DataTableRequest(['search'=>['value'=>'inactive.district.outside']])))->response();
+        $this->same(1,$districtOwnResult['recordsFiltered'],'District actor sees permitted inactive lower user in own District');
+        $this->same(0,$districtOutsideResult['recordsFiltered'],'District actor cannot discover inactive user in another District');
+    }
+
     private function activationCases(UserAccessManagementService $policy,string $districtActor,string $nationalActor,string $districtX,string $districtY):void
     {
-        $targets=$this->pdo->query("SELECT su.id FROM system_user su JOIN legacy_user_reference lur ON lur.system_user_id=su.id WHERE su.identity_type='HISTORICAL' AND su.enabled=0 ORDER BY su.id LIMIT 2")->fetchAll(PDO::FETCH_COLUMN);
-        $this->same(2,count($targets),'historical activation fixtures are available');$service=new OperationalUserActivationService($this->pdo);
+        $targetFor=function(string $districtId):string{
+            $stmt=$this->pdo->prepare("SELECT su.id FROM system_user su JOIN legacy_user_reference lur ON lur.system_user_id=su.id JOIN legacy_user_organization_context luc ON luc.legacy_user_reference_id=lur.id WHERE su.identity_type='HISTORICAL' AND su.enabled=0 AND LOWER(TRIM(lur.legacy_role_name))='district subject officer' AND luc.location_id=? ORDER BY su.id LIMIT 1");
+            $stmt->execute([$districtId]);$id=$stmt->fetchColumn();if(!$id)throw new RuntimeException('A District Subject Officer legacy activation fixture is required.');return (string)$id;
+        };
+        $targets=[$targetFor($districtX),$targetFor($districtY)];
+        $this->same(2,count($targets),'scoped historical activation fixtures are available');$service=new OperationalUserActivationService($this->pdo);
         $base=['email'=>null,'temporary_password'=>'Secure-Manager-1!','effective_from'=>date('Y-m-d'),'reason'=>'User management hierarchy test','official_reference'=>'TEST/UM'];
         $service->activate((string)$targets[0],$base+['username'=>'district.activation.'.substr(str_replace('-','',(string)$targets[0]),0,8),'role_enabled'=>['DISTRICT_SUBJECT_OFFICER'],'roles'=>['DISTRICT_SUBJECT_OFFICER'=>$districtX]],$districtActor);
         $this->same('ACTIVE',(string)$this->value('SELECT account_status FROM system_user WHERE id=?',[(string)$targets[0]]),'District Admin activates permitted user in own District');
@@ -272,6 +361,7 @@ final class UserAccessManagementTest
     }
 
     private function createUser(string $username):string{$id=$this->uuid();$this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,display_name,account_status,approval_status,enabled) VALUES(?,'STAFF',?,?,'ACTIVE','APPROVED',1)")->execute([$id,$username,$username]);return $id;}
+    private function deactivateFixture(string $userId):void{$this->pdo->prepare("UPDATE user_account_scope SET active=0,effective_to=CURRENT_DATE() WHERE user_id=?")->execute([$userId]);$this->pdo->prepare("UPDATE user_account_role SET active=0,effective_to=CURRENT_DATE() WHERE user_id=?")->execute([$userId]);$this->pdo->prepare("UPDATE system_user SET enabled=0,account_status='DISABLED',updated_at=NOW() WHERE id=?")->execute([$userId]);}
     private function roleId(string $code):string{$id=$this->value('SELECT id FROM application_role WHERE role_code=?',[$code]);if(!$id)throw new RuntimeException("Role {$code} missing");return (string)$id;}
     private function systemAdmin():string{$id=$this->value("SELECT su.id FROM system_user su JOIN user_account_role uar ON uar.user_id=su.id JOIN application_role r ON r.id=uar.role_id WHERE r.role_code='SYSTEM_ADMIN' AND uar.active=1 AND uar.approval_status='APPROVED' LIMIT 1");if(!$id)throw new RuntimeException('SYSTEM_ADMIN fixture missing');return (string)$id;}
 

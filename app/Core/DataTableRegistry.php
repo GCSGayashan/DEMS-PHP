@@ -1441,17 +1441,33 @@ final class DataTableRegistry
         $visibility = $actor
             ? (new UserAccessManagementService(Database::pdo()))->activeUserVisibility((string)$actor['id'])
             : ['with' => '', 'where' => '1=0', 'params' => []];
-        $effectiveRoles="(SELECT GROUP_CONCAT(DISTINCT r.role_name ORDER BY r.role_name SEPARATOR ', ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED')";
+        $currentRole="uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED'";
+        $effectiveRoles="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$currentRole})";
+        $effectiveDates="(SELECT GROUP_CONCAT(DATE_FORMAT(uar.effective_from,'%d %b %Y') ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$currentRole})";
+        $effectiveAssignments="(SELECT GROUP_CONCAT(CONCAT(uar.id,':::',REPLACE(r.role_name,'|||',' ')) ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$currentRole})";
         $effectiveScopes="(SELECT GROUP_CONCAT(DISTINCT CONCAT(uas.scope_type,' / ',uas.scope_mode,COALESCE(CONCAT(' / ',sl.dad_number),CONCAT(' / ',so.dad_number),'')) ORDER BY uas.scope_type SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location sl ON sl.id=uas.location_id LEFT JOIN office so ON so.id=uas.office_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE()))";
+        $stacked=static function(mixed $value,string $empty='None'):string{$items=array_values(array_filter(explode('|||',trim((string)$value)),static fn(string $item):bool=>$item!==''));return $items===[]?'<span class="text-muted">'.e($empty).'</span>':implode('',array_map(static fn(string $item):string=>'<div class="text-nowrap">'.e($item).'</div>',$items));};
+        $editActions=static function(array $row):string{
+            if(!Auth::can('user.assign-role'))return '';
+            $links=[];
+            foreach(array_filter(explode('|||',(string)($row['effective_role_assignments']??''))) as $entry){
+                [$id,$roleName]=array_pad(explode(':::',$entry,2),2,'');
+                if($id===''||$roleName==='')continue;
+                $links[]='<a class="dropdown-item" href="'.e(url('access-management/role-assignments/'.$id.'/effective-from/edit')).'"><i class="bi bi-calendar-event me-2"></i>'.e($roleName).'</a>';
+            }
+            if($links===[])return '';
+            if(count($links)===1)return '<a class="btn btn-sm btn-outline-primary" href="'.e(url('access-management/role-assignments/'.explode(':::',explode('|||',(string)$row['effective_role_assignments'])[0],2)[0].'/effective-from/edit')).'"><i class="bi bi-calendar-event"></i> Edit Effective Date</a>';
+            return '<div class="dropdown"><button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown"><i class="bi bi-calendar-event"></i> Edit Effective Date</button><ul class="dropdown-menu">'.implode('',array_map(static fn(string $link):string=>'<li>'.$link.'</li>',$links)).'</ul></div>';
+        };
         return [
             'permission' => 'user.view', 'export' => true, 'filename' => 'active-user-accounts',
             'with' => $visibility['with'],
             'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id',
-            'select' => ['su.id','su.username','su.display_name','su.email','su.identity_type','su.account_status','su.approval_status','su.mfa_method','su.mfa_enrolled','su.enabled','su.password_setup_required','su.password_changed_at','su.created_at','o.dad_number AS officer_number','o.name_with_initials',$effectiveRoles.' AS effective_roles',$effectiveScopes.' AS effective_scopes'],
+            'select' => ['su.id','su.username','su.display_name','su.email','su.identity_type','su.account_status','su.approval_status','su.mfa_method','su.mfa_enrolled','su.enabled','su.password_setup_required','su.password_changed_at','su.created_at','o.dad_number AS officer_number','o.name_with_initials',$effectiveRoles.' AS effective_roles',$effectiveDates.' AS effective_from_dates',$effectiveAssignments.' AS effective_role_assignments',$effectiveScopes.' AS effective_scopes'],
             'count' => 'su.id',
             'baseWhere'=>["su.identity_type<>'HISTORICAL'",'su.enabled=1',"su.account_status='ACTIVE'", "su.approval_status='APPROVED'",$visibility['where']],
             'baseParams' => $visibility['params'],
-            'searchable' => ['su.username','su.display_name','su.email','su.identity_type', 'su.account_status', 'o.dad_number', 'o.name_with_initials'],
+            'searchable' => ['su.username','su.display_name','su.email','su.identity_type', 'su.account_status', 'o.dad_number', 'o.name_with_initials',$effectiveRoles,$effectiveDates],
             'filters' => [
                 'account_status' => ['column' => 'su.account_status', 'pattern' => '/^[A-Z_]{1,50}$/', 'ui' => ['label' => 'Account Status']],
                 'identity_type'=>['column'=>'su.identity_type','allowed'=>['STAFF','FARMER'],'ui'=>['label'=>'Identity Type','options'=>['STAFF'=>'Staff','FARMER'=>'Farmer']]],
@@ -1464,12 +1480,14 @@ final class DataTableRegistry
                 self::col('Identity Type','identity_type','su.identity_type',fn($r)=>DataTableFormat::badge($r['identity_type'])),
                 self::col('Account Status', 'account_status', 'su.account_status', fn($r) => DataTableFormat::badge($r['account_status'])),
                 self::col('Enabled', 'enabled', 'su.enabled', fn($r) => DataTableFormat::badge($r['enabled'] ? 'ENABLED' : 'DISABLED'), fn($r) => $r['enabled'] ? 'ENABLED' : 'DISABLED'),
-                self::col('Role(s)','effective_roles',$effectiveRoles,fn($r)=>DataTableFormat::text($r['effective_roles'],'None')),
+                self::col('Role(s)','effective_roles',$effectiveRoles,fn($r)=>$stacked($r['effective_roles']),fn($r)=>str_replace('|||','; ',(string)$r['effective_roles'])),
+                self::col('Effective From','effective_from_dates',$effectiveDates,fn($r)=>$stacked($r['effective_from_dates'],'Not recorded'),fn($r)=>str_replace('|||','; ',(string)$r['effective_from_dates'])),
                 self::col('Assigned Locations','effective_scopes',$effectiveScopes,fn($r)=>DataTableFormat::accessLocations($r['effective_scopes'])),
                 self::col('Password Setup','password_setup_required','su.password_setup_required',fn($r)=>DataTableFormat::badge($r['password_setup_required']?'REQUIRED':'COMPLETE'),fn($r)=>$r['password_setup_required']?'REQUIRED':'COMPLETE'),
                 self::col('Last Password Changed','password_changed_at','su.password_changed_at',fn($r)=>DataTableFormat::dateTime($r['password_changed_at'],'Not recorded')),
-                self::actionColumn(function($r):string{
+                self::actionColumn(function($r)use($editActions):string{
                     $actions=[];
+                    $edit=$editActions($r);if($edit!=='')$actions[]=$edit;
                     if(Auth::can('user.reset-password')&&(int)$r['enabled']===1)$actions[]='<a class="btn btn-sm btn-outline-primary" href="'.e(url('access-management/users/'.$r['id'].'/reset-password')).'"><i class="bi bi-key"></i> Reset Password</a>';
                     if(Auth::can('user.block')&&(int)$r['enabled']===1)$actions[]='<a class="btn btn-sm btn-outline-danger" href="'.e(url('access-management/users/'.$r['id'].'/deactivate')).'">Deactivate</a>';
                     return '<div class="d-flex gap-1 flex-nowrap">'.implode('',$actions).'</div>';
@@ -1481,27 +1499,41 @@ final class DataTableRegistry
 
     private static function historicalUsers(): array
     {
+        $actor=Auth::user();
+        $visibility=$actor
+            ?(new UserAccessManagementService(Database::pdo()))->inactiveUserVisibility((string)$actor['id'])
+            :['with'=>'','where'=>'1=0','params'=>[]];
+        $latestRole="uar.approval_status='APPROVED' AND r.approval_status='APPROVED' AND NOT EXISTS (SELECT 1 FROM user_account_role newer WHERE newer.user_id=uar.user_id AND newer.approval_status='APPROVED' AND COALESCE(newer.effective_to,'9999-12-31')>COALESCE(uar.effective_to,'9999-12-31'))";
+        $lastRoles="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$latestRole})";
+        $lastDates="(SELECT GROUP_CONCAT(DATE_FORMAT(uar.effective_from,'%d %b %Y') ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$latestRole})";
+        $lastScopes="(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.name_en,IF(l.dad_number IS NULL,'',CONCAT(' (',l.dad_number,')'))),'National Level') ORDER BY l.name_en SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location l ON l.id=uas.location_id WHERE uar.user_id=su.id AND {$latestRole} AND uas.approval_status='APPROVED' AND NOT EXISTS (SELECT 1 FROM user_account_scope newer_scope WHERE newer_scope.role_assignment_id=uas.role_assignment_id AND newer_scope.user_id=uas.user_id AND newer_scope.approval_status='APPROVED' AND COALESCE(newer_scope.effective_to,'9999-12-31')>COALESCE(uas.effective_to,'9999-12-31')))";
+        $deactivatedAt="(SELECT MAX(uoae.acted_at) FROM user_operational_access_event uoae WHERE uoae.user_id=su.id AND uoae.event_type='DEACTIVATE')";
+        $stacked=static function(mixed $value,string $empty='Not recorded'):string{$items=array_values(array_filter(explode('|||',trim((string)$value)),static fn(string $item):bool=>$item!==''));return $items===[]?'<span class="text-muted">'.e($empty).'</span>':implode('',array_map(static fn(string $item):string=>'<div class="text-nowrap">'.e($item).'</div>',$items));};
         return [
-            'permission'=>'user.view','export'=>true,'filename'=>'historical-disabled-users',
-            'from'=>"system_user su JOIN legacy_user_reference lur ON lur.system_user_id=su.id LEFT JOIN officer o ON o.id=su.officer_id LEFT JOIN (SELECT c.legacy_user_reference_id,GROUP_CONCAT(DISTINCT CONCAT(c.legacy_level_key,': ',COALESCE(l.dad_number,c.legacy_location_id,'Unresolved'),' ',COALESCE(l.name_en,'')) ORDER BY c.legacy_level_key SEPARATOR ' | ') organization_context FROM legacy_user_organization_context c LEFT JOIN location l ON l.id=c.location_id GROUP BY c.legacy_user_reference_id) ctx ON ctx.legacy_user_reference_id=lur.id",
-            'select'=>['su.id','su.username','su.display_name','su.identity_type','su.account_status','su.enabled','lur.legacy_user_id','lur.legacy_username','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number officer_number','o.name_with_initials officer_name'],
-            'count'=>'su.id','baseWhere'=>["su.historical_identity=1 AND su.identity_type='HISTORICAL' AND su.enabled=0"],
-            'searchable'=>['su.username','su.display_name','lur.legacy_user_id','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number','o.name_with_initials'],
+            'permission'=>'user.view','export'=>true,'filename'=>'inactive-user-accounts',
+            'with'=>$visibility['with'],
+            'from'=>"system_user su LEFT JOIN legacy_user_reference lur ON lur.system_user_id=su.id LEFT JOIN officer o ON o.id=su.officer_id LEFT JOIN (SELECT lr.system_user_id,GROUP_CONCAT(DISTINCT CONCAT(c.legacy_level_key,': ',COALESCE(l.dad_number,c.legacy_location_id,'Unresolved'),' ',COALESCE(l.name_en,'')) ORDER BY c.legacy_level_key SEPARATOR ' | ') organization_context FROM legacy_user_reference lr JOIN legacy_user_organization_context c ON c.legacy_user_reference_id=lr.id LEFT JOIN location l ON l.id=c.location_id GROUP BY lr.system_user_id) ctx ON ctx.system_user_id=su.id",
+            'select'=>['su.id','su.username','su.display_name','su.identity_type','su.historical_identity','su.account_status','su.approval_status','su.enabled','su.updated_at','lur.legacy_user_id','lur.legacy_username','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number officer_number','o.name_with_initials officer_name',$lastRoles.' last_roles',$lastDates.' effective_from_dates',$lastScopes.' last_scopes',$deactivatedAt.' deactivated_at'],
+            'count'=>'su.id','baseWhere'=>["su.approval_status='APPROVED'","(su.account_status='DISABLED' OR (su.enabled=0 AND su.identity_type IN ('STAFF','HISTORICAL')))",$visibility['where']],
+            'baseParams'=>$visibility['params'],
+            'searchable'=>['su.username','su.display_name','su.identity_type','su.account_status','lur.legacy_user_id','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number','o.name_with_initials',$lastRoles,$lastScopes,$lastDates],
             'filters'=>[
-                'identity_type'=>['column'=>'su.identity_type','allowed'=>['HISTORICAL'],'ui'=>['label'=>'Identity Type','options'=>['HISTORICAL'=>'Historical']]],
+                'identity_type'=>['column'=>'su.identity_type','allowed'=>['STAFF','FARMER','HISTORICAL'],'ui'=>['label'=>'Identity Type','options'=>['STAFF'=>'Staff','FARMER'=>'Farmer','HISTORICAL'=>'Historical']]],
                 'account_status'=>['column'=>'su.account_status','pattern'=>'/^[A-Z_]{1,50}$/','ui'=>['label'=>'Account Status']],
                 'organization'=>['column'=>'ctx.organization_context','operator'=>'LIKE','ui'=>['label'=>'Organization Context','type'=>'text','placeholder'=>'ASC, District, location']],
             ],
             'columns'=>[
-                self::col('Legacy User ID','legacy_user_id','lur.legacy_user_id',fn($r)=>'<code>'.e($r['legacy_user_id']).'</code>'),
                 self::col('Username','username','su.username',fn($r)=>'<strong>'.e($r['username']).'</strong>'),
                 self::col('Display Name','display_name','su.display_name',fn($r)=>DataTableFormat::text($r['display_name'])),
-                self::col('NIC','legacy_nic','lur.legacy_nic',fn($r)=>DataTableFormat::text($r['legacy_nic'])),
-                self::col('Legacy Role','legacy_role_name','lur.legacy_role_name',fn($r)=>DataTableFormat::text($r['legacy_role_name'])),
-                self::col('Organizational Context','organization_context','ctx.organization_context',fn($r)=>DataTableFormat::text($r['organization_context'],'Not resolved')),
-                self::col('Status','account_status','su.account_status',fn($r)=>DataTableFormat::badge($r['account_status'])),
-                self::actionColumn(fn($r)=>Auth::can('user.activate')?'<a class="btn btn-sm btn-primary" href="'.e(url('access-management/users/'.$r['id'].'/activate')).'">Activate as Operational User</a>':''),
-            ],'defaultOrder'=>[2,'ASC'],
+                self::col('Identity Type','identity_type','su.identity_type',fn($r)=>DataTableFormat::badge($r['identity_type'])),
+                self::col('Account Status','account_status','su.account_status',fn($r)=>DataTableFormat::badge($r['account_status'])),
+                self::col('Enabled','enabled','su.enabled',fn($r)=>DataTableFormat::badge($r['enabled']?'ENABLED':'DISABLED'),fn($r)=>$r['enabled']?'ENABLED':'DISABLED'),
+                self::col('Last Role(s)','last_roles',$lastRoles,fn($r)=>$stacked($r['last_roles']?:$r['legacy_role_name'],'Not recorded'),fn($r)=>str_replace('|||','; ',(string)($r['last_roles']?:$r['legacy_role_name']))),
+                self::col('Last Assigned Location(s)','last_scopes',$lastScopes,fn($r)=>DataTableFormat::text($r['last_scopes']?:$r['organization_context'],'Not recorded')),
+                self::col('Effective From','effective_from_dates',$lastDates,fn($r)=>$stacked($r['effective_from_dates']),fn($r)=>str_replace('|||','; ',(string)$r['effective_from_dates'])),
+                self::col('Deactivated / Updated','deactivated_at',$deactivatedAt,fn($r)=>DataTableFormat::dateTime($r['deactivated_at']?:$r['updated_at'],'Not recorded'),fn($r)=>$r['deactivated_at']?:$r['updated_at']),
+                self::actionColumn(fn($r)=>Auth::can('user.activate')&&(int)$r['historical_identity']===1?'<a class="btn btn-sm btn-primary" href="'.e(url('access-management/users/'.$r['id'].'/activate')).'">'.((string)$r['identity_type']==='HISTORICAL'?'Activate':'Reactivate').'</a>':''),
+            ],'defaultOrder'=>[1,'ASC'],
         ];
     }
 

@@ -25,7 +25,7 @@ final class UserManagementController extends Controller
     public function historicalUsers():void
     {
         Auth::requirePermission('user.view');
-        $options=['account_status'=>$this->distinctOptions("SELECT DISTINCT account_status value FROM system_user WHERE historical_identity=1 ORDER BY account_status")];
+        $options=['account_status'=>$this->distinctOptions("SELECT DISTINCT account_status value FROM system_user WHERE approval_status='APPROVED' AND (account_status='DISABLED' OR (enabled=0 AND identity_type IN ('STAFF','HISTORICAL'))) ORDER BY account_status")];
         $dataTable=DataTableRegistry::viewModel('historical-users',[],$options);
         $this->render('users/historical_accounts',compact('dataTable'));
     }
@@ -52,7 +52,7 @@ final class UserManagementController extends Controller
         Auth::requirePermission('user.block');Csrf::validate();
         try{(new OperationalUserActivationService(Database::pdo()))->deactivate($id,(string)($_POST['reason']??''),$_POST['official_reference']??null,(string)Auth::user()['id']);$this->flash('success','User deactivated. Current roles and assigned locations have ended.');}
         catch(Throwable $e){error_log('Operational user deactivation failed: '.$e->getMessage());$this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to deactivate the selected user.');}
-        redirect('/access-management/users');
+        redirect('/access-management/users/historical');
     }
 
     public function deactivateForm(string $id):void
@@ -232,6 +232,36 @@ final class UserManagementController extends Controller
     {
         Auth::requirePermission('user.assign-role'); Csrf::validate();try{$this->managementPolicy()->approveAssignment((string)Auth::user()['id'],$id);}catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments');}
         Audit::record('user.role.approve','USER_ROLE',$id); $this->flash('success','User role approved.'); redirect('/access-management/role-assignments');
+    }
+
+    public function editRoleEffectiveFromForm(string $id):void
+    {
+        Auth::requirePermission('user.assign-role');
+        $policy=$this->managementPolicy();
+        $this->authorize(fn()=>$policy->assertCanManageRoleAssignment((string)Auth::user()['id'],$id));
+        $stmt=Database::pdo()->prepare("SELECT uar.id,uar.effective_from,uar.effective_to,su.username,su.display_name,r.role_name,
+                (SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.name_en,IF(l.dad_number IS NULL,'',CONCAT(' (',l.dad_number,')'))),CONCAT(o.name_en,IF(o.dad_number IS NULL,'',CONCAT(' (',o.dad_number,')'))),'National Level') ORDER BY l.name_en,o.name_en SEPARATOR '; ')
+                 FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id
+                 WHERE uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id) assigned_location
+            FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id
+            WHERE uar.id=? AND uar.active=1 AND uar.approval_status='APPROVED'");
+        $stmt->execute([$id]);$assignment=$stmt->fetch();
+        if(!$assignment){http_response_code(404);exit('Current user role not found.');}
+        $baseline=UserAccessManagementService::OPERATIONAL_ACCESS_BASELINE_DATE;
+        $this->render('users/edit_role_effective_from',compact('assignment','baseline'));
+    }
+
+    public function updateRoleEffectiveFrom(string $id):void
+    {
+        Auth::requirePermission('user.assign-role');Csrf::validate();
+        try{
+            $this->managementPolicy()->updateRoleEffectiveFrom((string)Auth::user()['id'],$id,(string)($_POST['effective_from']??''));
+            $this->flash('success','Role start date updated.');
+        }catch(DomainException $e){
+            $this->flash('danger',$e->getMessage());
+            redirect('/access-management/role-assignments/'.$id.'/effective-from/edit');
+        }
+        redirect('/access-management/users');
     }
 
     public function endRoleAssignmentForm(string $id):void

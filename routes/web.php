@@ -141,6 +141,8 @@ $router->get('/access-management/assignment-locations', [UserManagementControlle
 $router->post('/access-management/role-assignments', [UserManagementController::class, 'assignRole']);
 $router->post('/access-management/role-assignments/{id}/submit', [UserManagementController::class, 'submitRoleAssignment']);
 $router->post('/access-management/role-assignments/{id}/approve', [UserManagementController::class, 'approveRoleAssignment']);
+$router->get('/access-management/role-assignments/{id}/effective-from/edit', [UserManagementController::class, 'editRoleEffectiveFromForm']);
+$router->post('/access-management/role-assignments/{id}/effective-from', [UserManagementController::class, 'updateRoleEffectiveFrom']);
 $router->get('/access-management/role-assignments/{id}/end', [UserManagementController::class, 'endRoleAssignmentForm']);
 $router->post('/access-management/role-assignments/{id}/end', [UserManagementController::class, 'endRoleAssignment']);
 $router->get('/access-management/scope-assignments', [UserManagementController::class, 'scopes']);

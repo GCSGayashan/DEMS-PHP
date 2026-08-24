@@ -10,6 +10,7 @@ use Throwable;
 
 final class UserAccessManagementService
 {
+    public const OPERATIONAL_ACCESS_BASELINE_DATE = '2025-01-01';
     private const TECHNICAL_MANAGER_ROLES = ['SYSTEM_ADMIN', 'SECURITY_ADMIN', 'USER_ADMIN'];
     private const OPERATIONAL_ROLE_RANKS = [
         'FARMER' => 10,
@@ -357,6 +358,171 @@ final class UserAccessManagementService
         ];
     }
 
+    /**
+     * Returns a set-based predicate for disabled users using their latest
+     * approved role/scope history. Imported identities without DEMS access
+     * assignments are evaluated from their preserved legacy role and location.
+     *
+     * @return array{with:string,where:string,params:array<int,string>}
+     */
+    public function inactiveUserVisibility(string $actorId, ?string $date = null): array
+    {
+        $date ??= date('Y-m-d');
+        $authority = $this->authority($actorId, $date);
+        $latestRole = "uar.approval_status='APPROVED' AND r.approval_status='APPROVED'
+            AND NOT EXISTS (
+                SELECT 1 FROM user_account_role newer
+                WHERE newer.user_id=uar.user_id AND newer.approval_status='APPROVED'
+                  AND COALESCE(newer.effective_to,'9999-12-31')>COALESCE(uar.effective_to,'9999-12-31')
+            )";
+
+        if ($authority['kind'] === 'SYSTEM') {
+            $where = "(
+                EXISTS (SELECT 1 FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id
+                        WHERE uar.user_id=su.id AND {$latestRole})
+                OR (su.historical_identity=1 AND EXISTS (SELECT 1 FROM legacy_user_reference lurv WHERE lurv.system_user_id=su.id))
+            )";
+            if (!$authority['is_system_admin']) {
+                $where .= " AND NOT EXISTS (
+                    SELECT 1 FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id
+                    WHERE uar.user_id=su.id AND {$latestRole} AND r.role_level='SYSTEM'
+                )";
+            }
+            return ['with' => '', 'where' => $where, 'params' => []];
+        }
+
+        $actorRank = (int)($authority['actor_rank'] ?? 0);
+        $allowedRoles = array_keys(array_filter(
+            self::OPERATIONAL_ROLE_RANKS,
+            static fn(int $rank): bool => $rank < $actorRank
+        ));
+        if ($allowedRoles === []) {
+            return ['with' => '', 'where' => '1=0', 'params' => []];
+        }
+
+        $roleRows = implode(' UNION ALL ', array_fill(0, count($allowedRoles), 'SELECT ?'));
+        $ctes = [
+            'inactive_user_visibility_date(as_of_date) AS (SELECT CAST(? AS DATE))',
+            "manageable_inactive_roles(role_code) AS ({$roleRows})",
+        ];
+        $params = array_merge([$date], $allowedRoles);
+        $restrictLocations = in_array($authority['kind'], ['ASC', 'ASC_SUBJECT', 'DISTRICT', 'DISTRICT_SUBJECT'], true);
+        if ($restrictLocations) {
+            $roots = $this->authorityRootLocationIds($authority);
+            if ($roots === []) {
+                return ['with' => '', 'where' => '1=0', 'params' => []];
+            }
+            $rootPlaceholders = implode(',', array_fill(0, count($roots), '?'));
+            $ctes[] = "manageable_inactive_locations(id) AS (
+                SELECT l.id FROM location l
+                WHERE l.id IN ({$rootPlaceholders})
+                  AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
+                  AND l.effective_from<=(SELECT as_of_date FROM inactive_user_visibility_date)
+                  AND (l.effective_to IS NULL OR l.effective_to>=(SELECT as_of_date FROM inactive_user_visibility_date))
+                UNION DISTINCT
+                SELECT lr.child_location_id
+                FROM location_relationship lr
+                JOIN manageable_inactive_locations mil ON mil.id=lr.parent_location_id
+                WHERE lr.active=1 AND lr.approval_status='APPROVED'
+                  AND lr.effective_from<=(SELECT as_of_date FROM inactive_user_visibility_date)
+                  AND (lr.effective_to IS NULL OR lr.effective_to>=(SELECT as_of_date FROM inactive_user_visibility_date))
+            )";
+            array_push($params, ...$roots);
+        }
+
+        $latestScope = "uas.approval_status='APPROVED' AND NOT EXISTS (
+            SELECT 1 FROM user_account_scope newer_scope
+            WHERE newer_scope.role_assignment_id=uas.role_assignment_id
+              AND newer_scope.user_id=uas.user_id AND newer_scope.approval_status='APPROVED'
+              AND COALESCE(newer_scope.effective_to,'9999-12-31')>COALESCE(uas.effective_to,'9999-12-31')
+        )";
+        $locationBoundary = $restrictLocations
+            ? ' AND uas.location_id IN (SELECT id FROM manageable_inactive_locations)'
+            : '';
+        $validLocation = "EXISTS (
+            SELECT 1 FROM location l JOIN location_type lt ON lt.id=l.location_type_id
+            WHERE l.id=uas.location_id AND lt.system_key=uas.scope_type
+              AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
+              AND l.effective_from<=(SELECT as_of_date FROM inactive_user_visibility_date)
+              AND (l.effective_to IS NULL OR l.effective_to>=(SELECT as_of_date FROM inactive_user_visibility_date))
+        )";
+        $compatibleScope = "(
+            (r.role_code='FARMER' AND uas.scope_type='ASC' AND uas.scope_mode='EXACT'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code='ARPA_OFFICER' AND uas.scope_type='ARPA_DIVISION' AND uas.scope_mode='EXACT'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code IN ('ASC_SUBJECT_OFFICER','ASC_ADMIN') AND uas.scope_type='ASC' AND uas.scope_mode='EXACT'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code IN ('DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN') AND uas.scope_type='DISTRICT'
+                AND uas.scope_mode='INCLUDE_CHILDREN' AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code IN ('NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN') AND uas.scope_type='NATIONAL'
+                AND uas.scope_mode='NATIONAL' AND uas.location_id IS NULL)
+        )";
+        $validScope = "SELECT 1 FROM user_account_scope uas
+            WHERE uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id
+              AND {$latestScope} AND {$compatibleScope}";
+        $invalidScope = "SELECT 1 FROM user_account_scope uas
+            WHERE uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id
+              AND {$latestScope} AND NOT {$compatibleScope}";
+        $assignmentBranch = "EXISTS (
+                SELECT 1 FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id
+                WHERE uar.user_id=su.id AND {$latestRole}
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id
+                WHERE uar.user_id=su.id AND {$latestRole}
+                  AND (
+                    NOT EXISTS (SELECT 1 FROM manageable_inactive_roles mir WHERE mir.role_code=r.role_code)
+                    OR NOT EXISTS ({$validScope})
+                    OR EXISTS ({$invalidScope})
+                  )
+            )";
+
+        $legacyRoleCode = "CASE LOWER(TRIM(lurv.legacy_role_name))
+            WHEN 'farmer' THEN 'FARMER'
+            WHEN 'arpa' THEN 'ARPA_OFFICER'
+            WHEN 'asc subject officer' THEN 'ASC_SUBJECT_OFFICER'
+            WHEN 'asc admin' THEN 'ASC_ADMIN'
+            WHEN 'district subject officer' THEN 'DISTRICT_SUBJECT_OFFICER'
+            WHEN 'district admin' THEN 'DISTRICT_ADMIN'
+            WHEN 'head office subject officer' THEN 'NATIONAL_SUBJECT_OFFICER'
+            WHEN 'head office admin' THEN 'NATIONAL_ADMIN'
+            ELSE NULL END";
+        $legacyLocation = $restrictLocations
+            ? " AND EXISTS (
+                    SELECT 1 FROM legacy_user_organization_context luc
+                    WHERE luc.legacy_user_reference_id=lurv.id
+                      AND luc.location_id IN (SELECT id FROM manageable_inactive_locations)
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM legacy_user_organization_context luc
+                    WHERE luc.legacy_user_reference_id=lurv.id
+                      AND (luc.location_id IS NULL OR luc.location_id NOT IN (SELECT id FROM manageable_inactive_locations))
+                )"
+            : '';
+        $legacyBranch = "NOT EXISTS (
+                SELECT 1 FROM user_account_role previous_role
+                WHERE previous_role.user_id=su.id AND previous_role.approval_status='APPROVED'
+            )
+            AND EXISTS (
+                SELECT 1 FROM legacy_user_reference lurv
+                WHERE lurv.system_user_id=su.id
+                  AND EXISTS (SELECT 1 FROM manageable_inactive_roles mir WHERE mir.role_code={$legacyRoleCode})
+                  {$legacyLocation}
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM legacy_user_reference lurv
+                WHERE lurv.system_user_id=su.id
+                  AND NOT EXISTS (SELECT 1 FROM manageable_inactive_roles mir WHERE mir.role_code={$legacyRoleCode})
+            )";
+
+        return [
+            'with' => 'WITH RECURSIVE ' . implode(', ', $ctes) . ' ',
+            'where' => "(({$assignmentBranch}) OR ({$legacyBranch}))",
+            'params' => $params,
+        ];
+    }
+
     /** @return array<int,array{id:string,dad_number:string,name_en:string,official_code:?string,location_type:string}> */
     public function searchAssignableLocations(string $actorId,string $roleId,string $query='',int $limit=100,?string $date=null):array
     {
@@ -426,6 +592,24 @@ final class UserAccessManagementService
             $authority = $this->authority($actorId, $date);
         } catch (DomainException) {
             return false;
+        }
+        $account = $this->pdo->prepare('SELECT enabled,account_status,approval_status FROM system_user WHERE id=?');
+        $account->execute([$targetUserId]);
+        $accountRow = $account->fetch();
+        if (!$accountRow) {
+            return false;
+        }
+        if ((int)$accountRow['enabled'] !== 1 || (string)$accountRow['account_status'] !== 'ACTIVE') {
+            try {
+                $visibility = $this->inactiveUserVisibility($actorId, $date);
+                $sql = $visibility['with'] . 'SELECT COUNT(*) FROM system_user su WHERE su.id=? AND '
+                    . $visibility['where'];
+                $stmt = $this->pdo->prepare($sql);
+                $stmt->execute(array_merge($visibility['params'], [$targetUserId]));
+                return (int)$stmt->fetchColumn() === 1;
+            } catch (DomainException) {
+                return false;
+            }
         }
         $assignments = $this->effectiveAssignments($targetUserId, $date);
         if ($assignments === []) {
@@ -649,6 +833,132 @@ final class UserAccessManagementService
                 ->execute([$effectiveTo,$active,$reason,$this->optional($reference),$assignmentId]);
             $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at) VALUES(?,'user.role.end','USER_ROLE',?,?,'INFO',NOW())")
                 ->execute([$actorId,$assignmentId,json_encode(['effective_to'=>$effectiveTo,'reason'=>$reason,'official_reference'=>$this->optional($reference)],JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
+        });
+    }
+
+    public function updateRoleEffectiveFrom(string $actorId, string $assignmentId, string $effectiveFrom): void
+    {
+        $this->assertActorPermissions($actorId, ['user.assign-role', 'user.assign-scope']);
+        $effectiveFrom = $this->date($effectiveFrom);
+        if ($effectiveFrom < self::OPERATIONAL_ACCESS_BASELINE_DATE) {
+            throw new DomainException('The start date cannot be before 01 January 2025.');
+        }
+        $this->assertCanManageRoleAssignment($actorId, $assignmentId);
+
+        $this->transaction(function () use ($actorId, $assignmentId, $effectiveFrom): void {
+            $stmt = $this->pdo->prepare("SELECT uar.*,r.role_code,r.role_name,r.role_level,su.username,su.display_name,
+                    su.enabled user_enabled,su.account_status user_account_status,su.approval_status user_approval_status
+                FROM user_account_role uar
+                JOIN application_role r ON r.id=uar.role_id
+                JOIN system_user su ON su.id=uar.user_id
+                WHERE uar.id=? FOR UPDATE");
+            $stmt->execute([$assignmentId]);
+            $assignment = $stmt->fetch();
+            if (!$assignment) {
+                throw new DomainException('The selected user role was not found.');
+            }
+            if ((int)$assignment['active'] !== 1 || (string)$assignment['approval_status'] !== 'APPROVED'
+                || (int)$assignment['user_enabled'] !== 1 || (string)$assignment['user_account_status'] !== 'ACTIVE'
+                || (string)$assignment['user_approval_status'] !== 'APPROVED') {
+                throw new DomainException('Only a current approved user role can be updated.');
+            }
+
+            $oldEffectiveFrom = (string)$assignment['effective_from'];
+            if ($effectiveFrom === $oldEffectiveFrom) {
+                return;
+            }
+            if ($assignment['effective_to'] !== null && $effectiveFrom > (string)$assignment['effective_to']) {
+                throw new DomainException('The start date cannot be after the end date.');
+            }
+
+            $scopeStmt = $this->pdo->prepare("SELECT uas.*,l.dad_number,l.name_en
+                FROM user_account_scope uas
+                LEFT JOIN location l ON l.id=uas.location_id
+                WHERE uas.role_assignment_id=? AND uas.user_id=? FOR UPDATE");
+            $scopeStmt->execute([$assignmentId, $assignment['user_id']]);
+            $scopes = $scopeStmt->fetchAll();
+            foreach ($scopes as $scope) {
+                $scopeFrom = (string)$scope['effective_from'];
+                $nextScopeFrom = $scopeFrom === $oldEffectiveFrom ? $effectiveFrom : $scopeFrom;
+                if ($nextScopeFrom < $effectiveFrom) {
+                    throw new DomainException("The location dates must be within the role's start and end dates.");
+                }
+                if ($scope['effective_to'] !== null && $nextScopeFrom > (string)$scope['effective_to']) {
+                    throw new DomainException('The new start date would make an assigned location period invalid.');
+                }
+            }
+
+            $overlap = $this->pdo->prepare("SELECT COUNT(DISTINCT other.id)
+                FROM user_account_role other
+                WHERE other.id<>? AND other.user_id=? AND other.role_id=?
+                  AND other.approval_status IN ('DRAFT','SUBMITTED','APPROVED')
+                  AND other.effective_from<=COALESCE(?,'9999-12-31')
+                  AND (other.effective_to IS NULL OR other.effective_to>=?)
+                  AND (
+                    (NOT EXISTS (SELECT 1 FROM user_account_scope own_scope WHERE own_scope.role_assignment_id=?)
+                     AND NOT EXISTS (SELECT 1 FROM user_account_scope other_scope WHERE other_scope.role_assignment_id=other.id))
+                    OR EXISTS (
+                        SELECT 1 FROM user_account_scope own_scope
+                        JOIN user_account_scope other_scope ON other_scope.role_assignment_id=other.id
+                          AND other_scope.scope_type=own_scope.scope_type
+                          AND other_scope.scope_mode=own_scope.scope_mode
+                          AND other_scope.location_id<=>own_scope.location_id
+                        WHERE own_scope.role_assignment_id=?
+                    )
+                  )");
+            $overlap->execute([
+                $assignmentId,
+                $assignment['user_id'],
+                $assignment['role_id'],
+                $assignment['effective_to'],
+                $effectiveFrom,
+                $assignmentId,
+                $assignmentId,
+            ]);
+            if ((int)$overlap->fetchColumn() > 0) {
+                throw new DomainException('The new start date overlaps another assignment for the same role and location.');
+            }
+
+            $updatedScopeIds = [];
+            foreach ($scopes as $scope) {
+                if ((string)$scope['effective_from'] === $oldEffectiveFrom) {
+                    $updatedScopeIds[] = (string)$scope['id'];
+                }
+            }
+            if ($updatedScopeIds !== []) {
+                $placeholders = implode(',', array_fill(0, count($updatedScopeIds), '?'));
+                $updateScopes = $this->pdo->prepare("UPDATE user_account_scope SET effective_from=?
+                    WHERE role_assignment_id=? AND user_id=? AND effective_from=? AND id IN ({$placeholders})");
+                $updateScopes->execute(array_merge(
+                    [$effectiveFrom, $assignmentId, $assignment['user_id'], $oldEffectiveFrom],
+                    $updatedScopeIds
+                ));
+            }
+            $this->pdo->prepare('UPDATE user_account_role SET effective_from=? WHERE id=?')
+                ->execute([$effectiveFrom, $assignmentId]);
+
+            $locations = array_map(static fn(array $scope): array => [
+                'scope_assignment_id' => (string)$scope['id'],
+                'scope_type' => (string)$scope['scope_type'],
+                'scope_mode' => (string)$scope['scope_mode'],
+                'location_id' => $scope['location_id'] === null ? null : (string)$scope['location_id'],
+                'location_dad_number' => $scope['dad_number'],
+                'location_name' => $scope['name_en'],
+            ], $scopes);
+            $details = [
+                'target_user_id' => (string)$assignment['user_id'],
+                'username' => (string)$assignment['username'],
+                'role_assignment_id' => $assignmentId,
+                'role_code' => (string)$assignment['role_code'],
+                'role_name' => (string)$assignment['role_name'],
+                'old_effective_from' => $oldEffectiveFrom,
+                'new_effective_from' => $effectiveFrom,
+                'updated_scope_assignment_ids' => $updatedScopeIds,
+                'location_context' => $locations,
+            ];
+            $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at)
+                    VALUES(?,'user.role.effective-from.update','USER_ROLE',?,?,'INFO',NOW())")
+                ->execute([$actorId, $assignmentId, json_encode($details, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)]);
         });
     }
 
