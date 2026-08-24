@@ -21,7 +21,6 @@ final class LoginThrottleService
         $validatedIp = self::normalizeClientIp($clientIp);
         $keys = [
             'USERNAME' => self::keyHash('USERNAME', $normalizedUsername),
-            'CLIENT_IP' => self::keyHash('CLIENT_IP', $validatedIp),
         ];
         $authenticated = false;
 
@@ -158,7 +157,6 @@ final class LoginThrottleService
     {
         $details = json_encode([
             'username_key' => $keys['USERNAME'],
-            'client_key' => $keys['CLIENT_IP'],
             'result' => $action,
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         $statement = $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,source_ip,created_at) VALUES(?,?,'AUTHENTICATION',?,?,?,?,NOW())");

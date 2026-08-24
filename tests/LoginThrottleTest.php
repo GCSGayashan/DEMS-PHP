@@ -27,7 +27,8 @@ final class LoginThrottleTest
             $this->startSession();
             $this->testPolicyBoundaryAndExpiry();
             $this->testUnknownUsernameThrottle();
-            $this->testClientIpThrottle();
+            $this->testUsernameIsolationBehindSharedIp();
+            $this->testExistingClientIpRowIsIgnored();
             $this->testDisabledAccountIsGeneric();
             $this->testAuditAndCredentialSafety();
             $this->testCsrfAndConfiguration();
@@ -53,21 +54,20 @@ final class LoginThrottleTest
     {
         $service = new LoginThrottleService($this->pdo);
         $ip = '192.0.2.41';
-        $this->track($this->username, $ip);
+        $this->track($this->username);
 
         for ($attempt = 1; $attempt <= 4; $attempt++) {
             $this->same(LoginThrottleService::FAILED, $service->authenticate($this->username, 'WrongPassword!1', $ip), "failure {$attempt} remains a normal failed login");
         }
         $this->same(LoginThrottleService::FAILED, $service->authenticate($this->username, 'WrongPassword!1', $ip), 'fifth failure creates throttle state after returning a normal failure');
         $this->same(5, $this->throttleCount('USERNAME', $this->username), 'username counter reaches five');
-        $this->same(5, $this->throttleCount('CLIENT_IP', $ip), 'client IP counter reaches five');
+        $this->same(0, $this->rowCount('CLIENT_IP', $ip), 'failed login does not create a client IP throttle row');
         $this->same(true, $this->isBlocked('USERNAME', $this->username), 'fifth failure blocks the username key');
-        $this->same(true, $this->isBlocked('CLIENT_IP', $ip), 'fifth failure blocks the client key');
         $this->same(LoginThrottleService::THROTTLED, $service->authenticate($this->username, $this->password, $ip), 'sixth attempt during the block is throttled before authentication');
 
-        $this->expire($this->username, $ip);
+        $this->expire($this->username);
         $this->same(LoginThrottleService::SUCCESS, $service->authenticate($this->username, $this->password, $ip), 'login succeeds after the temporary block and window expire');
-        $this->same(0, $this->matchingRows($this->username, $ip), 'successful login clears relevant username and client throttle rows');
+        $this->same(0, $this->rowCount('USERNAME', $this->username), 'successful login clears only the username throttle row');
         $this->same($this->userId, (string)($_SESSION['user_id'] ?? ''), 'successful throttled login continues through existing Auth session setup');
         Auth::logout();
         $this->startSession();
@@ -78,7 +78,7 @@ final class LoginThrottleTest
         $service = new LoginThrottleService($this->pdo);
         $username = 'unknown-' . substr(str_replace('-', '', $this->userId), 0, 8);
         $ip = '198.51.100.17';
-        $this->track($username, $ip);
+        $this->track($username);
         for ($attempt = 1; $attempt <= 5; $attempt++) {
             $this->same(LoginThrottleService::FAILED, $service->authenticate($username, 'UnknownPassword!1', $ip), "unknown username failure {$attempt} is recorded generically");
         }
@@ -86,27 +86,53 @@ final class LoginThrottleTest
         $this->same(1, $this->rowCount('USERNAME', $username), 'unknown username uses one deduplicated throttle row');
     }
 
-    private function testClientIpThrottle(): void
+    private function testUsernameIsolationBehindSharedIp(): void
     {
         $service = new LoginThrottleService($this->pdo);
         $ip = '203.0.113.54';
-        for ($attempt = 1; $attempt <= 5; $attempt++) {
-            $username = 'rotating-' . $attempt . '-' . substr($this->userId, 0, 6);
-            $this->track($username, $ip);
-            $this->same(LoginThrottleService::FAILED, $service->authenticate($username, 'WrongPassword!1', $ip), "client failure {$attempt} is recorded across rotating usernames");
+        $usernameA = 'shared-a-' . substr($this->userId, 0, 6);
+        $usernameB = 'shared-b-' . substr($this->userId, 0, 6);
+        $this->track($usernameA);
+        $this->track($usernameB);
+
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
+            $this->same(LoginThrottleService::FAILED, $service->authenticate($usernameA, 'WrongPassword!1', $ip), "shared-IP user A failure {$attempt} remains independent");
+            $this->same(LoginThrottleService::FAILED, $service->authenticate($usernameB, 'WrongPassword!1', $ip), "shared-IP user B failure {$attempt} remains independent");
         }
-        $sixthUsername = 'rotating-6-' . substr($this->userId, 0, 6);
-        $this->track($sixthUsername, $ip);
-        $this->same(LoginThrottleService::THROTTLED, $service->authenticate($sixthUsername, 'WrongPassword!1', $ip), 'client IP is throttled despite username rotation');
-        $this->same(5, $this->throttleCount('CLIENT_IP', $ip), 'shared client counter is not bypassed by username rotation');
+        $this->same(false, $this->isBlocked('USERNAME', $usernameA), 'user A is not blocked after four failures');
+        $this->same(false, $this->isBlocked('USERNAME', $usernameB), 'user B is not blocked after four failures');
+        $this->same(0, $this->rowCount('CLIENT_IP', $ip), 'shared office IP has no throttle counter');
+
+        $this->same(LoginThrottleService::FAILED, $service->authenticate($usernameA, 'WrongPassword!1', $ip), 'fifth failure blocks only user A');
+        $this->same(LoginThrottleService::THROTTLED, $service->authenticate($usernameA, 'WrongPassword!1', '198.51.100.201'), 'user A remains blocked when changing IP address');
+        $this->same(LoginThrottleService::SUCCESS, $service->authenticate($this->username, $this->password, $ip), 'another user can log in from the same IP while user A is blocked');
+        $this->same(4, $this->throttleCount('USERNAME', $usernameB), 'user B counter is unchanged by user A lockout');
+        Auth::logout();
+        $this->startSession();
         $this->same('192.0.2.99', LoginThrottleService::clientIp(['REMOTE_ADDR' => '192.0.2.99', 'HTTP_X_FORWARDED_FOR' => '203.0.113.200']), 'untrusted forwarded address is ignored');
+    }
+
+    private function testExistingClientIpRowIsIgnored(): void
+    {
+        $service = new LoginThrottleService($this->pdo);
+        $ip = '198.51.100.77';
+        $clientKey = LoginThrottleService::keyHash('CLIENT_IP', $ip);
+        $this->createdKeys[] = $clientKey;
+        $this->pdo->prepare("INSERT INTO login_attempt_throttle(throttle_type,throttle_key,failed_attempt_count,window_started_at,blocked_until) VALUES('CLIENT_IP',?,5,NOW(),DATE_ADD(NOW(),INTERVAL 15 MINUTE)) ON DUPLICATE KEY UPDATE failed_attempt_count=5,window_started_at=NOW(),blocked_until=DATE_ADD(NOW(),INTERVAL 15 MINUTE)")
+            ->execute([$clientKey]);
+
+        $this->same(true, $this->isBlocked('CLIENT_IP', $ip), 'pre-existing client IP throttle fixture is actively blocked');
+        $this->same(LoginThrottleService::SUCCESS, $service->authenticate($this->username, $this->password, $ip), 'pre-existing client IP row does not block authentication');
+        $this->same(true, $this->isBlocked('CLIENT_IP', $ip), 'successful login does not depend on or clear the client IP row');
+        Auth::logout();
+        $this->startSession();
     }
 
     private function testDisabledAccountIsGeneric(): void
     {
         $service = new LoginThrottleService($this->pdo);
         $ip = '192.0.2.88';
-        $this->track($this->username, $ip);
+        $this->track($this->username);
         $this->pdo->prepare('UPDATE system_user SET enabled=0 WHERE id=?')->execute([$this->userId]);
         $this->same(LoginThrottleService::FAILED, $service->authenticate($this->username, $this->password, $ip), 'disabled account receives the same failed result as invalid credentials');
         $this->same(false, isset($_SESSION['user_id']), 'disabled account does not establish authentication');
@@ -115,7 +141,7 @@ final class LoginThrottleTest
 
     private function testAuditAndCredentialSafety(): void
     {
-        $actions = $this->pdo->prepare("SELECT action_key,actor_user_id,details_json FROM audit_event WHERE target_type='AUTHENTICATION' AND target_id=? ORDER BY id");
+        $actions = $this->pdo->prepare("SELECT action_key,actor_user_id,details_json,source_ip FROM audit_event WHERE target_type='AUTHENTICATION' AND target_id=? ORDER BY id");
         $target = LoginThrottleService::keyHash('USERNAME', LoginThrottleService::normalizeUsername($this->username));
         $actions->execute([$target]);
         $events = $actions->fetchAll();
@@ -125,6 +151,8 @@ final class LoginThrottleTest
         $this->same(true, in_array('LOGIN_SUCCESS', $actionKeys, true), 'successful login is audited');
         $success = array_values(array_filter($events, static fn(array $event): bool => $event['action_key'] === 'LOGIN_SUCCESS'));
         $this->same($this->userId, (string)($success[0]['actor_user_id'] ?? ''), 'successful audit identifies the authenticated user');
+        $this->same(true, in_array('192.0.2.41', array_column($events, 'source_ip'), true), 'validated client IP remains in authentication audit events');
+        $this->same(false, str_contains((string)json_encode($events, JSON_UNESCAPED_SLASHES), 'client_key'), 'audit details no longer treat client IP as a throttle key');
 
         $columns = (int)$this->pdo->query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='login_attempt_throttle' AND column_name LIKE '%password%'")->fetchColumn();
         $this->same(0, $columns, 'throttle table has no password column');
@@ -152,14 +180,13 @@ final class LoginThrottleTest
         $service = (string)file_get_contents(BASE_PATH . '/app/Core/LoginThrottleService.php');
         $this->same(true, str_contains($service, 'FOR UPDATE'), 'counter rows are locked during authentication');
         $this->same(false, str_contains($service, 'HTTP_X_FORWARDED_FOR'), 'throttle service does not trust X-Forwarded-For');
+        $this->same(false, str_contains($service, "'CLIENT_IP' =>"), 'client IP is absent from the throttle key collection');
     }
 
-    private function track(string $username, string $ip): void
+    private function track(string $username): void
     {
         $usernameKey = LoginThrottleService::keyHash('USERNAME', LoginThrottleService::normalizeUsername($username));
-        $clientKey = LoginThrottleService::keyHash('CLIENT_IP', $ip);
         $this->createdKeys[] = $usernameKey;
-        $this->createdKeys[] = $clientKey;
         $this->auditTargets[] = $usernameKey;
     }
 
@@ -183,25 +210,11 @@ final class LoginThrottleTest
         return (int)$statement->fetchColumn() === 1;
     }
 
-    private function expire(string $username, string $ip): void
+    private function expire(string $username): void
     {
-        $keys = [
-            LoginThrottleService::keyHash('USERNAME', LoginThrottleService::normalizeUsername($username)),
-            LoginThrottleService::keyHash('CLIENT_IP', $ip),
-        ];
-        $statement = $this->pdo->prepare('UPDATE login_attempt_throttle SET blocked_until=DATE_SUB(NOW(),INTERVAL 1 SECOND),window_started_at=DATE_SUB(NOW(),INTERVAL 901 SECOND) WHERE throttle_key IN(?,?)');
-        $statement->execute($keys);
-    }
-
-    private function matchingRows(string $username, string $ip): int
-    {
-        $keys = [
-            LoginThrottleService::keyHash('USERNAME', LoginThrottleService::normalizeUsername($username)),
-            LoginThrottleService::keyHash('CLIENT_IP', $ip),
-        ];
-        $statement = $this->pdo->prepare('SELECT COUNT(*) FROM login_attempt_throttle WHERE throttle_key IN(?,?)');
-        $statement->execute($keys);
-        return (int)$statement->fetchColumn();
+        $key = LoginThrottleService::keyHash('USERNAME', LoginThrottleService::normalizeUsername($username));
+        $statement = $this->pdo->prepare("UPDATE login_attempt_throttle SET blocked_until=DATE_SUB(NOW(),INTERVAL 1 SECOND),window_started_at=DATE_SUB(NOW(),INTERVAL 901 SECOND) WHERE throttle_type='USERNAME' AND throttle_key=?");
+        $statement->execute([$key]);
     }
 
     private function rowCount(string $type, string $value): int
