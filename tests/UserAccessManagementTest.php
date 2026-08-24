@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
-use App\Services\{OperationalUserActivationService,UserAccessManagementService,UserContextService};
+use App\Services\{OperationalUserActivationService,UserAccessManagementService,UserAccountRequestService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -43,7 +43,7 @@ final class UserAccessManagementTest
         $this->same('NATIONAL_SUBJECT',$policy->authority($actors['NATIONAL_SUBJECT_OFFICER'])['kind'],'National Subject Officer receives National authority');
         $this->same('NATIONAL',$policy->authority($actors['NATIONAL_ADMIN'])['kind'],'National Administrator receives National authority');
 
-        $requiredPermissions=['user.view','user.activate','user.block','user.reset-password','user.assign-role','user.revoke-role','user.assign-scope','user.revoke-scope'];
+        $requiredPermissions=['user.view','user.request','user.activate','user.block','user.reset-password','user.assign-role','user.revoke-role','user.assign-scope','user.revoke-scope'];
         $permissionPlaceholders=implode(',',array_fill(0,count($requiredPermissions),'?'));
         $this->same(count($requiredPermissions)*6,$this->count("SELECT COUNT(*) FROM application_role r JOIN application_role_permission rp ON rp.role_id=r.id JOIN application_permission p ON p.id=rp.permission_id WHERE r.role_code IN ('ASC_SUBJECT_OFFICER','ASC_ADMIN','DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN','NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN') AND p.permission_key IN ({$permissionPlaceholders})",$requiredPermissions),'all operational management roles have only the required User Management permission set');
 
@@ -70,9 +70,13 @@ final class UserAccessManagementTest
             foreach($allowed as $targetRole){
                 $policy->validateAssignment($actors[$actorRole],$this->roleId($targetRole),$locationFor($targetRole),date('Y-m-d'));
                 $this->assertions++;
+                $policy->validateAccountRequestAssignment($actors[$actorRole],$this->roleId($targetRole),$locationFor($targetRole),date('Y-m-d'));
+                $this->assertions++;
             }
             $this->throws(fn()=>$policy->validateAssignment($actors[$actorRole],$this->roleId($actorRole),$locationFor($actorRole),date('Y-m-d')),"{$actorRole} cannot manage its own level");
+            $this->throws(fn()=>$policy->validateAccountRequestAssignment($actors[$actorRole],$this->roleId($actorRole),$locationFor($actorRole),date('Y-m-d')),"{$actorRole} cannot create its own level");
             $this->throws(fn()=>$policy->validateAssignment($actors[$actorRole],$this->roleId('SYSTEM_ADMIN'),null,date('Y-m-d')),"{$actorRole} cannot manage SYSTEM_ADMIN");
+            $this->throws(fn()=>$policy->validateAccountRequestAssignment($actors[$actorRole],$this->roleId('SYSTEM_ADMIN'),null,date('Y-m-d')),"{$actorRole} cannot create SYSTEM_ADMIN");
         }
 
         $this->throwsMessage(
@@ -119,6 +123,7 @@ final class UserAccessManagementTest
         $this->same(false,in_array($arpaY,array_column($arpaResults,'id'),true),'ASC location lookup excludes another ASC');
 
         $this->activeUserVisibilityCases($actors,$system,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
+        $this->accountRequestCases($actors,$system,$checker,$ascX,$arpaX,$ascY,$arpaY);
         $this->effectiveDateAndInactiveCases($actors,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
 
         $expired=$this->createActor('ASC_ADMIN',$ascX,'expired-manager',1,'APPROVED',date('Y-m-d',strtotime('-2 days')));
@@ -148,9 +153,97 @@ final class UserAccessManagementTest
 
         $migration=(string)file_get_contents(dirname(__DIR__).'/database/migrations/048_asc_user_management_access.sql');
         foreach(['ASC_SUBJECT_OFFICER','ASC_ADMIN','user.view','user.assign-role','user.assign-scope'] as $needle)$this->same(true,str_contains($migration,$needle),"migration grants {$needle}");
+        $requestMigration=(string)file_get_contents(dirname(__DIR__).'/database/migrations/049_operational_user_account_requests.sql');
+        foreach(['ASC_SUBJECT_OFFICER','ASC_ADMIN','DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN','NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN','user.request'] as $needle)$this->same(true,str_contains($requestMigration,$needle),"account request migration includes {$needle}");
         $activationView=(string)file_get_contents(dirname(__DIR__).'/app/Views/users/activate_operational.php');
         $this->same(true,str_contains($activationView,'assignment-locations'),'activation location choices use the bounded server-side lookup');
         $this->same(true,str_contains($activationView,"['FARMER','ARPA','ASC','DISTRICT','NATIONAL']"),'activation UI includes every operational hierarchy level');
+    }
+
+    private function accountRequestCases(array $actors,string $system,string $checker,string $ascX,string $arpaX,string $ascY,string $arpaY):void
+    {
+        $service=new UserAccountRequestService($this->pdo);
+        $password='Manual-User-1!';
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $manual=$service->request($actors['ASC_SUBJECT_OFFICER'],[
+            'account_source'=>UserAccountRequestService::SOURCE_MANUAL,
+            'full_name'=>'Manual ARPA User',
+            'username'=>'manual.arpa.user',
+            'role_id'=>$this->roleId('ARPA_OFFICER'),
+            'location_id'=>$arpaX,
+            'effective_from'=>date('Y-m-d'),
+            'temporary_password'=>$password,
+            'mfa_method'=>'AUTHENTICATOR_APP',
+        ]);
+        $userId=$manual['user_id'];$assignmentId=(string)$manual['role_assignment_id'];
+        $user=$this->row('SELECT officer_id,identity_type,display_name,identity_source,account_status,approval_status,enabled FROM system_user WHERE id=?',[$userId]);
+        $this->same(null,$user['officer_id'],'manual account does not create or require an Officer link');
+        $this->same('STAFF',$user['identity_type'],'ARPA account uses the existing STAFF identity model');
+        $this->same('Manual ARPA User',$user['display_name'],'manual account stores Full Name in system_user.display_name');
+        $this->same(UserAccountRequestService::SOURCE_MANUAL,$user['identity_source'],'manual account source is preserved');
+        $this->same('SUBMITTED',$user['approval_status'],'manual account follows the submitted account workflow');
+        $this->same(0,(int)$user['enabled'],'submitted account cannot sign in before approval');
+        $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM user_account_role WHERE id=?',[$assignmentId]),'initial role is submitted with the account');
+        $scope=$this->row('SELECT approval_status,location_id,effective_from FROM user_account_scope WHERE role_assignment_id=?',[$assignmentId]);
+        $this->same('SUBMITTED',$scope['approval_status'],'initial location is submitted with the role');
+        $this->same($arpaX,$scope['location_id'],'initial location remains linked to the exact role assignment');
+        $this->same(date('Y-m-d'),(string)$this->value('SELECT effective_from FROM user_account_role WHERE id=?',[$assignmentId]),'role uses the selected Effective From date');
+        $this->same(date('Y-m-d'),$scope['effective_from'],'scope uses the same Effective From date');
+        $audit=(string)$this->value("SELECT GROUP_CONCAT(details_json) FROM audit_event WHERE target_id=? AND action_key IN('user.request','user.submit')",[$userId]);
+        $this->same(false,str_contains($audit,$password),'temporary password is absent from account request audit details');
+
+        $base=['account_source'=>UserAccountRequestService::SOURCE_MANUAL,'full_name'=>'Duplicate User','role_id'=>$this->roleId('ARPA_OFFICER'),'location_id'=>$arpaX,'effective_from'=>date('Y-m-d'),'temporary_password'=>$password,'mfa_method'=>'AUTHENTICATOR_APP'];
+        $this->throws(fn()=>$service->request($actors['ASC_SUBJECT_OFFICER'],$base+['username'=>'manual.arpa.user']),'duplicate username is rejected');
+        $this->throws(fn()=>$service->request($actors['ASC_SUBJECT_OFFICER'],array_merge($base,['username'=>'missing.full.name','full_name'=>''])),'Full Name is required in manual mode');
+        $this->throws(fn()=>$service->request($actors['ASC_SUBJECT_OFFICER'],array_merge($base,['username'=>'same.level.user','role_id'=>$this->roleId('ASC_SUBJECT_OFFICER'),'location_id'=>$ascX])),'same-level manual account role is rejected');
+        $this->throws(fn()=>$service->request($actors['ASC_SUBJECT_OFFICER'],array_merge($base,['username'=>'outside.location.user','location_id'=>$arpaY])),'forged out-of-scope ARPA location is rejected');
+        $this->throws(fn()=>$service->request($actors['ASC_SUBJECT_OFFICER'],array_merge($base,['username'=>'before.baseline.user','effective_from'=>'2024-12-31'])),'manual account date before the baseline is rejected');
+
+        $farmer=$service->request($actors['ASC_SUBJECT_OFFICER'],array_merge($base,[
+            'username'=>'manual.farmer.user','full_name'=>'Manual Farmer','role_id'=>$this->roleId('FARMER'),'location_id'=>$ascX,'effective_from'=>'',
+        ]));
+        $this->same('FARMER',(string)$this->value('SELECT identity_type FROM system_user WHERE id=?',[$farmer['user_id']]),'Farmer uses the existing FARMER identity classification');
+        $this->same(UserAccessManagementService::OPERATIONAL_ACCESS_BASELINE_DATE,(string)$this->value('SELECT effective_from FROM user_account_role WHERE id=?',[$farmer['role_assignment_id']]),'manual account Effective From defaults to the approved 2025 baseline');
+        $this->same(UserAccessManagementService::OPERATIONAL_ACCESS_BASELINE_DATE,(string)$this->value('SELECT effective_from FROM user_account_scope WHERE role_assignment_id=?',[$farmer['role_assignment_id']]),'default baseline is applied consistently to the linked scope');
+
+        $this->createAssignment($actors['ASC_SUBJECT_OFFICER'],'NATIONAL_ADMIN',null);
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $this->throws(fn()=>$service->request($actors['ASC_SUBJECT_OFFICER'],array_merge($base,['username'=>'borrowed.context.user','role_id'=>$this->roleId('DISTRICT_ADMIN'),'location_id'=>null])),'active context prevents National privilege borrowing during account creation');
+
+        $outsideActor=$this->createActor('ASC_SUBJECT_OFFICER',$ascY,'account-request-outside-actor');
+        $this->useContext($outsideActor,'ASC_SUBJECT_OFFICER');
+        $outsideDefinition=DataTableRegistry::definition('account-requests');
+        $outsideResult=(new DataTableQuery($this->pdo,$outsideDefinition,new DataTableRequest(['search'=>['value'=>'manual.arpa.user']])))->response();
+        $this->same(0,$outsideResult['recordsFiltered'],'another ASC cannot discover the pending manual account request');
+
+        $this->useContext($system,'SYSTEM_ADMIN');
+        $officer=$this->row("SELECT o.id,o.name_with_initials FROM officer o LEFT JOIN system_user su ON su.officer_id=o.id WHERE o.approval_status='APPROVED' AND su.id IS NULL ORDER BY o.id LIMIT 1");
+        if(!$officer)throw new RuntimeException('An approved Officer without a user account is required.');
+        $officerRequest=$service->request($system,[
+            'account_source'=>UserAccountRequestService::SOURCE_OFFICER,'officer_id'=>$officer['id'],'username'=>'approved.officer.user','temporary_password'=>$password,'mfa_method'=>'AUTHENTICATOR_APP',
+        ]);
+        $this->same($officer['id'],(string)$this->value('SELECT officer_id FROM system_user WHERE id=?',[$officerRequest['user_id']]),'existing Approved Officer workflow preserves Officer linkage');
+        $this->same(null,$officerRequest['role_assignment_id'],'existing Approved Officer workflow does not invent an initial role');
+        $this->throws(fn()=>$service->request($system,['account_source'=>UserAccountRequestService::SOURCE_OFFICER,'officer_id'=>$officer['id'],'username'=>'duplicate.officer.user','temporary_password'=>$password,'mfa_method'=>'AUTHENTICATOR_APP']),'an Officer cannot receive a duplicate user identity');
+
+        $this->useContext($checker,'SYSTEM_ADMIN');
+        $service->approve($checker,$userId);
+        $this->same('ACTIVE',(string)$this->value('SELECT account_status FROM system_user WHERE id=?',[$userId]),'different checker activates the approved manual account');
+        $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM user_account_role WHERE id=?',[$assignmentId]),'account approval approves the initial role transactionally');
+        $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM user_account_scope WHERE role_assignment_id=?',[$assignmentId]),'account approval approves the linked initial scope');
+
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $active=(new DataTableQuery($this->pdo,DataTableRegistry::definition('users'),new DataTableRequest(['search'=>['value'=>'manual.arpa.user']])))->response();
+        $this->same(1,$active['recordsFiltered'],'approved no-Officer account appears in Active Users');
+        $this->same(true,(new UserAccessManagementService($this->pdo))->canManageUser($actors['ASC_SUBJECT_OFFICER'],$userId),'no-Officer account remains manageable through its role-specific scope');
+        (new OperationalUserActivationService($this->pdo))->deactivate($userId,'Manual account deactivation test',null,$actors['ASC_SUBJECT_OFFICER']);
+        $activeAfter=(new DataTableQuery($this->pdo,DataTableRegistry::definition('users'),new DataTableRequest(['search'=>['value'=>'manual.arpa.user']])))->response();
+        $inactiveAfter=(new DataTableQuery($this->pdo,DataTableRegistry::definition('historical-users'),new DataTableRequest(['search'=>['value'=>'manual.arpa.user']])))->response();
+        $this->same(0,$activeAfter['recordsFiltered'],'deactivated no-Officer account leaves Active Users');
+        $this->same(1,$inactiveAfter['recordsFiltered'],'deactivated no-Officer account appears in Inactive Users');
+
+        $view=(string)file_get_contents(dirname(__DIR__).'/app/Views/users/accounts.php');
+        foreach(['Account Source','Existing Approved Officer','User Not Yet Registered as Officer','Full Name','Effective From','assignment-locations'] as $needle)$this->same(true,str_contains($view,$needle),"account form includes {$needle}");
     }
 
     private function activeUserVisibilityCases(array $actors,string $system,string $districtX,string $ascX,string $arpaX,string $districtY,string $ascY,string $arpaY):void
@@ -390,6 +483,7 @@ final class UserAccessManagementTest
     }
 
     private function state():array{return ['users'=>$this->count('SELECT COUNT(*) FROM system_user'),'roles'=>$this->count('SELECT COUNT(*) FROM user_account_role'),'scopes'=>$this->count('SELECT COUNT(*) FROM user_account_scope'),'events'=>$this->count('SELECT COUNT(*) FROM audit_event')];}
+    private function row(string $sql,array $params=[]):array{$stmt=$this->pdo->prepare($sql);$stmt->execute($params);return $stmt->fetch()?:[];}
     private function value(string $sql,array $params=[]):mixed{$stmt=$this->pdo->prepare($sql);$stmt->execute($params);return $stmt->fetchColumn();}
     private function count(string $sql,array $params=[]):int{return (int)$this->value($sql,$params);}
     private function questions():int{$row=$this->pdo->query("SHOW SESSION STATUS LIKE 'Questions'")->fetch();return (int)($row['Value']??$row[1]??0);}

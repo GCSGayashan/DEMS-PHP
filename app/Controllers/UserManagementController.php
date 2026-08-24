@@ -2,8 +2,8 @@
 declare(strict_types=1);
 namespace App\Controllers;
 
-use App\Core\{Auth,Controller,CredentialService,Database,Csrf,Audit,DataTableRegistry};
-use App\Services\{OperationalUserActivationService,UserAccessManagementService};
+use App\Core\{Auth,Controller,CredentialService,Database,Csrf,Audit,DataTableRegistry,ScopeService};
+use App\Services\{OperationalUserActivationService,UserAccessManagementService,UserAccountRequestService};
 use DomainException;
 use Throwable;
 
@@ -13,13 +13,23 @@ final class UserManagementController extends Controller
     {
         Auth::requirePermission('user.view');
         $pdo=Database::pdo();
-        $officers=$pdo->query("SELECT o.id,o.dad_number,o.name_with_initials FROM officer o LEFT JOIN `system_user` su ON su.officer_id=o.id WHERE o.approval_status='APPROVED' AND su.id IS NULL ORDER BY o.name_with_initials LIMIT 500")->fetchAll();
+        $actor=(string)Auth::user()['id'];
+        $officerAccess=ScopeService::currentOfficerAccess($actor,'o.id');
+        $officerWhere=$officerAccess['where']===[]?'':(' AND '.implode(' AND ',$officerAccess['where']));
+        $officerStmt=$pdo->prepare($officerAccess['with']." SELECT o.id,o.dad_number,o.name_with_initials FROM officer o LEFT JOIN `system_user` su ON su.officer_id=o.id WHERE o.approval_status='APPROVED' AND su.id IS NULL{$officerWhere} ORDER BY o.name_with_initials LIMIT 500");
+        $officerStmt->execute($officerAccess['params']);$officers=$officerStmt->fetchAll();
+        $roles=[];
+        if(Auth::can('user.request')){
+            try{$roles=array_values(array_filter($this->managementPolicy()->manageableRoles($actor),fn($role)=>in_array($role['role_code'],OperationalUserActivationService::ROLE_CODES,true)));}
+            catch(DomainException){$roles=[];}
+        }
+        $accessBaseline=UserAccessManagementService::OPERATIONAL_ACCESS_BASELINE_DATE;
         $options=[
             'account_status'=>$this->distinctOptions("SELECT DISTINCT account_status value FROM `system_user` ORDER BY account_status"),
             'mfa_method'=>$this->distinctOptions("SELECT DISTINCT mfa_method value FROM `system_user` WHERE mfa_method IS NOT NULL ORDER BY mfa_method"),
         ];
         $dataTable=DataTableRegistry::viewModel('users',[],$options);
-        $this->render('users/accounts',compact('dataTable','officers'));
+        $this->render('users/accounts',compact('dataTable','officers','roles','accessBaseline'));
     }
 
     public function historicalUsers():void
@@ -57,7 +67,7 @@ final class UserManagementController extends Controller
 
     public function deactivateForm(string $id):void
     {
-        Auth::requirePermission('user.block');$this->authorize(fn()=>$this->managementPolicy()->assertCanManageUser((string)Auth::user()['id'],$id));$stmt=Database::pdo()->prepare("SELECT id,username,display_name,email,identity_type,account_status,enabled FROM system_user WHERE id=? AND identity_type='STAFF'");$stmt->execute([$id]);$identity=$stmt->fetch();if(!$identity){http_response_code(404);exit('Operational user not found.');}$this->render('users/deactivate_user',compact('identity'));
+        Auth::requirePermission('user.block');$this->authorize(fn()=>$this->managementPolicy()->assertCanManageUser((string)Auth::user()['id'],$id));$stmt=Database::pdo()->prepare("SELECT id,username,display_name,email,identity_type,account_status,enabled FROM system_user WHERE id=? AND identity_type IN ('STAFF','FARMER')");$stmt->execute([$id]);$identity=$stmt->fetch();if(!$identity){http_response_code(404);exit('Operational user not found.');}$this->render('users/deactivate_user',compact('identity'));
     }
 
     public function resetPasswordForm(string $id):void
@@ -94,21 +104,14 @@ final class UserManagementController extends Controller
     public function requestAccount(): void
     {
         Auth::requirePermission('user.request'); Csrf::validate();
-        $username=strtolower(trim((string)($_POST['username']??''))); $password=(string)($_POST['temporary_password']??'');
-        if(!preg_match('/^[a-z0-9._-]{5,50}$/',$username)){
-            $this->flash('danger','Valid username is required.'); redirect('/access-management/users');
-        }
         try{
-            $passwordHash=\App\Core\CredentialService::hashTemporaryPassword($password);
-        }catch(\DomainException $e){
-            $this->flash('danger',$e->getMessage()); redirect('/access-management/users');
+            (new UserAccountRequestService(Database::pdo()))->request((string)Auth::user()['id'],$_POST);
+            $this->flash('success','User request submitted.');
+        }catch(Throwable $e){
+            error_log('User account request failed: '.get_class($e));
+            $this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to submit the user request.');redirect('/access-management/users');
         }
-        $actor=(string)Auth::user()['id'];
-        $stmt=Database::pdo()->prepare("INSERT INTO `system_user`(id,officer_id,identity_type,username,password_hash,account_status,approval_status,enabled,mfa_method,password_setup_required,mfa_enrolled,requested_by,requested_at,submitted_by,submitted_at,created_at) VALUES(UUID(),?,'STAFF',?,?,'REQUESTED','SUBMITTED',0,?,1,0,?,NOW(),?,NOW(),NOW())");
-        $stmt->execute([$_POST['officer_id'],$username,$passwordHash,$_POST['mfa_method']??'AUTHENTICATOR_APP',$actor,$actor]);
-        Audit::record('user.request','SYSTEM_USER',null,['username'=>$username]);
-        Audit::record('user.submit','SYSTEM_USER',null,['username'=>$username]);
-        $this->flash('success','User request submitted.'); redirect('/access-management/account-requests');
+        redirect('/access-management/account-requests');
     }
 
     public function requests(): void
@@ -129,11 +132,13 @@ final class UserManagementController extends Controller
     public function approveAccount(string $id): void
     {
         Auth::requirePermission('user.approve'); Csrf::validate();
-        $pdo=Database::pdo(); $stmt=$pdo->prepare('SELECT requested_by,approval_status FROM `system_user` WHERE id=?'); $stmt->execute([$id]); $row=$stmt->fetch();
-        if(!$row||$row['approval_status']!=='SUBMITTED'){ $this->flash('danger','Only submitted requests can be approved.'); redirect('/access-management/account-requests'); }
-        if((string)$row['requested_by']===(string)Auth::user()['id']){ $this->flash('danger','You cannot approve a user request you created.'); redirect('/access-management/account-requests'); }
-        $pdo->prepare("UPDATE `system_user` SET approval_status='APPROVED',account_status='ACTIVE',enabled=1,approved_by=?,approved_at=NOW(),activated_by=?,activated_at=NOW() WHERE id=?")->execute([Auth::user()['id'],Auth::user()['id'],$id]);
-        Audit::record('user.approve','SYSTEM_USER',$id); $this->flash('success','User account approved and activated.'); redirect('/access-management/users');
+        try{
+            (new UserAccountRequestService(Database::pdo()))->approve((string)Auth::user()['id'],$id);
+            $this->flash('success','User account approved and activated.');redirect('/access-management/users');
+        }catch(Throwable $e){
+            error_log('User account approval failed: '.get_class($e));
+            $this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to approve the user request.');redirect('/access-management/account-requests');
+        }
     }
 
     public function roles(): void

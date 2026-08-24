@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,UserAccessManagementService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -1539,26 +1539,40 @@ final class DataTableRegistry
 
     private static function accountRequests(): array
     {
+        $actor=Auth::user();
+        $visibility=$actor
+            ?(new UserAccountRequestService(Database::pdo()))->pendingVisibility((string)$actor['id'])
+            :['with'=>'','where'=>'1=0','params'=>[]];
+        $initialRole="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND uar.approval_status IN('SUBMITTED','APPROVED'))";
+        $initialLocation="(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),'National Level') ORDER BY l.name_en SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id WHERE uas.user_id=su.id AND uas.approval_status IN('SUBMITTED','APPROVED'))";
+        $initialDate="(SELECT MIN(uar.effective_from) FROM user_account_role uar WHERE uar.user_id=su.id AND uar.approval_status IN('SUBMITTED','APPROVED'))";
+        $source="CASE WHEN su.identity_source='MANUAL_NO_OFFICER' THEN 'User Not Yet Registered as Officer' ELSE 'Existing Approved Officer' END";
         return [
             'permission' => 'user.view', 'export' => true, 'filename' => 'account-requests',
+            'with'=>$visibility['with'],
             'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id',
-            'select' => ['su.id', 'su.username', 'su.account_status', 'su.approval_status', 'su.requested_at', 'su.created_at', 'su.requested_by', 'o.name_with_initials'],
+            'select' => ['su.id','su.username','su.display_name','su.identity_type','su.identity_source','su.account_status','su.approval_status','su.requested_at','su.created_at','su.requested_by','o.name_with_initials',$source.' account_source',$initialRole.' initial_role',$initialLocation.' initial_location',$initialDate.' effective_from'],
             'count' => 'su.id',
-            'baseWhere' => ["(su.approval_status<>'APPROVED' OR su.account_status<>'ACTIVE')"],
-            'searchable' => ['su.username', 'su.account_status', 'su.approval_status', 'o.name_with_initials'],
+            'baseWhere' => ["(su.approval_status<>'APPROVED' OR su.account_status<>'ACTIVE')",$visibility['where']],
+            'baseParams'=>$visibility['params'],
+            'searchable' => ['su.username','su.display_name','su.identity_type','su.account_status','su.approval_status','o.name_with_initials',$source,$initialRole,$initialLocation],
             'filters' => [
                 'account_status' => ['column' => 'su.account_status', 'pattern' => '/^[A-Z_]{1,50}$/', 'ui' => ['label' => 'Account Status']],
                 'approval_status' => ['column' => 'su.approval_status', 'allowed' => self::workflowStatuses(), 'ui' => ['label' => 'Approval Status', 'options' => self::workflowOptions()]],
             ],
             'columns' => [
                 self::col('Username', 'username', 'su.username', fn($r) => DataTableFormat::text($r['username'])),
-                self::col('Officer', 'name_with_initials', 'o.name_with_initials', fn($r) => DataTableFormat::text($r['name_with_initials'])),
+                self::col('Name','display_name','su.display_name',fn($r)=>DataTableFormat::text($r['display_name']?:$r['name_with_initials'],'Not recorded')),
+                self::col('Account Source','account_source',$source,fn($r)=>DataTableFormat::text($r['account_source'])),
+                self::col('Initial Role','initial_role',$initialRole,fn($r)=>DataTableFormat::text($r['initial_role'],'Not assigned')),
+                self::col('Assigned Location','initial_location',$initialLocation,fn($r)=>DataTableFormat::text($r['initial_location'],'Not assigned')),
+                self::col('Effective From','effective_from',$initialDate,fn($r)=>DataTableFormat::date($r['effective_from'],'Not assigned')),
                 self::col('Account Status', 'account_status', 'su.account_status', fn($r) => DataTableFormat::badge($r['account_status'])),
                 self::col('Approval', 'approval_status', 'su.approval_status', fn($r) => DataTableFormat::badge($r['approval_status'])),
                 self::col('Requested At', 'requested_at', 'su.requested_at', fn($r) => DataTableFormat::dateTime($r['requested_at'] ?: $r['created_at']), fn($r) => substr((string)($r['requested_at'] ?: $r['created_at']), 0, 16)),
                 self::actionColumn(fn($r) => self::accountRequestActions($r)),
             ],
-            'defaultOrder' => [4, 'DESC'],
+            'defaultOrder' => [8, 'DESC'],
         ];
     }
 

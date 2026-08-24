@@ -664,6 +664,30 @@ final class UserAccessManagementService
         return ['role' => $role] + $this->validateScope($authority, (string)$role['role_level'], $locationId, $effectiveFrom);
     }
 
+    /**
+     * A new account may carry the approved HR baseline date even when the
+     * manager's own DEMS access was established later. Management authority is
+     * current, while the selected target location is checked at the requested
+     * assignment date.
+     *
+     * @return array{role:array<string,mixed>,scope_type:?string,scope_mode:?string,location_id:?string}
+     */
+    public function validateAccountRequestAssignment(string $actorId, string $roleId, ?string $locationId, string $effectiveFrom): array
+    {
+        $effectiveFrom = $this->date($effectiveFrom);
+        $authority = $this->authority($actorId);
+        $stmt = $this->pdo->prepare("SELECT id,role_code,role_name,role_level,protected_role,assignable FROM application_role WHERE id=? AND active=1 AND assignable=1 AND approval_status='APPROVED'");
+        $stmt->execute([$roleId]);
+        $role = $stmt->fetch();
+        if (!$role) {
+            throw new DomainException('The selected role is not available.');
+        }
+        if (!$this->roleAllowed($authority, $role)) {
+            throw new DomainException($this->roleDeniedMessage($authority));
+        }
+        return ['role' => $role] + $this->validateScope($authority, (string)$role['role_level'], $locationId, $effectiveFrom);
+    }
+
     /** @return array{role:array<string,mixed>,scope_type:?string,scope_mode:?string,location_id:?string} */
     public function validateRoleCodeAssignment(string $actorId, string $roleCode, ?string $locationId, string $effectiveFrom): array
     {

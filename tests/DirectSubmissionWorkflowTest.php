@@ -26,6 +26,7 @@ final class DirectSubmissionWorkflowTest
         $masters=$this->file('app/Controllers/HrMasterController.php');
         $users=$this->file('app/Controllers/UserManagementController.php');
         $access=$this->file('app/Services/UserAccessManagementService.php');
+        $accountRequests=$this->file('app/Services/UserAccountRequestService.php');
 
         foreach([
             'createAndSubmitDivisionAppointmentRequest',
@@ -48,7 +49,7 @@ final class DirectSubmissionWorkflowTest
         $this->contains('createSubmittedAssignment(',$access,'user roles have an atomic submitted creation path');
         $this->contains('createDraftAssignment(',$access,'historical draft creation compatibility remains available');
         $this->contains('submitAssignment($actorId, $id)',$access,'role and linked location submission remains transactional');
-        $this->contains("'REQUESTED','SUBMITTED'",$users,'new user requests begin submitted');
+        $this->contains("'REQUESTED','SUBMITTED'",$accountRequests,'new user requests begin submitted');
         $this->contains("'CUSTOM',0,1,0,'SUBMITTED',0",$users,'custom roles remain inactive while submitted');
         $this->contains("approval_status='APPROVED',active=1",$users,'custom roles activate only after approval');
         $this->contains('createSubmittedAssignment(',$users,'normal user role assignment uses direct submission');

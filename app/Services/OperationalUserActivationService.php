@@ -56,14 +56,14 @@ final class OperationalUserActivationService
         if($userId===$actorId)throw new DomainException('Administrators cannot deactivate their own account.');
         $this->transaction(function()use($userId,$reason,$officialReference,$actorId):void{
             $stmt=$this->pdo->prepare('SELECT * FROM system_user WHERE id=? FOR UPDATE');$stmt->execute([$userId]);$user=$stmt->fetch();
-            if(!$user||$user['identity_type']!=='STAFF'||(int)$user['enabled']!==1||$user['account_status']!=='ACTIVE')throw new DomainException('Only an active staff user can be deactivated.');
+            if(!$user||!in_array($user['identity_type'],['STAFF','FARMER'],true)||(int)$user['enabled']!==1||$user['account_status']!=='ACTIVE')throw new DomainException('Only an active operational user can be deactivated.');
             $protected=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND r.role_code IN('SYSTEM_ADMIN','SECURITY_ADMIN','USER_ADMIN')");$protected->execute([$userId]);
             if((int)$protected->fetchColumn()>0)throw new DomainException('Protected administration accounts must be handled through the dedicated security process.');
             $roles=$this->activeAssignments('user_account_role',$userId);$scopes=$this->activeAssignments('user_account_scope',$userId);
             $this->pdo->prepare("UPDATE user_account_scope SET active=0,effective_to=CASE WHEN effective_to IS NULL OR effective_to>CURRENT_DATE() THEN CURRENT_DATE() ELSE effective_to END,action_reason=? WHERE user_id=? AND active=1")->execute([$reason,$userId]);
             $this->pdo->prepare("UPDATE user_account_role SET active=0,effective_to=CASE WHEN effective_to IS NULL OR effective_to>CURRENT_DATE() THEN CURRENT_DATE() ELSE effective_to END,reason=CONCAT_WS(' | ',NULLIF(reason,''),?) WHERE user_id=? AND active=1")->execute([$reason,$userId]);
             $this->pdo->prepare("UPDATE system_user SET account_status='DISABLED',enabled=0,action_reason=?,updated_at=NOW() WHERE id=?")->execute([$reason,$userId]);
-            $this->recordEvent($userId,'DEACTIVATE',$user,'STAFF','DISABLED',(string)$user['username'],$roles,$scopes,$reason,$officialReference,$actorId);
+            $this->recordEvent($userId,'DEACTIVATE',$user,(string)$user['identity_type'],'DISABLED',(string)$user['username'],$roles,$scopes,$reason,$officialReference,$actorId);
         });
     }
 
