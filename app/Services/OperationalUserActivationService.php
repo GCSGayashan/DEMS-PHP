@@ -9,7 +9,7 @@ use Throwable;
 
 final class OperationalUserActivationService
 {
-    public const ROLE_CODES=['ASC_SUBJECT_OFFICER','ASC_ADMIN','ASC_VIEWER','DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN','DISTRICT_VIEWER','NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN','NATIONAL_VIEWER'];
+    public const ROLE_CODES=['FARMER','ARPA_OFFICER','ASC_SUBJECT_OFFICER','ASC_ADMIN','DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN','NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN'];
 
     public function __construct(private readonly PDO $pdo){}
 
@@ -76,10 +76,14 @@ final class OperationalUserActivationService
             $active=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_role WHERE user_id=? AND role_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=? AND (effective_to IS NULL OR effective_to>=?)");$active->execute([$userId,$role['id'],$from,$from]);
             if((int)$active->fetchColumn()>0)throw new DomainException('The user already has this active role.');
             [$scopeType,$scopeMode,$validatedLocation]=$this->validateScope((string)$role['role_level'],$locationId);
-            $roleAssignmentId=$this->uuid();$scopeId=$this->uuid();
+            $roleAssignmentId=$this->uuid();
             $this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason,official_reference,created_by,created_at,approved_by,approved_at) VALUES(?,?,?,?,'APPROVED',1,?,?,?,NOW(),?,NOW())")->execute([$roleAssignmentId,$userId,$role['id'],$from,$reason,$reference,$actorId,$actorId]);
-            $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,official_reference,created_by,created_at,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,'APPROVED',1,?,?,?,NOW(),?,NOW())")->execute([$scopeId,$userId,$roleAssignmentId,$scopeType,$scopeMode,$validatedLocation,$from,$reason,$reference,$actorId,$actorId]);
-            $roleRows[]=['id'=>$roleAssignmentId,'role_code'=>$roleCode,'effective_from'=>$from];$scopeRows[]=['id'=>$scopeId,'role_code'=>$roleCode,'scope_type'=>$scopeType,'scope_mode'=>$scopeMode,'location_id'=>$validatedLocation,'effective_from'=>$from];
+            $roleRows[]=['id'=>$roleAssignmentId,'role_code'=>$roleCode,'effective_from'=>$from];
+            if($scopeType!==null){
+                $scopeId=$this->uuid();
+                $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,official_reference,created_by,created_at,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,'APPROVED',1,?,?,?,NOW(),?,NOW())")->execute([$scopeId,$userId,$roleAssignmentId,$scopeType,$scopeMode,$validatedLocation,$from,$reason,$reference,$actorId,$actorId]);
+                $scopeRows[]=['id'=>$scopeId,'role_code'=>$roleCode,'scope_type'=>$scopeType,'scope_mode'=>$scopeMode,'location_id'=>$validatedLocation,'effective_from'=>$from];
+            }
         }
         return [$roleRows,$scopeRows];
     }
@@ -87,10 +91,10 @@ final class OperationalUserActivationService
     private function validateScope(string $roleLevel,?string $locationId):array
     {
         if($roleLevel==='NATIONAL'){if($locationId!==null&&trim($locationId)!=='')throw new DomainException('National roles do not use a specific location.');return ['NATIONAL','NATIONAL',null];}
-        $expected=$roleLevel==='ASC'?'ASC':($roleLevel==='DISTRICT'?'DISTRICT':null);if($expected===null)throw new DomainException('Only ASC, District, and National operational roles are supported.');
+        $expected=['FARMER'=>'ASC','ASC'=>'ASC','DISTRICT'=>'DISTRICT','ARPA'=>'ARPA_DIVISION'][$roleLevel]??null;if($expected===null)throw new DomainException('The selected operational role is not supported.');
         $locationId=trim((string)$locationId);if($locationId==='')throw new DomainException('Select a location for this role.');
         $stmt=$this->pdo->prepare("SELECT COUNT(*) FROM location l JOIN location_type t ON t.id=l.location_type_id WHERE l.id=? AND t.system_key=? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'");$stmt->execute([$locationId,$expected]);if((int)$stmt->fetchColumn()!==1)throw new DomainException("The selected location is not an approved active {$expected}.");
-        return [$expected,$expected==='ASC'?'EXACT':'INCLUDE_CHILDREN',$locationId];
+        return [$expected,$expected==='DISTRICT'?'INCLUDE_CHILDREN':'EXACT',$locationId];
     }
 
     private function roleSelections(mixed $input,mixed $enabled):array

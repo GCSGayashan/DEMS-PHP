@@ -37,8 +37,7 @@ final class UserManagementController extends Controller
         $stmt=$pdo->prepare("SELECT c.*,l.dad_number,l.name_en,t.system_key location_type FROM legacy_user_organization_context c LEFT JOIN location l ON l.id=c.location_id LEFT JOIN location_type t ON t.id=l.location_type_id WHERE c.legacy_user_reference_id=? ORDER BY c.legacy_level_key,l.name_en");$stmt->execute([$identity['legacy_reference_id']]);$legacyContexts=$stmt->fetchAll();
         $policy=$this->managementPolicy();$this->authorize(fn()=>$policy->assertCanManageUser((string)Auth::user()['id'],$id));
         $roles=array_values(array_filter($policy->manageableRoles((string)Auth::user()['id']),fn($role)=>in_array($role['role_code'],OperationalUserActivationService::ROLE_CODES,true)));
-        $locations=$policy->manageableLocations((string)Auth::user()['id']);
-        $this->render('users/activate_historical',compact('identity','legacyContexts','roles','locations'));
+        $this->render('users/activate_operational',compact('identity','legacyContexts','roles'));
     }
 
     public function activateHistorical(string $id):void

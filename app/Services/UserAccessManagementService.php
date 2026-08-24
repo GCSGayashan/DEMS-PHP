@@ -11,28 +11,23 @@ use Throwable;
 final class UserAccessManagementService
 {
     private const TECHNICAL_MANAGER_ROLES = ['SYSTEM_ADMIN', 'SECURITY_ADMIN', 'USER_ADMIN'];
-    private const NATIONAL_MANAGEABLE_LEVELS = ['NATIONAL', 'DISTRICT'];
-    private const NATIONAL_SUBJECT_MANAGEABLE_ROLES = [
-        'NATIONAL_SUBJECT_OFFICER',
-        'NATIONAL_VIEWER',
-        'DISTRICT_SUBJECT_OFFICER',
-        'DISTRICT_VIEWER',
-        'ASC_SUBJECT_OFFICER',
-        'ASC_VIEWER',
+    private const OPERATIONAL_ROLE_RANKS = [
+        'FARMER' => 10,
+        'ARPA_OFFICER' => 20,
+        'ASC_SUBJECT_OFFICER' => 30,
+        'ASC_ADMIN' => 40,
+        'DISTRICT_SUBJECT_OFFICER' => 50,
+        'DISTRICT_ADMIN' => 60,
+        'NATIONAL_SUBJECT_OFFICER' => 70,
+        'NATIONAL_ADMIN' => 80,
     ];
-    private const DISTRICT_MANAGEABLE_LEVELS = ['DISTRICT', 'ASC'];
-    private const DISTRICT_SUBJECT_MANAGEABLE_ROLES = [
-        'DISTRICT_SUBJECT_OFFICER',
-        'DISTRICT_VIEWER',
-        'ASC_SUBJECT_OFFICER',
-        'ASC_VIEWER',
-    ];
+    private const USER_MANAGEMENT_MINIMUM_RANK = 30;
     private array $authorityCache = [];
     private array $districtDescendantsCache = [];
 
     public function __construct(private readonly PDO $pdo) {}
 
-    /** @return array{kind:string,is_system_admin:bool,district_ids:array<int,string>} */
+    /** @return array{kind:string,is_system_admin:bool,actor_role_code:?string,actor_rank:?int,district_ids:array<int,string>,asc_ids:array<int,string>} */
     public function authority(string $actorId, ?string $date = null): array
     {
         $date ??= date('Y-m-d');
@@ -47,6 +42,8 @@ final class UserAccessManagementService
         $stmt = $this->pdo->prepare("SELECT uar.id,r.role_code,r.role_level,
                     uas.id scope_assignment_id,uas.scope_type,uas.scope_mode,uas.location_id
                 FROM user_account_role uar
+                JOIN system_user su ON su.id=uar.user_id
+                  AND su.enabled=1 AND su.account_status='ACTIVE' AND su.approval_status='APPROVED'
                 JOIN application_role r ON r.id=uar.role_id
                 LEFT JOIN user_account_scope uas
                   ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id
@@ -73,51 +70,58 @@ final class UserAccessManagementService
             return $this->authorityCache[$cacheKey] = [
                 'kind' => 'SYSTEM',
                 'is_system_admin' => in_array('SYSTEM_ADMIN', $roleCodes, true),
+                'actor_role_code' => null,
+                'actor_rank' => null,
                 'district_ids' => [],
+                'asc_ids' => [],
             ];
         }
 
         foreach ($assignments as $assignment) {
-            if ($assignment['role_code'] === 'NATIONAL_ADMIN'
-                && $assignment['scope_type'] === 'NATIONAL'
-                && $assignment['scope_mode'] === 'NATIONAL') {
-                return $this->authorityCache[$cacheKey] = ['kind' => 'NATIONAL', 'is_system_admin' => false, 'district_ids' => []];
-            }
-        }
-
-        foreach ($assignments as $assignment) {
-            if ($assignment['role_code'] === 'NATIONAL_SUBJECT_OFFICER'
-                && $assignment['scope_type'] === 'NATIONAL'
-                && $assignment['scope_mode'] === 'NATIONAL') {
-                return $this->authorityCache[$cacheKey] = ['kind' => 'NATIONAL_SUBJECT', 'is_system_admin' => false, 'district_ids' => []];
-            }
-        }
-
-        $districtIds = [];
-        foreach ($assignments as $assignment) {
-            if ($assignment['role_code'] !== 'DISTRICT_ADMIN') {
+            $roleCode = (string)$assignment['role_code'];
+            $rank = self::OPERATIONAL_ROLE_RANKS[$roleCode] ?? null;
+            if ($rank === null || $rank < self::USER_MANAGEMENT_MINIMUM_RANK) {
                 continue;
             }
-            if ($assignment['scope_type'] === 'DISTRICT'
-                && $assignment['scope_mode'] === 'INCLUDE_CHILDREN'
-                && $assignment['location_id'] !== null) {
-                $districtIds[] = (string)$assignment['location_id'];
-            }
-        }
-        $districtIds = array_values(array_unique($districtIds));
-        if ($districtIds !== []) {
-            return $this->authorityCache[$cacheKey] = ['kind' => 'DISTRICT', 'is_system_admin' => false, 'district_ids' => $districtIds];
-        }
 
-        foreach ($assignments as $assignment) {
-            if ($assignment['role_code'] === 'DISTRICT_SUBJECT_OFFICER'
+            if (in_array($roleCode, ['NATIONAL_ADMIN', 'NATIONAL_SUBJECT_OFFICER'], true)
+                && $assignment['scope_type'] === 'NATIONAL'
+                && $assignment['scope_mode'] === 'NATIONAL') {
+                return $this->authorityCache[$cacheKey] = [
+                    'kind' => $roleCode === 'NATIONAL_ADMIN' ? 'NATIONAL' : 'NATIONAL_SUBJECT',
+                    'is_system_admin' => false,
+                    'actor_role_code' => $roleCode,
+                    'actor_rank' => $rank,
+                    'district_ids' => [],
+                    'asc_ids' => [],
+                ];
+            }
+
+            if (in_array($roleCode, ['DISTRICT_ADMIN', 'DISTRICT_SUBJECT_OFFICER'], true)
                 && $assignment['scope_type'] === 'DISTRICT'
                 && $assignment['scope_mode'] === 'INCLUDE_CHILDREN'
                 && $assignment['location_id'] !== null) {
                 return $this->authorityCache[$cacheKey] = [
-                    'kind' => 'DISTRICT_SUBJECT',
+                    'kind' => $roleCode === 'DISTRICT_ADMIN' ? 'DISTRICT' : 'DISTRICT_SUBJECT',
                     'is_system_admin' => false,
+                    'actor_role_code' => $roleCode,
+                    'actor_rank' => $rank,
                     'district_ids' => [(string)$assignment['location_id']],
+                    'asc_ids' => [],
+                ];
+            }
+
+            if (in_array($roleCode, ['ASC_ADMIN', 'ASC_SUBJECT_OFFICER'], true)
+                && $assignment['scope_type'] === 'ASC'
+                && $assignment['scope_mode'] === 'EXACT'
+                && $assignment['location_id'] !== null) {
+                return $this->authorityCache[$cacheKey] = [
+                    'kind' => $roleCode === 'ASC_ADMIN' ? 'ASC' : 'ASC_SUBJECT',
+                    'is_system_admin' => false,
+                    'actor_role_code' => $roleCode,
+                    'actor_rank' => $rank,
+                    'district_ids' => [],
+                    'asc_ids' => [(string)$assignment['location_id']],
                 ];
             }
         }
@@ -139,6 +143,8 @@ final class UserAccessManagementService
         $assignmentClause = $context === null ? '' : ' AND uar.id=?';
         $sql = "SELECT DISTINCT p.permission_key
                 FROM user_account_role uar
+                JOIN system_user su ON su.id=uar.user_id
+                  AND su.enabled=1 AND su.account_status='ACTIVE' AND su.approval_status='APPROVED'
                 JOIN application_role r ON r.id=uar.role_id
                 JOIN application_role_permission rp ON rp.role_id=r.id
                 JOIN application_permission p ON p.id=rp.permission_id
@@ -175,19 +181,14 @@ final class UserAccessManagementService
         $date = date('Y-m-d');
         $authority = $this->authority($actorId, $date);
         if ($authority['kind'] === 'SYSTEM') {
-            // The only remaining eager caller is historical activation, whose
-            // form supports District and ASC roles. ARPA choices use lookup.
             return $this->locationRows(['DISTRICT', 'ASC'], $date);
         }
-        if ($authority['kind'] === 'NATIONAL') {
-            return $this->locationRows(['DISTRICT'], $date);
-        }
-        if ($authority['kind'] === 'NATIONAL_SUBJECT') {
+        if (in_array($authority['kind'], ['NATIONAL', 'NATIONAL_SUBJECT'], true)) {
             return $this->locationRows(['DISTRICT', 'ASC'], $date);
         }
 
-        $districts = $authority['district_ids'];
-        $placeholders = implode(',', array_fill(0, count($districts), '?'));
+        $roots = $this->authorityRootLocationIds($authority);
+        $placeholders = implode(',', array_fill(0, count($roots), '?'));
         $sql = "WITH RECURSIVE descendants(id) AS (
                     SELECT id FROM location WHERE id IN ({$placeholders})
                     UNION DISTINCT
@@ -206,34 +207,154 @@ final class UserAccessManagementService
                   AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)
                 ORDER BY FIELD(lt.system_key,'DISTRICT','ASC'),l.name_en";
         $stmt = $this->pdo->prepare($sql);
-        $stmt->execute(array_merge($districts, [$date,$date,$date,$date]));
+        $stmt->execute(array_merge($roots, [$date,$date,$date,$date]));
         return $stmt->fetchAll();
     }
 
     /** @return array<int,array{id:string,username:string}> */
     public function manageableUsers(string $actorId, bool $enabledOnly = true): array
     {
-        $date = date('Y-m-d');
-        $authority = $this->authority($actorId, $date);
-        $where = $enabledOnly ? ['su.enabled=1'] : [];
-        $params = [];
-        if ($authority['kind'] !== 'SYSTEM' || !$authority['is_system_admin']) {
-            $where[] = "NOT EXISTS (
-                SELECT 1
-                FROM user_account_role uar
-                JOIN application_role r ON r.id=uar.role_id
-                WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED'
-                  AND uar.effective_from<=? AND (uar.effective_to IS NULL OR uar.effective_to>=?)
-                  AND r.active=1 AND r.approval_status='APPROVED' AND r.role_level='SYSTEM'
-            )";
-            $params = [$date,$date];
+        $visibility = $this->activeUserVisibility($actorId);
+        $where = ["su.identity_type<>'HISTORICAL'", $visibility['where']];
+        if ($enabledOnly) {
+            array_unshift($where, "su.enabled=1", "su.account_status='ACTIVE'", "su.approval_status='APPROVED'");
         }
-        $sql = 'SELECT su.id,su.username FROM system_user su'
-            . ($where === [] ? '' : ' WHERE ' . implode(' AND ', $where))
+        $sql = $visibility['with'] . 'SELECT su.id,su.username FROM system_user su WHERE ' . implode(' AND ', $where)
             . ' ORDER BY su.username';
         $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
+        $stmt->execute($visibility['params']);
         return $stmt->fetchAll();
+    }
+
+    /**
+     * Returns a set-based predicate for an outer system_user alias named `su`.
+     * Every effective target role must be lower than the active actor role and
+     * must carry only compatible, role-linked scopes inside the actor boundary.
+     *
+     * @return array{with:string,where:string,params:array<int,string>}
+     */
+    public function activeUserVisibility(string $actorId, ?string $date = null): array
+    {
+        $date ??= date('Y-m-d');
+        $authority = $this->authority($actorId, $date);
+        $effectiveRole = "uar.active=1 AND uar.approval_status='APPROVED'
+            AND uar.effective_from<=(SELECT as_of_date FROM user_visibility_date)
+            AND (uar.effective_to IS NULL OR uar.effective_to>=(SELECT as_of_date FROM user_visibility_date))
+            AND r.active=1 AND r.approval_status='APPROVED'";
+
+        if ($authority['kind'] === 'SYSTEM') {
+            $where = "EXISTS (
+                SELECT 1 FROM user_account_role uar
+                JOIN application_role r ON r.id=uar.role_id
+                WHERE uar.user_id=su.id AND {$effectiveRole}
+            )";
+            if (!$authority['is_system_admin']) {
+                $where .= " AND NOT EXISTS (
+                    SELECT 1 FROM user_account_role uar
+                    JOIN application_role r ON r.id=uar.role_id
+                    WHERE uar.user_id=su.id AND {$effectiveRole} AND r.role_level='SYSTEM'
+                )";
+            }
+            return [
+                'with' => 'WITH user_visibility_date(as_of_date) AS (SELECT CAST(? AS DATE)) ',
+                'where' => $where,
+                'params' => [$date],
+            ];
+        }
+
+        $actorRank = (int)($authority['actor_rank'] ?? 0);
+        $allowedRoles = array_keys(array_filter(
+            self::OPERATIONAL_ROLE_RANKS,
+            static fn(int $rank): bool => $rank < $actorRank
+        ));
+        if ($allowedRoles === []) {
+            return ['with' => '', 'where' => '1=0', 'params' => []];
+        }
+
+        $roleRows = implode(' UNION ALL ', array_fill(0, count($allowedRoles), 'SELECT ?'));
+        $ctes = [
+            'user_visibility_date(as_of_date) AS (SELECT CAST(? AS DATE))',
+            "manageable_user_roles(role_code) AS ({$roleRows})",
+        ];
+        $params = array_merge([$date], $allowedRoles);
+        $restrictLocations = in_array($authority['kind'], ['ASC', 'ASC_SUBJECT', 'DISTRICT', 'DISTRICT_SUBJECT'], true);
+        if ($restrictLocations) {
+            $roots = $this->authorityRootLocationIds($authority);
+            if ($roots === []) {
+                return ['with' => '', 'where' => '1=0', 'params' => []];
+            }
+            $rootPlaceholders = implode(',', array_fill(0, count($roots), '?'));
+            $ctes[] = "manageable_user_locations(id) AS (
+                SELECT l.id FROM location l
+                WHERE l.id IN ({$rootPlaceholders})
+                  AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
+                  AND l.effective_from<=(SELECT as_of_date FROM user_visibility_date)
+                  AND (l.effective_to IS NULL OR l.effective_to>=(SELECT as_of_date FROM user_visibility_date))
+                UNION DISTINCT
+                SELECT lr.child_location_id
+                FROM location_relationship lr
+                JOIN manageable_user_locations mul ON mul.id=lr.parent_location_id
+                WHERE lr.active=1 AND lr.approval_status='APPROVED'
+                  AND lr.effective_from<=(SELECT as_of_date FROM user_visibility_date)
+                  AND (lr.effective_to IS NULL OR lr.effective_to>=(SELECT as_of_date FROM user_visibility_date))
+            )";
+            array_push($params, ...$roots);
+        }
+
+        $scopeEffective = "uas.active=1 AND uas.approval_status='APPROVED'
+            AND uas.effective_from<=(SELECT as_of_date FROM user_visibility_date)
+            AND (uas.effective_to IS NULL OR uas.effective_to>=(SELECT as_of_date FROM user_visibility_date))";
+        $locationBoundary = $restrictLocations
+            ? ' AND uas.location_id IN (SELECT id FROM manageable_user_locations)'
+            : '';
+        $validLocation = "EXISTS (
+            SELECT 1 FROM location l
+            JOIN location_type lt ON lt.id=l.location_type_id
+            WHERE l.id=uas.location_id AND lt.system_key=uas.scope_type
+              AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
+              AND l.effective_from<=(SELECT as_of_date FROM user_visibility_date)
+              AND (l.effective_to IS NULL OR l.effective_to>=(SELECT as_of_date FROM user_visibility_date))
+        )";
+        $compatibleScope = "(
+            (r.role_code='FARMER' AND uas.scope_type='ASC' AND uas.scope_mode='EXACT'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code='ARPA_OFFICER' AND uas.scope_type='ARPA_DIVISION' AND uas.scope_mode='EXACT'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code IN ('ASC_SUBJECT_OFFICER','ASC_ADMIN') AND uas.scope_type='ASC' AND uas.scope_mode='EXACT'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code IN ('DISTRICT_SUBJECT_OFFICER','DISTRICT_ADMIN') AND uas.scope_type='DISTRICT' AND uas.scope_mode='INCLUDE_CHILDREN'
+                AND uas.location_id IS NOT NULL AND {$validLocation}{$locationBoundary})
+            OR (r.role_code IN ('NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN') AND uas.scope_type='NATIONAL'
+                AND uas.scope_mode='NATIONAL' AND uas.location_id IS NULL)
+        )";
+        $validScope = "SELECT 1 FROM user_account_scope uas
+            WHERE uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id
+              AND {$scopeEffective} AND {$compatibleScope}";
+        $invalidScope = "SELECT 1 FROM user_account_scope uas
+            WHERE uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id
+              AND {$scopeEffective} AND NOT {$compatibleScope}";
+
+        $where = "EXISTS (
+                SELECT 1 FROM user_account_role uar
+                JOIN application_role r ON r.id=uar.role_id
+                WHERE uar.user_id=su.id AND {$effectiveRole}
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM user_account_role uar
+                JOIN application_role r ON r.id=uar.role_id
+                WHERE uar.user_id=su.id AND {$effectiveRole}
+                  AND (
+                    NOT EXISTS (SELECT 1 FROM manageable_user_roles mur WHERE mur.role_code=r.role_code)
+                    OR NOT EXISTS ({$validScope})
+                    OR EXISTS ({$invalidScope})
+                  )
+            )";
+
+        return [
+            'with' => 'WITH RECURSIVE ' . implode(', ', $ctes) . ' ',
+            'where' => $where,
+            'params' => $params,
+        ];
     }
 
     /** @return array<int,array{id:string,dad_number:string,name_en:string,official_code:?string,location_type:string}> */
@@ -245,10 +366,13 @@ final class UserAccessManagementService
         $stmt = $this->pdo->prepare("SELECT id,role_code,role_name,role_level,protected_role,assignable FROM application_role WHERE id=? AND active=1 AND assignable=1 AND approval_status='APPROVED'");
         $stmt->execute([$roleId]);
         $role = $stmt->fetch();
-        if (!$role || !$this->roleAllowed($authority, $role)) {
-            throw new DomainException('You do not have permission to assign this role.');
+        if (!$role) {
+            throw new DomainException('The selected role is not available.');
         }
-        $type = ['DISTRICT'=>'DISTRICT','ASC'=>'ASC','ARPA'=>'ARPA_DIVISION'][(string)$role['role_level']] ?? null;
+        if (!$this->roleAllowed($authority, $role)) {
+            throw new DomainException($this->roleDeniedMessage($authority));
+        }
+        $type = ['DISTRICT'=>'DISTRICT','ASC'=>'ASC','ARPA'=>'ARPA_DIVISION','FARMER'=>'ASC'][(string)$role['role_level']] ?? null;
         if ($type === null) {
             return [];
         }
@@ -256,7 +380,7 @@ final class UserAccessManagementService
         $searchSql = $query === '' ? '' : " AND CONCAT_WS(' ',l.dad_number,l.name_en,l.official_code) LIKE ?";
         $searchParams = $query === '' ? [] : ['%' . $query . '%'];
 
-        if (!in_array($authority['kind'], ['DISTRICT', 'DISTRICT_SUBJECT'], true)) {
+        if (in_array($authority['kind'], ['SYSTEM', 'NATIONAL', 'NATIONAL_SUBJECT'], true)) {
             $sql = "SELECT l.id,l.dad_number,l.name_en,l.official_code,lt.system_key location_type
                     FROM location l JOIN location_type lt ON lt.id=l.location_type_id
                     WHERE lt.system_key=? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
@@ -267,8 +391,8 @@ final class UserAccessManagementService
             return $stmt->fetchAll();
         }
 
-        $districts = $authority['district_ids'];
-        $placeholders = implode(',', array_fill(0, count($districts), '?'));
+        $roots = $this->authorityRootLocationIds($authority);
+        $placeholders = implode(',', array_fill(0, count($roots), '?'));
         $sql = "WITH RECURSIVE descendants(id) AS (
                     SELECT id FROM location WHERE id IN ({$placeholders})
                     UNION DISTINCT
@@ -284,7 +408,7 @@ final class UserAccessManagementService
                   AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?){$searchSql}
                 ORDER BY l.name_en,l.dad_number LIMIT {$limit}";
         $stmt = $this->pdo->prepare($sql);
-        $stmt->execute(array_merge($districts,[$date,$date,$type,$date,$date],$searchParams));
+        $stmt->execute(array_merge($roots,[$date,$date,$type,$date,$date],$searchParams));
         return $stmt->fetchAll();
     }
 
@@ -315,32 +439,18 @@ final class UserAccessManagementService
                 }
                 continue;
             }
-            if ($authority['kind'] === 'NATIONAL') {
-                if (!in_array($level, self::NATIONAL_MANAGEABLE_LEVELS, true)) {
-                    return false;
-                }
-                continue;
-            }
-            if ($authority['kind'] === 'NATIONAL_SUBJECT') {
-                if (!in_array((string)$assignment['role_code'], self::NATIONAL_SUBJECT_MANAGEABLE_ROLES, true)) {
-                    return false;
-                }
-                continue;
-            }
-            if ($authority['kind'] === 'DISTRICT_SUBJECT') {
-                if (!in_array((string)$assignment['role_code'], self::DISTRICT_SUBJECT_MANAGEABLE_ROLES, true)) {
-                    return false;
-                }
-            } elseif (!in_array($level, self::DISTRICT_MANAGEABLE_LEVELS, true)) {
+            if (!$this->roleAllowed($authority, $assignment)) {
                 return false;
+            }
+            if ($level === 'CUSTOM') {
+                continue;
             }
             $scopes = $this->effectiveScopes((string)$assignment['id'], $date);
             if ($scopes === []) {
                 return false;
             }
             foreach ($scopes as $scope) {
-                $locationId = (string)($scope['location_id'] ?? '');
-                if ($locationId === '' || !$this->withinAnyDistrict($locationId, $authority['district_ids'], $date)) {
+                if (!$this->scopeMatchesRole($assignment, $scope, $authority, $date)) {
                     return false;
                 }
             }
@@ -361,8 +471,11 @@ final class UserAccessManagementService
         $stmt = $this->pdo->prepare("SELECT id,role_code,role_name,role_level,protected_role,assignable FROM application_role WHERE id=? AND active=1 AND assignable=1 AND approval_status='APPROVED'");
         $stmt->execute([$roleId]);
         $role = $stmt->fetch();
-        if (!$role || !$this->roleAllowed($authority, $role)) {
-            throw new DomainException('You do not have permission to assign this role.');
+        if (!$role) {
+            throw new DomainException('The selected role is not available.');
+        }
+        if (!$this->roleAllowed($authority, $role)) {
+            throw new DomainException($this->roleDeniedMessage($authority));
         }
         return ['role' => $role] + $this->validateScope($authority, (string)$role['role_level'], $locationId, $effectiveFrom);
     }
@@ -390,7 +503,7 @@ final class UserAccessManagementService
         }
         $authority = $this->authority($actorId);
         if (!$this->roleAllowed($authority, $assignment)) {
-            throw new DomainException('You do not have permission to manage this user role.');
+            throw new DomainException($this->roleDeniedMessage($authority));
         }
         if (in_array((string)$assignment['role_level'], ['NATIONAL', 'DISTRICT', 'ASC', 'ARPA'], true)) {
             $scopeStmt = $this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? AND user_id=?');
@@ -580,24 +693,18 @@ final class UserAccessManagementService
         if ($authority['kind'] === 'SYSTEM') {
             return $level !== 'SYSTEM' || $authority['is_system_admin'];
         }
-        if ($authority['kind'] === 'NATIONAL') {
-            return in_array($level, self::NATIONAL_MANAGEABLE_LEVELS, true);
-        }
-        if ($authority['kind'] === 'NATIONAL_SUBJECT') {
-            return in_array((string)$role['role_code'], self::NATIONAL_SUBJECT_MANAGEABLE_ROLES, true);
-        }
-        if ($authority['kind'] === 'DISTRICT_SUBJECT') {
-            return in_array((string)$role['role_code'], self::DISTRICT_SUBJECT_MANAGEABLE_ROLES, true);
-        }
-        return in_array($level, self::DISTRICT_MANAGEABLE_LEVELS, true);
+        $targetRank = self::OPERATIONAL_ROLE_RANKS[(string)$role['role_code']] ?? null;
+        $actorRank = $authority['actor_rank'] ?? null;
+        return $targetRank !== null && $actorRank !== null && $targetRank < $actorRank;
     }
 
     private function assertTargetMayReceiveAssignment(string $actorId,string $targetUserId,string $date):void
     {
         $authority=$this->authority($actorId,$date);
         if($authority['kind']==='SYSTEM')return;
-        foreach($this->effectiveAssignments($targetUserId,$date) as $assignment){
-            if($assignment['role_level']==='SYSTEM')throw new DomainException('Protected system administrators can only be changed through the system security process.');
+        $assignments=$this->effectiveAssignments($targetUserId,$date);
+        if($assignments!==[]&&!$this->canManageUser($actorId,$targetUserId,$date)){
+            throw new DomainException('You do not have permission to assign a role to this user.');
         }
     }
 
@@ -611,13 +718,13 @@ final class UserAccessManagementService
             }
             return ['scope_type' => 'NATIONAL', 'scope_mode' => 'NATIONAL', 'location_id' => null];
         }
-        if (in_array($roleLevel, ['FARMER', 'CUSTOM'], true)) {
+        if ($roleLevel === 'CUSTOM') {
             if ($locationId !== '') {
                 throw new DomainException('This role does not use an assigned administrative location.');
             }
             return ['scope_type' => null, 'scope_mode' => null, 'location_id' => null];
         }
-        $expected = ['DISTRICT' => 'DISTRICT', 'ASC' => 'ASC', 'ARPA' => 'ARPA_DIVISION'][$roleLevel] ?? null;
+        $expected = ['DISTRICT' => 'DISTRICT', 'ASC' => 'ASC', 'ARPA' => 'ARPA_DIVISION', 'FARMER' => 'ASC'][$roleLevel] ?? null;
         if ($expected === null || $locationId === '') {
             throw new DomainException('Select a valid location for this role.');
         }
@@ -626,9 +733,10 @@ final class UserAccessManagementService
         if ((int)$stmt->fetchColumn() !== 1) {
             throw new DomainException('The selected location is not available.');
         }
-        if (in_array($authority['kind'], ['DISTRICT', 'DISTRICT_SUBJECT'], true)
-            && !$this->withinAnyDistrict($locationId, $authority['district_ids'], $date)) {
-            throw new DomainException('You can only select locations within your District.');
+        if (!in_array($authority['kind'], ['SYSTEM', 'NATIONAL', 'NATIONAL_SUBJECT'], true)
+            && !$this->withinAuthorityBoundary($locationId, $authority, $date)) {
+            $boundary = in_array($authority['kind'], ['ASC', 'ASC_SUBJECT'], true) ? 'Agrarian Service Center' : 'District';
+            throw new DomainException("You can only select locations within your {$boundary}.");
         }
         return [
             'scope_type' => $expected,
@@ -653,6 +761,35 @@ final class UserAccessManagementService
         return $stmt->fetchAll();
     }
 
+    private function scopeMatchesRole(array $assignment, array $scope, array $authority, string $date): bool
+    {
+        $roleCode = (string)$assignment['role_code'];
+        if (in_array($roleCode, ['NATIONAL_SUBJECT_OFFICER', 'NATIONAL_ADMIN'], true)) {
+            return $scope['scope_type'] === 'NATIONAL'
+                && $scope['scope_mode'] === 'NATIONAL'
+                && $scope['location_id'] === null;
+        }
+        $expected = match ($roleCode) {
+            'FARMER', 'ASC_SUBJECT_OFFICER', 'ASC_ADMIN' => ['ASC', 'EXACT'],
+            'ARPA_OFFICER' => ['ARPA_DIVISION', 'EXACT'],
+            'DISTRICT_SUBJECT_OFFICER', 'DISTRICT_ADMIN' => ['DISTRICT', 'INCLUDE_CHILDREN'],
+            default => null,
+        };
+        $locationId = (string)($scope['location_id'] ?? '');
+        if ($expected === null || $locationId === ''
+            || $scope['scope_type'] !== $expected[0] || $scope['scope_mode'] !== $expected[1]
+            || !$this->withinAuthorityBoundary($locationId, $authority, $date)) {
+            return false;
+        }
+        $stmt = $this->pdo->prepare("SELECT COUNT(*) FROM location l
+            JOIN location_type lt ON lt.id=l.location_type_id
+            WHERE l.id=? AND lt.system_key=?
+              AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED'
+              AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)");
+        $stmt->execute([$locationId, $expected[0], $date, $date]);
+        return (int)$stmt->fetchColumn() === 1;
+    }
+
     private function assignmentHasScope(string $assignmentId, string $type, string $mode, ?string $locationId, string $date): bool
     {
         foreach ($this->effectiveScopes($assignmentId, $date) as $scope) {
@@ -670,6 +807,36 @@ final class UserAccessManagementService
             return false;
         }
         return in_array($locationId,$this->descendantLocationIds($districtIds,$date),true);
+    }
+
+    private function withinAuthorityBoundary(string $locationId, array $authority, string $date): bool
+    {
+        if (in_array($authority['kind'], ['DISTRICT', 'DISTRICT_SUBJECT'], true)) {
+            return $this->withinAnyDistrict($locationId, $authority['district_ids'], $date);
+        }
+        if (in_array($authority['kind'], ['ASC', 'ASC_SUBJECT'], true)) {
+            return in_array($locationId, $this->descendantLocationIds($authority['asc_ids'], $date), true);
+        }
+        return in_array($authority['kind'], ['SYSTEM', 'NATIONAL', 'NATIONAL_SUBJECT'], true);
+    }
+
+    /** @return array<int,string> */
+    private function authorityRootLocationIds(array $authority): array
+    {
+        if (in_array($authority['kind'], ['DISTRICT', 'DISTRICT_SUBJECT'], true)) {
+            return $authority['district_ids'];
+        }
+        if (in_array($authority['kind'], ['ASC', 'ASC_SUBJECT'], true)) {
+            return $authority['asc_ids'];
+        }
+        return [];
+    }
+
+    private function roleDeniedMessage(array $authority): string
+    {
+        return $authority['kind'] === 'SYSTEM'
+            ? 'You do not have permission to assign this role.'
+            : 'You can only manage users below your user level.';
     }
 
     /** @return array<int,string> */

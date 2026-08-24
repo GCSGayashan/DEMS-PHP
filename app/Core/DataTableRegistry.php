@@ -1437,14 +1437,20 @@ final class DataTableRegistry
 
     private static function users(): array
     {
-        $effectiveRoles="(SELECT GROUP_CONCAT(DISTINCT r.role_name ORDER BY r.role_name SEPARATOR ', ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()))";
-        $effectiveScopes="(SELECT GROUP_CONCAT(DISTINCT CONCAT(uas.scope_type,' / ',uas.scope_mode,COALESCE(CONCAT(' / ',sl.dad_number),CONCAT(' / ',so.dad_number),'')) ORDER BY uas.scope_type SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location sl ON sl.id=uas.location_id LEFT JOIN office so ON so.id=uas.office_id WHERE uas.user_id=su.id AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE()))";
+        $actor = Auth::user();
+        $visibility = $actor
+            ? (new UserAccessManagementService(Database::pdo()))->activeUserVisibility((string)$actor['id'])
+            : ['with' => '', 'where' => '1=0', 'params' => []];
+        $effectiveRoles="(SELECT GROUP_CONCAT(DISTINCT r.role_name ORDER BY r.role_name SEPARATOR ', ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED')";
+        $effectiveScopes="(SELECT GROUP_CONCAT(DISTINCT CONCAT(uas.scope_type,' / ',uas.scope_mode,COALESCE(CONCAT(' / ',sl.dad_number),CONCAT(' / ',so.dad_number),'')) ORDER BY uas.scope_type SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location sl ON sl.id=uas.location_id LEFT JOIN office so ON so.id=uas.office_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE()))";
         return [
             'permission' => 'user.view', 'export' => true, 'filename' => 'active-user-accounts',
+            'with' => $visibility['with'],
             'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id',
             'select' => ['su.id','su.username','su.display_name','su.email','su.identity_type','su.account_status','su.approval_status','su.mfa_method','su.mfa_enrolled','su.enabled','su.password_setup_required','su.password_changed_at','su.created_at','o.dad_number AS officer_number','o.name_with_initials',$effectiveRoles.' AS effective_roles',$effectiveScopes.' AS effective_scopes'],
             'count' => 'su.id',
-            'baseWhere'=>["su.identity_type<>'HISTORICAL' AND su.enabled=1 AND su.account_status='ACTIVE'"],
+            'baseWhere'=>["su.identity_type<>'HISTORICAL'",'su.enabled=1',"su.account_status='ACTIVE'", "su.approval_status='APPROVED'",$visibility['where']],
+            'baseParams' => $visibility['params'],
             'searchable' => ['su.username','su.display_name','su.email','su.identity_type', 'su.account_status', 'o.dad_number', 'o.name_with_initials'],
             'filters' => [
                 'account_status' => ['column' => 'su.account_status', 'pattern' => '/^[A-Z_]{1,50}$/', 'ui' => ['label' => 'Account Status']],

@@ -8,7 +8,7 @@ use PDO;
 
 final class UserContextService
 {
-    private const SCOPED_LEVELS = ['NATIONAL','DISTRICT','ASC','ARPA'];
+    private const SCOPED_LEVELS = ['NATIONAL','DISTRICT','ASC','ARPA','FARMER'];
 
     public function __construct(private readonly PDO $pdo) {}
 
@@ -46,7 +46,7 @@ final class UserContextService
             if(!$this->compatibleScope((string)$row['role_level'],$scopeId,$row['scope_type'],$row['scope_mode'])){
                 continue;
             }
-            if(in_array((string)$row['role_level'],['DISTRICT','ASC','ARPA'],true)
+            if(in_array((string)$row['role_level'],['DISTRICT','ASC','ARPA','FARMER'],true)
                 && ($row['location_id']===null||$row['resolved_location_id']===null)){
                 continue;
             }
@@ -112,6 +112,7 @@ final class UserContextService
             'DISTRICT'=>['DISTRICT','INCLUDE_CHILDREN'],
             'ASC'=>['ASC','EXACT'],
             'ARPA'=>['ARPA_DIVISION','EXACT'],
+            'FARMER'=>['ASC','EXACT'],
         ][$roleLevel]??null;
         return $expected===null?$scopeId===null:($scopeId!==null&&$scopeType===$expected[0]&&$scopeMode===$expected[1]);
     }

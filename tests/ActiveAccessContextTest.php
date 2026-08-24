@@ -90,6 +90,23 @@ final class ActiveAccessContextTest
         $this->same(true,Auth::can('user.activate'),'National Subject Officer permission returns after explicit context switch');
         $this->same('NATIONAL_SUBJECT',(new UserAccessManagementService($this->pdo))->authority($nationalSubjectMixed)['kind'],'restricted National Subject authority returns only in its selected context');
 
+        $ascManagerMixed=$this->createUser('context.asc.manager.mixed');
+        [$ascManagerNationalRole,$ascManagerNationalScope]=$this->createAssignment($ascManagerMixed,'NATIONAL_ADMIN',null);
+        [$ascSubjectRole,$ascSubjectScope]=$this->createAssignment($ascManagerMixed,'ASC_SUBJECT_OFFICER',$ascX);
+        $this->authenticateAs($ascManagerMixed);
+        $service->select($ascManagerMixed,$ascSubjectRole,$ascSubjectScope);Auth::forgetRequestCache();
+        $ascSubjectPolicy=new UserAccessManagementService($this->pdo);
+        $this->same('ASC_SUBJECT',$ascSubjectPolicy->authority($ascManagerMixed)['kind'],'ASC Subject Officer context does not borrow National Admin authority');
+        $this->same([$ascX],$ascSubjectPolicy->authority($ascManagerMixed)['asc_ids'],'ASC Subject Officer authority uses only the selected ASC');
+        $ascSubjectRoles=array_column($ascSubjectPolicy->manageableRoles($ascManagerMixed),'role_code');sort($ascSubjectRoles);
+        $this->same(['ARPA_OFFICER','FARMER'],$ascSubjectRoles,'ASC Subject Officer context can manage only Farmer and ARPA roles');
+        $service->select($ascManagerMixed,$ascManagerNationalRole,$ascManagerNationalScope);Auth::forgetRequestCache();
+        $this->same(true,in_array('NATIONAL_SUBJECT_OFFICER',array_column((new UserAccessManagementService($this->pdo))->manageableRoles($ascManagerMixed),'role_code'),true),'National authority returns only after selecting National Admin context');
+
+        $farmer=$this->createUser('context.farmer');
+        [$farmerRole,$farmerScope]=$this->createAssignment($farmer,'FARMER',$ascX);
+        $this->same($farmerScope,(string)($service->resolve($farmer,$farmerRole,$farmerScope)['scope_assignment_id']??''),'Farmer context retains its role-linked ASC boundary');
+
         $other=$this->createUser('context.other');
         [$otherRole,$otherScope]=$this->createAssignment($other,'ASC_VIEWER',$ascX);
         $this->throws(fn()=>$service->select($nationalMixed,$otherRole,$otherScope),'another user role assignment cannot be selected');
@@ -166,9 +183,9 @@ final class ActiveAccessContextTest
         $this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason) VALUES(?,?,?,CURRENT_DATE(),'APPROVED',1,'Active context test')")->execute([$roleAssignmentId,$userId,$roleId]);
         $level=(string)$this->value('SELECT role_level FROM application_role WHERE id=?',[$roleId]);
         $scopeId=$this->uuid();
-        $type=['NATIONAL'=>'NATIONAL','DISTRICT'=>'DISTRICT','ASC'=>'ASC','ARPA'=>'ARPA_DIVISION'][$level]??null;
+        $type=['NATIONAL'=>'NATIONAL','DISTRICT'=>'DISTRICT','ASC'=>'ASC','ARPA'=>'ARPA_DIVISION','FARMER'=>'ASC'][$level]??null;
         if($type===null)return [$roleAssignmentId,''];
-        $mode=['NATIONAL'=>'NATIONAL','DISTRICT'=>'INCLUDE_CHILDREN','ASC'=>'EXACT','ARPA'=>'EXACT'][$level];
+        $mode=['NATIONAL'=>'NATIONAL','DISTRICT'=>'INCLUDE_CHILDREN','ASC'=>'EXACT','ARPA'=>'EXACT','FARMER'=>'EXACT'][$level];
         $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason) VALUES(?,?,?,?,?,?,CURRENT_DATE(),'APPROVED',1,'Active context test')")->execute([$scopeId,$userId,$roleAssignmentId,$type,$mode,$locationId]);
         return [$roleAssignmentId,$scopeId];
     }
