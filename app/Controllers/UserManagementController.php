@@ -16,8 +16,10 @@ final class UserManagementController extends Controller
         $actor=(string)Auth::user()['id'];
         $officerAccess=ScopeService::currentOfficerAccess($actor,'o.id');
         $officerWhere=$officerAccess['where']===[]?'':(' AND '.implode(' AND ',$officerAccess['where']));
-        $officerStmt=$pdo->prepare($officerAccess['with']." SELECT o.id,o.dad_number,o.name_with_initials FROM officer o LEFT JOIN `system_user` su ON su.officer_id=o.id WHERE o.approval_status='APPROVED' AND su.id IS NULL{$officerWhere} ORDER BY o.name_with_initials LIMIT 500");
+        $officerStmt=$pdo->prepare($officerAccess['with']." SELECT o.id,o.dad_number,o.nic,o.name_with_initials FROM officer o LEFT JOIN `system_user` su ON su.officer_id=o.id WHERE o.approval_status='APPROVED' AND su.id IS NULL{$officerWhere} ORDER BY o.name_with_initials LIMIT 500");
         $officerStmt->execute($officerAccess['params']);$officers=$officerStmt->fetchAll();
+        $designations=$pdo->query("SELECT id,system_key,name_en,designation_level FROM designation WHERE active=1 AND approval_status='APPROVED' ORDER BY designation_level,name_en")->fetchAll();
+        $officerStatuses=$pdo->query("SELECT id,system_key,name_en FROM officer_status WHERE active=1 AND approval_status='APPROVED' ORDER BY display_order,name_en")->fetchAll();
         $roles=[];
         if(Auth::can('user.request')){
             try{$roles=array_values(array_filter($this->managementPolicy()->manageableRoles($actor),fn($role)=>in_array($role['role_code'],OperationalUserActivationService::ROLE_CODES,true)));}
@@ -29,7 +31,7 @@ final class UserManagementController extends Controller
             'mfa_method'=>$this->distinctOptions("SELECT DISTINCT mfa_method value FROM `system_user` WHERE mfa_method IS NOT NULL ORDER BY mfa_method"),
         ];
         $dataTable=DataTableRegistry::viewModel('users',[],$options);
-        $this->render('users/accounts',compact('dataTable','officers','roles','accessBaseline'));
+        $this->render('users/accounts',compact('dataTable','officers','designations','officerStatuses','roles','accessBaseline'));
     }
 
     public function historicalUsers():void

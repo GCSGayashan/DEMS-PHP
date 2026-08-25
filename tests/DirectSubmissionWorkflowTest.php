@@ -44,6 +44,8 @@ final class DirectSubmissionWorkflowTest
         $this->contains("'SUBMITTED',?,NOW(),?,NOW()",$offices,'new Offices store submitted audit fields');
         $this->contains("'INACTIVE','SUBMITTED'",$officers,'new Officers remain inactive while submitted');
         $this->contains("'SUBMITTED',?,NOW(),?,NOW()",$masters,'new HR masters store submitted audit fields');
+        $this->contains("VALUES (UUID(),?,?,?,?,?,?,?,1,?,'SUBMITTED',?,NOW(),?,NOW()",$masters,'HR master insert maps seven base values before the fixed active flag');
+        $this->same(false,str_contains($masters,'?,?,?,?,?,?,?, ?,1'),'HR master insert has no extra placeholder before the fixed active flag');
         $this->contains("approval_status,created_by,submitted_by,submitted_at",$officeAssignments,'new Office assignments include direct submission audit fields');
         $this->contains("'SUBMITTED',?,?,NOW()",$officeAssignments,'new Office assignments begin submitted');
         $this->contains('createSubmittedAssignment(',$access,'user roles have an atomic submitted creation path');

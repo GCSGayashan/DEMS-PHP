@@ -33,6 +33,15 @@ final class ActiveAccessContextTest
         [$districtX,$ascX,$districtY,$ascY] = $this->districtFixtures();
         $service = new UserContextService($this->pdo);
 
+        foreach(['SYSTEM_ADMIN'=>4,'NATIONAL_ADMIN'=>4,'NATIONAL_SUBJECT_OFFICER'=>0,'DISTRICT_ADMIN'=>0,'ASC_ADMIN'=>0] as $roleCode=>$expected){
+            $grants=$this->count("SELECT COUNT(*) FROM application_role_permission rp JOIN application_role r ON r.id=rp.role_id JOIN application_permission p ON p.id=rp.permission_id WHERE r.role_code=? AND p.permission_key LIKE 'hr.master.%'",[$roleCode]);
+            $this->same($expected,$grants,"{$roleCode} has the intended Officer Supporting Master permission count");
+        }
+        $systemAdmin=$this->createUser('context.hr-master.system');
+        $this->createAssignment($systemAdmin,'SYSTEM_ADMIN',null);
+        $this->authenticateAs($systemAdmin);
+        $this->same(true,Auth::can('hr.master.view'),'System Admin retains Officer Supporting Master access');
+
         $multi = $this->createUser('context.multi');
         [$districtRole,$districtScope] = $this->createAssignment($multi,'DISTRICT_ADMIN',$districtX);
         [$ascRole,$ascScope] = $this->createAssignment($multi,'ASC_VIEWER',$ascY);
@@ -48,6 +57,7 @@ final class ActiveAccessContextTest
         $this->same($districtRole,Auth::activeRoleAssignmentId(),'District role assignment becomes active');
         $this->same($districtScope,Auth::activeScopeAssignmentId(),'District scope assignment becomes active');
         $this->same(true,Auth::can('data.approve'),'District Admin permission is available in District context');
+        $this->same(false,Auth::can('hr.master.view'),'District Admin does not receive Officer Supporting Master access');
         $this->same(true,ScopeService::canAccessLocationForPermission($multi,'data.approve',$ascX),'District context reaches its descendant ASC');
         $this->same(false,ScopeService::canAccessLocationForPermission($multi,'data.approve',$ascY),'District permission cannot borrow the Viewer scope');
         $authority=(new UserAccessManagementService($this->pdo))->authority($multi);
@@ -68,6 +78,7 @@ final class ActiveAccessContextTest
         $service->select($nationalMixed,$subjectRole,$subjectScope);Auth::forgetRequestCache();
         $this->same(true,Auth::can('user.view'),'District Subject Officer context can display User Management');
         $this->same(true,Auth::can('user.activate'),'District Subject Officer receives its own User Management permission');
+        $this->same(false,Auth::can('hr.master.view'),'District context cannot borrow Officer Supporting Master access from National Admin');
         $subjectAuthority=(new UserAccessManagementService($this->pdo))->authority($nationalMixed);
         $this->same('DISTRICT_SUBJECT',$subjectAuthority['kind'],'District Subject Officer context does not borrow National Admin authority');
         $this->same([$districtX],$subjectAuthority['district_ids'],'District Subject Officer context retains only its linked District scope');
@@ -75,6 +86,9 @@ final class ActiveAccessContextTest
         $this->same(false,in_array('NATIONAL_ADMIN',$subjectRoles,true),'District Subject Officer context cannot borrow National assignable roles');
         $service->select($nationalMixed,$nationalRole,$nationalScope);Auth::forgetRequestCache();
         $this->same(true,Auth::can('user.activate'),'National Admin permission returns after explicit context switch');
+        foreach(['hr.master.view','hr.master.create','hr.master.edit','hr.master.approve'] as $permission){
+            $this->same(true,Auth::can($permission),"National Admin context receives {$permission}");
+        }
         $this->same('NATIONAL',(new UserAccessManagementService($this->pdo))->authority($nationalMixed)['kind'],'National authority returns only in National context');
 
         $nationalSubjectMixed=$this->createUser('context.national.subject.mixed');
@@ -88,6 +102,7 @@ final class ActiveAccessContextTest
         $service->select($nationalSubjectMixed,$nationalSubjectRole,$nationalSubjectScope);Auth::forgetRequestCache();
         $this->same(true,Auth::can('user.view'),'National Subject Officer context can display User Management');
         $this->same(true,Auth::can('user.activate'),'National Subject Officer permission returns after explicit context switch');
+        $this->same(false,Auth::can('hr.master.view'),'National Subject Officer does not gain Officer Supporting Master access');
         $this->same('NATIONAL_SUBJECT',(new UserAccessManagementService($this->pdo))->authority($nationalSubjectMixed)['kind'],'restricted National Subject authority returns only in its selected context');
 
         $ascManagerMixed=$this->createUser('context.asc.manager.mixed');
@@ -96,6 +111,7 @@ final class ActiveAccessContextTest
         $this->authenticateAs($ascManagerMixed);
         $service->select($ascManagerMixed,$ascSubjectRole,$ascSubjectScope);Auth::forgetRequestCache();
         $ascSubjectPolicy=new UserAccessManagementService($this->pdo);
+        $this->same(false,Auth::can('hr.master.view'),'ASC context cannot borrow Officer Supporting Master access from National Admin');
         $this->same('ASC_SUBJECT',$ascSubjectPolicy->authority($ascManagerMixed)['kind'],'ASC Subject Officer context does not borrow National Admin authority');
         $this->same([$ascX],$ascSubjectPolicy->authority($ascManagerMixed)['asc_ids'],'ASC Subject Officer authority uses only the selected ASC');
         $ascSubjectRoles=array_column($ascSubjectPolicy->manageableRoles($ascManagerMixed),'role_code');sort($ascSubjectRoles);
@@ -161,6 +177,9 @@ final class ActiveAccessContextTest
 
         $view=(string)file_get_contents(dirname(__DIR__).'/app/Views/auth/select_context.php');
         $layout=(string)file_get_contents(dirname(__DIR__).'/app/Views/layouts/admin.php');
+        $hrMasterController=(string)file_get_contents(dirname(__DIR__).'/app/Controllers/HrMasterController.php');
+        $dataTableRegistry=(string)file_get_contents(dirname(__DIR__).'/app/Core/DataTableRegistry.php');
+        $routes=(string)file_get_contents(dirname(__DIR__).'/routes/web.php');
         $this->same(true,str_contains($view,'Csrf::field()'),'context selection POST uses CSRF protection');
         $this->same(true,str_contains($view,'working-context-group'),'selection page groups contexts by role');
         $this->same(true,str_contains($view,"count(\$contexts)>5"),'context search appears only for larger context lists');
@@ -171,6 +190,18 @@ final class ActiveAccessContextTest
         $this->same(true,str_contains($layout,'context-switcher')&&str_contains($layout,'Change Role or Office'),'authenticated header displays the compact role and location selector');
         $this->same(true,str_contains($layout,'availableContextGroups'),'authenticated header groups contexts by role');
         $this->same(true,str_contains($layout,"url('select-context')"),'authenticated header supports context switching');
+        $this->same(true,str_contains($layout,"Auth::can('hr.master.view')")&&str_contains($layout,'Officer Supporting Master'),'Officer Supporting Master menu uses active-context permission checks');
+        foreach(['titles','appointment-natures','designations','classes','officer-statuses','civil-statuses'] as $master){
+            $this->same(true,str_contains($layout,"url('hr/{$master}')"),"Officer Supporting Master menu includes {$master}");
+        }
+        foreach(['view','create','edit','approve'] as $action){
+            $this->same(true,str_contains($hrMasterController,"Auth::requirePermission('hr.master.{$action}')"),"HR master {$action} route is permission protected");
+        }
+        $this->same(true,str_contains($dataTableRegistry,"'permission' => 'hr.master.view'"),'HR master DataTable endpoint requires view permission');
+        $this->same(true,str_contains($dataTableRegistry,"Auth::can('hr.master.approve') && !self::isMaker"),'HR master maker cannot approve their own submission');
+        foreach(['get','post'] as $verb){
+            $this->same(true,str_contains($routes,"\$router->{$verb}('/hr/{type}"),"HR master {$verb} routes remain registered behind controller authorization");
+        }
         $this->same(true,str_contains((string)file_get_contents(dirname(__DIR__).'/public/assets/js/app.js'),'contextSearchText'),'context filtering uses the authorized rendered context list');
         $this->same(true,str_contains((string)file_get_contents(dirname(__DIR__).'/app/Controllers/AuthController.php'),'initializeContextAfterLogin'),'login initializes or requests a working context');
     }

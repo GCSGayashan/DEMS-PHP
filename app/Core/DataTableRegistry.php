@@ -1462,12 +1462,12 @@ final class DataTableRegistry
         return [
             'permission' => 'user.view', 'export' => true, 'filename' => 'active-user-accounts',
             'with' => $visibility['with'],
-            'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id',
-            'select' => ['su.id','su.username','su.display_name','su.email','su.identity_type','su.account_status','su.approval_status','su.mfa_method','su.mfa_enrolled','su.enabled','su.password_setup_required','su.password_changed_at','su.created_at','o.dad_number AS officer_number','o.name_with_initials',$effectiveRoles.' AS effective_roles',$effectiveDates.' AS effective_from_dates',$effectiveAssignments.' AS effective_role_assignments',$effectiveScopes.' AS effective_scopes'],
+            'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id LEFT JOIN designation d ON d.id=o.primary_designation_id',
+            'select' => ['su.id','su.username','su.display_name','su.email','su.identity_type','su.account_status','su.approval_status','su.mfa_method','su.mfa_enrolled','su.enabled','su.password_setup_required','su.password_changed_at','su.created_at','o.dad_number AS officer_number','o.nic','o.name_with_initials','d.name_en AS designation_name',$effectiveRoles.' AS effective_roles',$effectiveDates.' AS effective_from_dates',$effectiveAssignments.' AS effective_role_assignments',$effectiveScopes.' AS effective_scopes'],
             'count' => 'su.id',
             'baseWhere'=>["su.identity_type<>'HISTORICAL'",'su.enabled=1',"su.account_status='ACTIVE'", "su.approval_status='APPROVED'",$visibility['where']],
             'baseParams' => $visibility['params'],
-            'searchable' => ['su.username','su.display_name','su.email','su.identity_type', 'su.account_status', 'o.dad_number', 'o.name_with_initials',$effectiveRoles,$effectiveDates],
+            'searchable' => ['su.username','su.display_name','su.email','su.identity_type', 'su.account_status', 'o.dad_number', 'o.nic', 'o.name_with_initials','d.name_en',$effectiveRoles,$effectiveDates],
             'filters' => [
                 'account_status' => ['column' => 'su.account_status', 'pattern' => '/^[A-Z_]{1,50}$/', 'ui' => ['label' => 'Account Status']],
                 'identity_type'=>['column'=>'su.identity_type','allowed'=>['STAFF','FARMER'],'ui'=>['label'=>'Identity Type','options'=>['STAFF'=>'Staff','FARMER'=>'Farmer']]],
@@ -1477,6 +1477,8 @@ final class DataTableRegistry
             'columns' => [
                 self::col('Username', 'username', 'su.username', fn($r) => '<strong>' . e($r['username']) . '</strong>'),
                 self::col('Display Name','display_name','su.display_name',fn($r)=>DataTableFormat::text($r['display_name'])),
+                self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'],'-')),
+                self::col('Designation','designation_name','d.name_en',fn($r)=>DataTableFormat::text($r['designation_name'],'-')),
                 self::col('Identity Type','identity_type','su.identity_type',fn($r)=>DataTableFormat::badge($r['identity_type'])),
                 self::col('Account Status', 'account_status', 'su.account_status', fn($r) => DataTableFormat::badge($r['account_status'])),
                 self::col('Enabled', 'enabled', 'su.enabled', fn($r) => DataTableFormat::badge($r['enabled'] ? 'ENABLED' : 'DISABLED'), fn($r) => $r['enabled'] ? 'ENABLED' : 'DISABLED'),
@@ -1512,11 +1514,11 @@ final class DataTableRegistry
         return [
             'permission'=>'user.view','export'=>true,'filename'=>'inactive-user-accounts',
             'with'=>$visibility['with'],
-            'from'=>"system_user su LEFT JOIN legacy_user_reference lur ON lur.system_user_id=su.id LEFT JOIN officer o ON o.id=su.officer_id LEFT JOIN (SELECT lr.system_user_id,GROUP_CONCAT(DISTINCT CONCAT(c.legacy_level_key,': ',COALESCE(l.dad_number,c.legacy_location_id,'Unresolved'),' ',COALESCE(l.name_en,'')) ORDER BY c.legacy_level_key SEPARATOR ' | ') organization_context FROM legacy_user_reference lr JOIN legacy_user_organization_context c ON c.legacy_user_reference_id=lr.id LEFT JOIN location l ON l.id=c.location_id GROUP BY lr.system_user_id) ctx ON ctx.system_user_id=su.id",
-            'select'=>['su.id','su.username','su.display_name','su.identity_type','su.historical_identity','su.account_status','su.approval_status','su.enabled','su.updated_at','lur.legacy_user_id','lur.legacy_username','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number officer_number','o.name_with_initials officer_name',$lastRoles.' last_roles',$lastDates.' effective_from_dates',$lastScopes.' last_scopes',$deactivatedAt.' deactivated_at'],
+            'from'=>"system_user su LEFT JOIN legacy_user_reference lur ON lur.system_user_id=su.id LEFT JOIN officer o ON o.id=su.officer_id LEFT JOIN designation d ON d.id=o.primary_designation_id LEFT JOIN (SELECT lr.system_user_id,GROUP_CONCAT(DISTINCT CONCAT(c.legacy_level_key,': ',COALESCE(l.dad_number,c.legacy_location_id,'Unresolved'),' ',COALESCE(l.name_en,'')) ORDER BY c.legacy_level_key SEPARATOR ' | ') organization_context FROM legacy_user_reference lr JOIN legacy_user_organization_context c ON c.legacy_user_reference_id=lr.id LEFT JOIN location l ON l.id=c.location_id GROUP BY lr.system_user_id) ctx ON ctx.system_user_id=su.id",
+            'select'=>['su.id','su.username','su.display_name','su.identity_type','su.historical_identity','su.account_status','su.approval_status','su.enabled','su.updated_at','lur.legacy_user_id','lur.legacy_username','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number officer_number','o.nic','o.name_with_initials officer_name','d.name_en designation_name',$lastRoles.' last_roles',$lastDates.' effective_from_dates',$lastScopes.' last_scopes',$deactivatedAt.' deactivated_at'],
             'count'=>'su.id','baseWhere'=>["su.approval_status='APPROVED'","(su.account_status='DISABLED' OR (su.enabled=0 AND su.identity_type IN ('STAFF','HISTORICAL')))",$visibility['where']],
             'baseParams'=>$visibility['params'],
-            'searchable'=>['su.username','su.display_name','su.identity_type','su.account_status','lur.legacy_user_id','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number','o.name_with_initials',$lastRoles,$lastScopes,$lastDates],
+            'searchable'=>['su.username','su.display_name','su.identity_type','su.account_status','lur.legacy_user_id','lur.legacy_nic','lur.legacy_role_name','ctx.organization_context','o.dad_number','o.nic','o.name_with_initials','d.name_en',$lastRoles,$lastScopes,$lastDates],
             'filters'=>[
                 'identity_type'=>['column'=>'su.identity_type','allowed'=>['STAFF','FARMER','HISTORICAL'],'ui'=>['label'=>'Identity Type','options'=>['STAFF'=>'Staff','FARMER'=>'Farmer','HISTORICAL'=>'Historical']]],
                 'account_status'=>['column'=>'su.account_status','pattern'=>'/^[A-Z_]{1,50}$/','ui'=>['label'=>'Account Status']],
@@ -1525,6 +1527,8 @@ final class DataTableRegistry
             'columns'=>[
                 self::col('Username','username','su.username',fn($r)=>'<strong>'.e($r['username']).'</strong>'),
                 self::col('Display Name','display_name','su.display_name',fn($r)=>DataTableFormat::text($r['display_name'])),
+                self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'],'-')),
+                self::col('Designation','designation_name','d.name_en',fn($r)=>DataTableFormat::text($r['designation_name'],'-')),
                 self::col('Identity Type','identity_type','su.identity_type',fn($r)=>DataTableFormat::badge($r['identity_type'])),
                 self::col('Account Status','account_status','su.account_status',fn($r)=>DataTableFormat::badge($r['account_status'])),
                 self::col('Enabled','enabled','su.enabled',fn($r)=>DataTableFormat::badge($r['enabled']?'ENABLED':'DISABLED'),fn($r)=>$r['enabled']?'ENABLED':'DISABLED'),
@@ -1550,12 +1554,12 @@ final class DataTableRegistry
         return [
             'permission' => 'user.view', 'export' => true, 'filename' => 'account-requests',
             'with'=>$visibility['with'],
-            'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id',
-            'select' => ['su.id','su.username','su.display_name','su.identity_type','su.identity_source','su.account_status','su.approval_status','su.requested_at','su.created_at','su.requested_by','o.name_with_initials',$source.' account_source',$initialRole.' initial_role',$initialLocation.' initial_location',$initialDate.' effective_from'],
+            'from' => '`system_user` su LEFT JOIN officer o ON o.id=su.officer_id LEFT JOIN designation d ON d.id=o.primary_designation_id',
+            'select' => ['su.id','su.username','su.display_name','su.identity_type','su.identity_source','su.account_status','su.approval_status','su.requested_at','su.created_at','su.requested_by','o.nic','o.name_with_initials','d.name_en designation_name',$source.' account_source',$initialRole.' initial_role',$initialLocation.' initial_location',$initialDate.' effective_from'],
             'count' => 'su.id',
             'baseWhere' => ["(su.approval_status<>'APPROVED' OR su.account_status<>'ACTIVE')",$visibility['where']],
             'baseParams'=>$visibility['params'],
-            'searchable' => ['su.username','su.display_name','su.identity_type','su.account_status','su.approval_status','o.name_with_initials',$source,$initialRole,$initialLocation],
+            'searchable' => ['su.username','su.display_name','su.identity_type','su.account_status','su.approval_status','o.nic','o.name_with_initials','d.name_en',$source,$initialRole,$initialLocation],
             'filters' => [
                 'account_status' => ['column' => 'su.account_status', 'pattern' => '/^[A-Z_]{1,50}$/', 'ui' => ['label' => 'Account Status']],
                 'approval_status' => ['column' => 'su.approval_status', 'allowed' => self::workflowStatuses(), 'ui' => ['label' => 'Approval Status', 'options' => self::workflowOptions()]],
@@ -1563,6 +1567,8 @@ final class DataTableRegistry
             'columns' => [
                 self::col('Username', 'username', 'su.username', fn($r) => DataTableFormat::text($r['username'])),
                 self::col('Name','display_name','su.display_name',fn($r)=>DataTableFormat::text($r['display_name']?:$r['name_with_initials'],'Not recorded')),
+                self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'],'-')),
+                self::col('Designation','designation_name','d.name_en',fn($r)=>DataTableFormat::text($r['designation_name'],'-')),
                 self::col('Account Source','account_source',$source,fn($r)=>DataTableFormat::text($r['account_source'])),
                 self::col('Initial Role','initial_role',$initialRole,fn($r)=>DataTableFormat::text($r['initial_role'],'Not assigned')),
                 self::col('Assigned Location','initial_location',$initialLocation,fn($r)=>DataTableFormat::text($r['initial_location'],'Not assigned')),
@@ -1572,7 +1578,7 @@ final class DataTableRegistry
                 self::col('Requested At', 'requested_at', 'su.requested_at', fn($r) => DataTableFormat::dateTime($r['requested_at'] ?: $r['created_at']), fn($r) => substr((string)($r['requested_at'] ?: $r['created_at']), 0, 16)),
                 self::actionColumn(fn($r) => self::accountRequestActions($r)),
             ],
-            'defaultOrder' => [8, 'DESC'],
+            'defaultOrder' => [10, 'DESC'],
         ];
     }
 

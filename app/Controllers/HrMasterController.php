@@ -33,7 +33,7 @@ final class HrMasterController extends Controller
         $extraCols='';$extraVals=[];$marks='';
         if($type==='appointment-natures'){ $extraCols=', class_required'; $marks=', ?'; $extraVals[]=(int)!empty($_POST['class_required']); }
         if($type==='designations'){ $extraCols=', designation_level,parent_designation_id'; $marks=', ?,?'; $extraVals[]=$_POST['designation_level']??'MAIN'; $extraVals[]=($_POST['parent_designation_id']??'')?:null; }
-        $sql="INSERT INTO {$table} (id,dad_number,name_en,name_si,name_ta,description,display_order,system_key,active,effective_from,approval_status,created_by,created_at,submitted_by,submitted_at{$extraCols}) VALUES (UUID(),?,?,?,?,?,?,?, ?,1,?,'SUBMITTED',?,NOW(),?,NOW(){$marks})";
+        $sql="INSERT INTO {$table} (id,dad_number,name_en,name_si,name_ta,description,display_order,system_key,active,effective_from,approval_status,created_by,created_at,submitted_by,submitted_at{$extraCols}) VALUES (UUID(),?,?,?,?,?,?,?,1,?,'SUBMITTED',?,NOW(),?,NOW(){$marks})";
         $actor=(string)Auth::user()['id'];
         $vals=[$dad,$name,trim((string)($_POST['name_si']??''))?:null,trim((string)($_POST['name_ta']??''))?:null,trim((string)($_POST['description']??''))?:null,(int)($_POST['display_order']??100),strtoupper(preg_replace('/[^A-Z0-9]+/','_',strtoupper($name))),(string)($_POST['effective_from']??date('Y-m-d')),$actor,$actor,...$extraVals];
         Database::pdo()->prepare($sql)->execute($vals);
