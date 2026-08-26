@@ -35,12 +35,18 @@ final class DashboardCounterTest
             FROM system_user
         ")->fetchColumn();
 
+        $expectedOfficers=(int)$pdo->query("
+            SELECT COUNT(*)
+            FROM officer
+            WHERE approval_status='APPROVED'
+        ")->fetchColumn();
+
         $this->same($expectedActive,$counts['active_users'],'activated operational STAFF identities count as Active Users');
         $this->same($expectedHistorical,$counts['historical_users'],'remaining HISTORICAL identities count as Historical Users');
         $this->same($expectedTotal,$counts['total_user_identities'],'all system_user rows count as Total User Identities');
         $this->same($expectedActive+$expectedHistorical,$expectedTotal,'database identity population reconciles');
         $this->same($counts['active_users']+$counts['historical_users'],$counts['total_user_identities'],'dashboard identity population reconciles');
-        $this->same(6429,$counts['officers'],'verified consolidated Officer count remains unchanged');
+        $this->same($expectedOfficers,$counts['officers'],'dashboard counts every approved Officer');
 
         $admin=$pdo->query("SELECT identity_type,account_status,enabled FROM system_user WHERE username='dems.admin'")->fetch();
         $this->same(

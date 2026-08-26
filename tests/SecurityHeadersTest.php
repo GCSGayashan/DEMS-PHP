@@ -82,8 +82,13 @@ final class SecurityHeadersTest
 
     private function testInlineScripts(): void
     {
+        $scripts = 0;
+        $rocketLoaderExcluded = 0;
+        $external = 0;
+        $externalOptOutBeforeSource = 0;
         $inline = 0;
         $protected = 0;
+        $inlineOptOutBeforeNonce = 0;
         $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator(BASE_PATH . '/app/Views'));
         foreach ($iterator as $file) {
             if (!$file->isFile() || strtolower($file->getExtension()) !== 'php') {
@@ -92,17 +97,36 @@ final class SecurityHeadersTest
             $source = (string)file_get_contents($file->getPathname());
             preg_match_all('/<script\b([^>]*)>/i', $source, $tags, PREG_SET_ORDER);
             foreach ($tags as $tag) {
+                $scripts++;
+                $optOutPosition = stripos($tag[1], 'data-cfasync="false"');
+                if ($optOutPosition !== false) {
+                    $rocketLoaderExcluded++;
+                }
                 if (preg_match('/\bsrc\s*=/i', $tag[1]) === 1) {
+                    $external++;
+                    $sourcePosition = stripos($tag[1], 'src=');
+                    if ($optOutPosition !== false && $sourcePosition !== false && $optOutPosition < $sourcePosition) {
+                        $externalOptOutBeforeSource++;
+                    }
                     continue;
                 }
                 $inline++;
-                if (str_contains($tag[1], 'SecurityHeaders::nonce()')) {
+                $noncePosition = strpos($tag[1], 'SecurityHeaders::nonce()');
+                if ($noncePosition !== false) {
                     $protected++;
+                }
+                if ($optOutPosition !== false && $noncePosition !== false && $optOutPosition < $noncePosition) {
+                    $inlineOptOutBeforeNonce++;
                 }
             }
         }
+        $this->same(18, $scripts, 'all application script tags are inventoried');
+        $this->same($scripts, $rocketLoaderExcluded, 'every application script opts out of Cloudflare Rocket Loader');
+        $this->same(8, $external, 'all eight application-loaded external scripts are inventoried');
+        $this->same($external, $externalOptOutBeforeSource, 'external Rocket Loader opt-outs appear before src');
         $this->same(10, $inline, 'all ten application inline script blocks are inventoried');
         $this->same($inline, $protected, 'every inline script block uses the nonce helper');
+        $this->same($inline, $inlineOptOutBeforeNonce, 'inline Rocket Loader opt-outs preserve nonce placement');
         $this->same(0, $inline - $protected, 'no unprotected inline script remains');
     }
 
@@ -114,6 +138,7 @@ final class SecurityHeadersTest
         $login = (string)ob_get_clean();
         $this->same(true, str_contains($login, '<form method="post"'), 'login page still renders');
         $this->same(true, str_contains($login, 'name="_csrf"'), 'rendered login retains CSRF protection');
+        $this->same(true, str_contains($login, '<script data-cfasync="false" src='), 'authentication layout scripts opt out of Rocket Loader');
 
         $userId = (string)Database::pdo()->query("SELECT id FROM system_user WHERE enabled=1 AND account_status='ACTIVE' ORDER BY created_at LIMIT 1")->fetchColumn();
         $this->same(true, $userId !== '', 'an active account is available for read-only layout rendering');
@@ -127,6 +152,7 @@ final class SecurityHeadersTest
         $this->same(true, str_contains($admin, 'class="topbar"'), 'authenticated layout still renders');
         $this->same(true, str_contains($admin, 'assets/vendor/datatables/dataTables.min.js'), 'authenticated layout retains local DataTables assets');
         $this->same(true, str_contains($admin, 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3'), 'authenticated layout retains the permitted Bootstrap CDN');
+        $this->same(true, substr_count($admin, '<script data-cfasync="false" src=') === 7, 'all authenticated layout dependencies opt out of Rocket Loader');
         Auth::logout();
     }
 

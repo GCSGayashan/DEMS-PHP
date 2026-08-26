@@ -159,6 +159,8 @@ final class UserAccessManagementTest
         $activationView=(string)file_get_contents(dirname(__DIR__).'/app/Views/users/activate_operational.php');
         $this->same(true,str_contains($activationView,'assignment-locations'),'activation location choices use the bounded server-side lookup');
         $this->same(true,str_contains($activationView,"['FARMER','ARPA','ASC','DISTRICT','NATIONAL']"),'activation UI includes every operational hierarchy level');
+        $this->same(true,str_contains($activationView,'data-cfasync="false"')&&str_contains($activationView,'SecurityHeaders::nonce()'),'historical and operational activation JavaScript preserves CSP while opting out of Rocket Loader');
+        $this->same(true,str_contains($activationView,"check.addEventListener('change'")&&str_contains($activationView,'fetch(endpoint'),'role selection enables controls and requests authorized locations');
     }
 
     private function accountRequestCases(array $actors,string $system,string $checker,string $districtX,string $ascX,string $arpaX,string $ascY,string $arpaY):void
@@ -308,6 +310,7 @@ final class UserAccessManagementTest
         $this->same(true,str_contains($view,"hasRole=role.value!==''"),'manual account UI distinguishes an unselected role from Farmer');
         $this->same(true,str_contains($view,'staff=manual&&!farmer'),'manual account UI shows Officer fields before a role is selected');
         $this->same(false,str_contains($view,"staff=manual&&role.value!==''&&!farmer"),'manual account UI no longer waits for role selection before showing Officer fields');
+        $this->same(true,str_contains($view,'data-cfasync="false"')&&str_contains($view,'SecurityHeaders::nonce()'),'account location loader preserves CSP while opting out of Rocket Loader');
         $editController=(string)file_get_contents(dirname(__DIR__).'/app/Controllers/OfficerController.php');
         foreach(['full_name_en','date_of_birth','permanent_address','primary_mobile','photograph_path','primary_designation_id'] as $field)$this->same(true,str_contains($editController,$field),"existing Officer Edit workflow can complete {$field}");
     }
