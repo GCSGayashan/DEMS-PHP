@@ -82,6 +82,8 @@ final class UserAccountRequestService
         }
 
         return $this->transaction(function () use ($actorId, $source, $username, $passwordHash, $mfaMethod, $officerId, $displayName, $identityType, $roleId, $locationId, $effectiveFrom, $validated, $policy, $nic, $designationId, $officerStatusId): array {
+            $stage='CHECK_USERNAME_COLLISION';
+            try{
             $collision = $this->pdo->prepare('SELECT COUNT(*) FROM system_user WHERE username=? FOR UPDATE');
             $collision->execute([$username]);
             if ((int)$collision->fetchColumn() > 0) {
@@ -90,10 +92,12 @@ final class UserAccountRequestService
 
             // Revalidate role and geography inside the write transaction so a
             // stale browser selection cannot survive an authority change.
+            $stage='REVALIDATE_ROLE_AND_SCOPE';
             $validated = $policy->validateAccountRequestAssignment($actorId, $roleId, $locationId, $effectiveFrom);
             $officeAssignmentId = null;
 
             if ($source === self::SOURCE_OFFICER) {
+                $stage='LOAD_EXISTING_OFFICER';
                 $officer = $this->pdo->prepare("SELECT id,name_with_initials,nic FROM officer WHERE id=? AND approval_status='APPROVED' FOR UPDATE");
                 $officer->execute([$officerId]);
                 $officerRow = $officer->fetch();
@@ -108,6 +112,7 @@ final class UserAccountRequestService
                 $displayName = (string)$officerRow['name_with_initials'];
                 $nic = $officerRow['nic'];
             } elseif ($identityType === 'STAFF') {
+                $stage='CREATE_OFFICER_AND_OFFICE_ASSIGNMENT';
                 $created = $this->createOfficerAndOfficeAssignment(
                     $actorId,
                     $displayName,
@@ -121,6 +126,7 @@ final class UserAccountRequestService
                 $officeAssignmentId = $created['office_assignment_id'];
             }
 
+            $stage='CREATE_SYSTEM_USER';
             $userId = $this->uuid();
             $this->pdo->prepare("INSERT INTO system_user
                     (id,officer_id,identity_type,username,display_name,historical_identity,identity_source,password_hash,
@@ -129,6 +135,7 @@ final class UserAccountRequestService
                     VALUES(?,?,?,?,?,0,?,?,'REQUESTED','SUBMITTED',0,?,1,0,?,NOW(),?,NOW(),NOW())")
                 ->execute([$userId, $officerId, $identityType, $username, $displayName, $source, $passwordHash, $mfaMethod, $actorId, $actorId]);
 
+            $stage='CREATE_ROLE_AND_SCOPE_ASSIGNMENTS';
             $roleAssignmentId = $this->createInitialAssignment($actorId, $userId, $roleId, $effectiveFrom, $validated);
 
             $audit = [
@@ -145,6 +152,7 @@ final class UserAccountRequestService
                 'location_id' => $validated['location_id'] ?? null,
                 'effective_from' => $effectiveFrom,
             ];
+            $stage='AUDIT';
             $this->recordAudit($actorId, 'user.request', $userId, $audit);
             $this->recordAudit($actorId, 'user.submit', $userId, $audit);
             return [
@@ -153,6 +161,10 @@ final class UserAccountRequestService
                 'role_assignment_id' => $roleAssignmentId,
                 'office_assignment_id' => $officeAssignmentId,
             ];
+            }catch(Throwable $exception){
+                if($exception instanceof DomainException||$exception instanceof UserAccountRequestStageException)throw $exception;
+                throw new UserAccountRequestStageException($stage,$exception);
+            }
         });
     }
 

@@ -7,10 +7,18 @@ use DomainException;
 
 final class ArpaAppointmentRules
 {
+    public const NATIVE_HISTORY_BASELINE_DATE = '2025-01-01';
     public const PERMANENCIES = ['PERMANENT_IN_SERVICE', 'NOT_PERMANENT_IN_SERVICE'];
     public const APPOINTMENT_TYPES = ['PERMANENT', 'ACTING', 'DUTY_COVERING', 'ATTEND_TO_DUTY'];
     public const SUBJECT_KINDS = ['NORMAL', 'AGRARIAN_BANK', 'SALES_SHOP', 'SITHAMU'];
     public const EXCLUSIVE_SUBJECT_KINDS = ['AGRARIAN_BANK', 'SALES_SHOP', 'SITHAMU'];
+
+    public static function assertNativeEffectiveDate(string $effectiveFrom): void
+    {
+        $date=\DateTimeImmutable::createFromFormat('!Y-m-d',$effectiveFrom);
+        if(!$date||$date->format('Y-m-d')!==$effectiveFrom)throw new DomainException('Effective from must be a valid date.');
+        if($effectiveFrom<self::NATIVE_HISTORY_BASELINE_DATE)throw new DomainException('The appointment effective date cannot be before 01 January 2025.');
+    }
 
     public static function assertAppointmentTypeAllowed(string $permanency, string $type, bool $hasPermanent): void
     {

@@ -50,6 +50,7 @@ final class ArpaWorkflowQueueTest
             $read=new ArpaAppointmentReadService($this->pdo);$today=date('Y-m-d');
             $officers=$read->eligibleOfficersForAsc($this->asctest,$this->asc,$today);$divisions=$read->vacantDivisionsForAsc($this->asctest,$this->asc,$today);
             if($officers===[]||$divisions===[])throw new RuntimeException('Eligible Kurunegala Officer and vacant Division fixtures are required.');
+            $this->coverDivisionThroughYesterday((string)$officers[0]['id'],(string)$divisions[0]['id'],$today);
             $service=new ArpaAppointmentService($this->pdo);
             $request=$service->createDivisionAppointmentRequest(['officer_id'=>$officers[0]['id'],'appointment_type'=>'DUTY_COVERING','asc_location_id'=>$this->asc,'arpa_division_location_id'=>$divisions[0]['id'],'effective_from'=>$today,'remarks'=>'Transactional workflow queue test'],$this->asctest);
 
@@ -114,10 +115,10 @@ final class ArpaWorkflowQueueTest
             foreach(['RETURNED FOR CORRECTION','Workflow History','Stage / Level','Performed By','Reason / Comments','Unavailable from legacy source'] as $needle)$this->same(true,str_contains($detailTemplate,$needle),"returned request detail presents {$needle}");
 
             $ascCorrection=$this->actor('ASC_SUBJECT_OFFICER','ASC','EXACT',$this->asc);
-            $this->same(true,$policy->canCorrectReturnedRequest($ascCorrection,$this->asc,$today),'another authorized ASC Subject Officer can own correction in the same ASC scope');
+            $this->same(true,$policy->canCorrectReturnedRequest($ascCorrection,$this->asc),'another authorized ASC Subject Officer can own correction in the same ASC scope');
             $outsideAsc=(string)$this->scalar("SELECT l.id FROM location l JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ASC' WHERE l.id<>? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' LIMIT 1",[$this->asc]);
             $outsideCorrection=$this->actor('ASC_SUBJECT_OFFICER','ASC','EXACT',$outsideAsc);
-            $this->same(false,$policy->canCorrectReturnedRequest($outsideCorrection,$this->asc,$today),'ASC correction permission does not bypass geographic scope');
+            $this->same(false,$policy->canCorrectReturnedRequest($outsideCorrection,$this->asc),'ASC correction permission does not bypass geographic scope');
             $this->throws(fn()=>$service->workflow('division',$request,'SUBMIT','CREATOR','Out-of-scope attempt',$outsideCorrection),'out-of-scope ASC officer cannot resubmit by direct service call');
             $service->workflow('division',$request,'SUBMIT','CREATOR','Corrected and resubmitted',$ascCorrection);
             $this->same('SUBMITTED',(string)$this->scalar('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$request]),'resubmission starts a new review cycle on the original request');
@@ -192,6 +193,17 @@ final class ArpaWorkflowQueueTest
     private function historyOnlyRequest(string $officer,string $asc,string $division,string $creator,string $date):string
     {
         $id=$this->uuid();$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,legacy_exception,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'DUTY_COVERING',?,?,?,'SUBMITTED',1,1,?)")->execute([$id,$officer,$asc,$division,$date,$creator]);return $id;
+    }
+
+    private function coverDivisionThroughYesterday(string $officer,string $division,string $today):void
+    {
+        $location=$this->row('SELECT a.dad_number asc_dad,a.name_en asc_name,d.dad_number arpa_dad,d.name_en arpa_name FROM location a JOIN location d ON d.id=? WHERE a.id=?',[$division,$this->asc]);
+        $request=$this->uuid();$appointment=$this->uuid();
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,created_by,finalized_by,finalized_at) VALUES(?,'NATIVE','APPOINTMENT',?,'DUTY_COVERING',?,?,'2025-01-01','NATIONAL_APPROVED',?,?,NOW())")->execute([$request,$officer,$this->asc,$division,$this->asctest,$this->asctest]);
+        $permanency=(string)$this->scalar('SELECT arpa_service_permanency FROM officer WHERE id=?',[$officer]);
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment(id,record_origin,request_id,officer_id,appointment_type,service_permanency_snapshot,asc_location_id,arpa_division_location_id,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,'NATIVE',?,?,'DUTY_COVERING',?,?,?,?,?,?,?,'{}','2025-01-01',?,NOW())")->execute([$appointment,$request,$officer,$permanency,$this->asc,$division,$location['asc_dad'],$location['asc_name'],$location['arpa_dad'],$location['arpa_name'],$this->asctest]);
+        $reason=(string)$this->scalar('SELECT id FROM arpa_appointment_end_reason WHERE active=1 ORDER BY display_order,id LIMIT 1');
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,end_reason_id,closure_kind,context_snapshot_json,approved_by,approved_at) VALUES(UUID(),'NATIVE',?,?,?,?,'DIRECT','{}',?,NOW())")->execute([$appointment,$request,date('Y-m-d',strtotime($today.' -1 day')),$reason,$this->asctest]);
     }
 
     private function tableCount(array $definition):int{return (new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>10])))->response()['recordsFiltered'];}

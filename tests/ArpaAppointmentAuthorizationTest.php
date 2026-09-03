@@ -56,13 +56,13 @@ final class ArpaAppointmentAuthorizationTest
             $role->execute([$ascRole,$ascUser,'ASC_SUBJECT_OFFICER']);$role->execute([$districtRole,$districtUser,'DISTRICT_SUBJECT_OFFICER']);$role->execute([$nationalRole,$nationalUser,'NATIONAL_SUBJECT_OFFICER']);
             $scope=$this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active) VALUES(UUID(),?,?,?,?,?,CURRENT_DATE(),'APPROVED',1)");
             $scope->execute([$ascUser,$ascRole,'ASC','EXACT',$asc]);$scope->execute([$districtUser,$districtRole,'DISTRICT','INCLUDE_CHILDREN',$district]);
-            $this->same(true,ScopeService::canAccessArpaStage($ascUser,'ASC',$asc),'ASC scope permits its ASC stage');
-            $this->same(false,ScopeService::canAccessArpaStage($ascUser,'DISTRICT',$asc),'ASC scope cannot perform District stage');
-            $this->same(true,ScopeService::canAccessArpaStage($districtUser,'DISTRICT',$asc),'District scope permits child ASC');
-            $this->same(false,ScopeService::canAccessArpaStage($districtUser,'NATIONAL',$asc),'District scope cannot perform National stage');
-            $this->same(false,ScopeService::canAccessArpaStage($nationalUser,'NATIONAL',$asc),'National role identity without NATIONAL scope is denied');
+            $this->same(true,ScopeService::canAccessCurrentArpaStage($ascUser,'ASC',$asc),'ASC scope permits its ASC stage');
+            $this->same(false,ScopeService::canAccessCurrentArpaStage($ascUser,'DISTRICT',$asc),'ASC scope cannot perform District stage');
+            $this->same(true,ScopeService::canAccessCurrentArpaStage($districtUser,'DISTRICT',$asc),'District scope permits child ASC');
+            $this->same(false,ScopeService::canAccessCurrentArpaStage($districtUser,'NATIONAL',$asc),'District scope cannot perform National stage');
+            $this->same(false,ScopeService::canAccessCurrentArpaStage($nationalUser,'NATIONAL',$asc),'National role identity without NATIONAL scope is denied');
             $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active) VALUES(UUID(),?,?,'NATIONAL','NATIONAL',NULL,CURRENT_DATE(),'APPROVED',1)")->execute([$nationalUser,$nationalRole]);
-            $this->same(true,ScopeService::canAccessArpaStage($nationalUser,'NATIONAL',$asc),'NATIONAL scope permits National stage');
+            $this->same(true,ScopeService::canAccessCurrentArpaStage($nationalUser,'NATIONAL',$asc),'NATIONAL scope permits National stage');
         }finally{$this->pdo->rollBack();}
     }
     private function scalar(string $sql):int{return (int)$this->pdo->query($sql)->fetchColumn();}

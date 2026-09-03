@@ -35,11 +35,11 @@ final class ArpaWorkflowQueuePolicy
         return $this->profiles($userId)!==[];
     }
 
-    public function canCorrectReturnedRequest(string $userId,string $ascLocationId,?string $effectiveDate=null):bool
+    public function canCorrectReturnedRequest(string $userId,string $ascLocationId):bool
     {
         foreach($this->profiles($userId) as $profile){
             if($profile['permission']==='arpa.appointment.asc-verify'){
-                return ScopeService::canAccessArpaStage($userId,'ASC',$ascLocationId,$effectiveDate);
+                return ScopeService::canAccessCurrentArpaStage($userId,'ASC',$ascLocationId);
             }
         }
         return false;

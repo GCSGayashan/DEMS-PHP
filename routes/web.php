@@ -51,6 +51,7 @@ $router->post('/hr/officers/{id}/submit', [OfficerController::class, 'submit']);
 $router->post('/hr/officers/{id}/approve', [OfficerController::class, 'approve']);
 $router->get('/hr/arpa-appointments', [ArpaAppointmentController::class, 'dashboard']);
 $router->get('/hr/arpa-appointments/new', [ArpaAppointmentController::class, 'createDivision']);
+$router->get('/hr/arpa-appointments/new/options', [ArpaAppointmentController::class, 'divisionOptions']);
 $router->get('/hr/arpa-appointments/new/asc/{id}', [ArpaAppointmentController::class, 'newAppointmentsAsc']);
 $router->get('/hr/arpa-appointments/new/district/{id}', [ArpaAppointmentController::class, 'newAppointmentsDistrict']);
 $router->get('/hr/arpa-appointments/new/district/{districtId}/asc/{ascId}', [ArpaAppointmentController::class, 'newAppointmentsDistrictAsc']);

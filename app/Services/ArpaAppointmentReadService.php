@@ -10,7 +10,7 @@ use PDO;
 /** Shared operational read rules for ARPA appointment lists, selectors and diagnostics. */
 final class ArpaAppointmentReadService
 {
-    private const RESERVING_REQUEST_STATUSES = [
+    public const RESERVING_REQUEST_STATUSES = [
         'SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED',
     ];
     public const CURRENT_ACTION_ISSUES=[
@@ -66,28 +66,28 @@ final class ArpaAppointmentReadService
     /** @return array<int,array<string,mixed>> */
     public function eligibleOfficersForAsc(string $userId, string $ascLocationId, string $effectiveDate): array
     {
-        if (!ScopeService::canAccessArpaStage($userId, 'ASC', $ascLocationId, $effectiveDate)) return [];
+        if (!ScopeService::canAccessCurrentArpaStage($userId, 'ASC', $ascLocationId)) return [];
         $sql="SELECT DISTINCT o.id,o.dad_number,o.name_with_initials,o.nic,o.arpa_service_permanency
               FROM officer o
               JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER'
                 AND d.active=1 AND d.approval_status='APPROVED'
               JOIN officer_office_assignment oa ON oa.officer_id=o.id AND oa.active=1 AND oa.approval_status='APPROVED'
-                AND oa.effective_from<=? AND (oa.effective_to IS NULL OR oa.effective_to>=?)
+                AND oa.effective_from<=CURRENT_DATE() AND (oa.effective_to IS NULL OR oa.effective_to>=CURRENT_DATE())
               JOIN office ofc ON ofc.id=oa.office_id AND ofc.linked_location_id=?
                 AND ofc.approval_status='APPROVED' AND ofc.operational_status='ACTIVE'
-                AND ofc.effective_from<=? AND (ofc.effective_to IS NULL OR ofc.effective_to>=?)
+                AND ofc.effective_from<=CURRENT_DATE() AND (ofc.effective_to IS NULL OR ofc.effective_to>=CURRENT_DATE())
               JOIN office_type ot ON ot.id=ofc.office_type_id AND ot.system_key='ASC_OFFICE'
               WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE'
                 AND o.effective_from<=? AND (o.effective_to IS NULL OR o.effective_to>=?)
               ORDER BY o.name_with_initials,o.dad_number";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$effectiveDate,$effectiveDate,$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate]);
         return $this->withAppointmentTypeAvailability($stmt->fetchAll(),$effectiveDate);
     }
 
     /** @return array<int,array<string,mixed>> */
     public function vacantDivisionsForAsc(string $userId, string $ascLocationId, string $effectiveDate): array
     {
-        if (!ScopeService::canAccessArpaStage($userId, 'ASC', $ascLocationId, $effectiveDate)) return [];
+        if (!ScopeService::canAccessCurrentArpaStage($userId, 'ASC', $ascLocationId)) return [];
         $statuses=$this->reservingStatusSql();
         $sql="SELECT l.id,l.dad_number,l.name_en FROM location l JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
               JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION'
@@ -110,13 +110,13 @@ final class ArpaAppointmentReadService
     {
         $sql="SELECT COUNT(*) FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER'
               JOIN officer_office_assignment oa ON oa.officer_id=o.id AND oa.active=1 AND oa.approval_status='APPROVED'
-                AND oa.effective_from<=? AND (oa.effective_to IS NULL OR oa.effective_to>=?)
+                AND oa.effective_from<=CURRENT_DATE() AND (oa.effective_to IS NULL OR oa.effective_to>=CURRENT_DATE())
               JOIN office ofc ON ofc.id=oa.office_id AND ofc.linked_location_id=? AND ofc.approval_status='APPROVED' AND ofc.operational_status='ACTIVE'
-                AND ofc.effective_from<=? AND (ofc.effective_to IS NULL OR ofc.effective_to>=?)
+                AND ofc.effective_from<=CURRENT_DATE() AND (ofc.effective_to IS NULL OR ofc.effective_to>=CURRENT_DATE())
               JOIN office_type ot ON ot.id=ofc.office_type_id AND ot.system_key='ASC_OFFICE'
               WHERE o.id=? AND o.approval_status='APPROVED' AND o.operational_status='ACTIVE'
                 AND o.effective_from<=? AND (o.effective_to IS NULL OR o.effective_to>=?)";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$effectiveDate,$effectiveDate,$ascLocationId,$effectiveDate,$effectiveDate,$officerId,$effectiveDate,$effectiveDate]);
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$officerId,$effectiveDate,$effectiveDate]);
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Officer does not have an approved current assignment to the selected ASC Office.');
     }
 

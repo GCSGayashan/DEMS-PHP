@@ -122,9 +122,9 @@ final class SecurityHeadersTest
         }
         $this->same(18, $scripts, 'all application script tags are inventoried');
         $this->same($scripts, $rocketLoaderExcluded, 'every application script opts out of Cloudflare Rocket Loader');
-        $this->same(8, $external, 'all eight application-loaded external scripts are inventoried');
+        $this->same(9, $external, 'all nine application-loaded external scripts are inventoried');
         $this->same($external, $externalOptOutBeforeSource, 'external Rocket Loader opt-outs appear before src');
-        $this->same(10, $inline, 'all ten application inline script blocks are inventoried');
+        $this->same(9, $inline, 'all nine application inline script blocks are inventoried');
         $this->same($inline, $protected, 'every inline script block uses the nonce helper');
         $this->same($inline, $inlineOptOutBeforeNonce, 'inline Rocket Loader opt-outs preserve nonce placement');
         $this->same(0, $inline - $protected, 'no unprotected inline script remains');

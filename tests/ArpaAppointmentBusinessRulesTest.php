@@ -30,12 +30,22 @@ final class ArpaAppointmentBusinessRulesTest
         $officers=$this->pdo->query("SELECT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER'
             WHERE NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.officer_id=o.id)
               AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.officer_id=o.id AND r.workflow_status IN('SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'))
-            ORDER BY o.id LIMIT 2 FOR UPDATE")->fetchAll(PDO::FETCH_COLUMN);
-        if(count($officers)<2)throw new RuntimeException('Two unused ARPA Officer fixtures are required.');
-        [$permanentOfficer,$nonPermanentOfficer]=array_map('strval',$officers);
+            ORDER BY o.id LIMIT 3 FOR UPDATE")->fetchAll(PDO::FETCH_COLUMN);
+        if(count($officers)<3)throw new RuntimeException('Three unused ARPA Officer fixtures are required.');
+        [$permanentOfficer,$nonPermanentOfficer,$coverageOfficer]=array_map('strval',$officers);
         $this->pdo->prepare("UPDATE officer SET arpa_service_permanency='PERMANENT_IN_SERVICE' WHERE id=?")->execute([$permanentOfficer]);
         $this->pdo->prepare("UPDATE officer SET arpa_service_permanency='NOT_PERMANENT_IN_SERVICE' WHERE id=?")->execute([$nonPermanentOfficer]);
+        $this->pdo->prepare("UPDATE officer SET arpa_service_permanency='PERMANENT_IN_SERVICE' WHERE id=?")->execute([$coverageOfficer]);
         foreach($officers as $officer)$this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,approval_status,active,reason,created_by,submitted_by,submitted_at,approved_by,approved_at) VALUES(UUID(),?,?,?,'APPROVED',1,'ARPA business-rule test',?,?,NOW(),?,NOW())")->execute([$officer,$office,$pastStart,$actor,$actor,$actor]);
+
+        // These tests exercise Officer/type rules at today's date. Give each
+        // synthetic Division continuous authoritative coverage through yesterday
+        // so the independent Division-continuity rule is also satisfied.
+        $yesterday=date('Y-m-d',strtotime($today.' -1 day'));
+        foreach($divisions as $division){
+            $coverage=$this->createApprovedAppointment($coverageOfficer,'DUTY_COVERING',$asc,$division,'2025-01-01',$actor);
+            $this->closeAppointment($coverage,$yesterday,$actor);
+        }
 
         $service=new ArpaAppointmentService($this->pdo);$read=new ArpaAppointmentReadService($this->pdo);
         $this->same(['PERMANENT'],$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],'Permanent-in-Service officer without a foundation may only receive Permanent');

@@ -13,7 +13,7 @@ $step=match($status){
     'DISTRICT_APPROVED'=>['VERIFY','NATIONAL','arpa.appointment.national-verify','National Verify'],
     'NATIONAL_VERIFIED'=>['APPROVE','NATIONAL','arpa.appointment.national-approve','Final Approve'],default=>null};
 $actor=(string)(Auth::user()['id']??'');
-$canCorrectReturned=$status==='RETURNED'&&(new ArpaWorkflowQueuePolicy(\App\Core\Database::pdo()))->canCorrectReturnedRequest($actor,(string)$request['asc_location_id'],(string)($request['requested_effective_from']?:date('Y-m-d')));
+$canCorrectReturned=$status==='RETURNED'&&(new ArpaWorkflowQueuePolicy(\App\Core\Database::pdo()))->canCorrectReturnedRequest($actor,(string)$request['asc_location_id']);
 $canPrimary=$step&&Auth::can($step[2])&&($step[0]!=='SUBMIT'||($status==='CREATED'?$actor===(string)$request['created_by']:$canCorrectReturned));
 $reviewStage=ArpaAppointmentRules::isReviewStatus($status)?ArpaAppointmentRules::reviewStage($status):null;
 $stageRolePermission=match($status){'SUBMITTED'=>'arpa.appointment.asc-verify','ASC_VERIFIED'=>'arpa.appointment.asc-approve','ASC_APPROVED'=>'arpa.appointment.district-verify','DISTRICT_VERIFIED'=>'arpa.appointment.district-approve','DISTRICT_APPROVED'=>'arpa.appointment.national-verify','NATIONAL_VERIFIED'=>'arpa.appointment.national-approve',default=>null};

@@ -3,8 +3,9 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,CredentialService,Database,Csrf,Audit,DataTableRegistry,ScopeService};
-use App\Services\{OperationalUserActivationService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{OperationalUserActivationService,UserAccessManagementService,UserAccountRequestService,UserAccountRequestStageException};
 use DomainException;
+use PDOException;
 use Throwable;
 
 final class UserManagementController extends Controller
@@ -110,8 +111,8 @@ final class UserManagementController extends Controller
             (new UserAccountRequestService(Database::pdo()))->request((string)Auth::user()['id'],$_POST);
             $this->flash('success','User request submitted.');
         }catch(Throwable $e){
-            error_log('User account request failed: '.get_class($e));
-            $this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to submit the user request.');redirect('/access-management/users');
+            $this->logUserAccountRequestFailure($e);
+            $this->flash('danger',$this->userAccountRequestBrowserMessage($e));redirect('/access-management/users');
         }
         redirect('/access-management/account-requests');
     }
@@ -207,6 +208,42 @@ final class UserManagementController extends Controller
         $replacement=null;if(!empty($_GET['replace'])){$replaceId=(string)$_GET['replace'];$this->authorize(fn()=>$policy->assertCanManageRoleAssignment($actor,$replaceId));$stmt=$pdo->prepare('SELECT uar.id,uar.user_id,su.username,su.display_name,r.role_name,r.role_code,uar.effective_from FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.id=?');$stmt->execute([$replaceId]);$replacement=$stmt->fetch()?:null;}
         $dataTable=DataTableRegistry::viewModel('role-assignments',[],['role'=>$roleOptions]);
         $this->render('users/role_assignments',compact('dataTable','users','roles','roleGroups','replacement'));
+    }
+
+    private function userAccountRequestBrowserMessage(Throwable $exception):string
+    {
+        return $exception instanceof DomainException
+            ? $exception->getMessage()
+            : 'Unable to submit the user request.';
+    }
+
+    private function logUserAccountRequestFailure(Throwable $exception):void
+    {
+        $stage=null;
+        $diagnostic=$exception;
+        if($exception instanceof UserAccountRequestStageException){
+            $stage=$exception->stage;
+            $diagnostic=$exception->getPrevious()??$exception;
+        }
+
+        $parts=[
+            'User account request failed:',
+            'class='.get_class($diagnostic),
+            'code='.$this->singleLineLogValue($diagnostic->getCode()),
+            'message='.$this->singleLineLogValue($diagnostic->getMessage()),
+        ];
+        if($stage!==null)$parts[]='stage='.$this->singleLineLogValue($stage);
+        if($diagnostic instanceof PDOException&&is_array($diagnostic->errorInfo)){
+            if(isset($diagnostic->errorInfo[0]))$parts[]='sqlstate='.$this->singleLineLogValue($diagnostic->errorInfo[0]);
+            if(isset($diagnostic->errorInfo[1]))$parts[]='driver_code='.$this->singleLineLogValue($diagnostic->errorInfo[1]);
+        }
+        error_log(implode(' ',$parts));
+    }
+
+    private function singleLineLogValue(mixed $value):string
+    {
+        $value=str_replace(["\r","\n","\t"],' ',(string)$value);
+        return preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/','',$value)??'';
     }
 
     public function assignRole(): void

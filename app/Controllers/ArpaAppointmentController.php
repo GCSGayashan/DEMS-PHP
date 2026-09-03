@@ -3,9 +3,10 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
-use App\Core\{Auth, Controller, Csrf, Database, DataTableRegistry, ScopeService};
+use App\Core\{Auth, AuthorizationException, Controller, Csrf, Database, DataTableFormat, DataTableRegistry, DataTableResponse, ScopeService};
 use App\Services\ArpaAppointmentService;
 use App\Services\ArpaAppointmentCandidateService;
+use App\Services\ArpaAppointmentFormOptionsService;
 use App\Services\ArpaAppointmentReadService;
 use App\Services\ArpaAppointmentDataIssueCorrectionService;
 use App\Services\ArpaWorkflowQueuePolicy;
@@ -402,14 +403,73 @@ final class ArpaAppointmentController extends Controller
         }
         $selectedAsc=$ascContext===null?trim((string)($_GET['asc_location_id']??'')):(string)$ascContext['location_id'];
         $effectiveDate=trim((string)($_GET['effective_from']??date('Y-m-d')));
-        if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$effectiveDate))$effectiveDate=date('Y-m-d');
-        if($selectedAsc!=='')$this->assertArpaStageScope('ASC',$selectedAsc,$effectiveDate);
-        $this->render('arpa_appointments/division_form',$this->divisionFormOptions($selectedAsc,$effectiveDate,$systemContext)+[
+        try {
+            \App\Services\ArpaAppointmentRules::assertNativeEffectiveDate($effectiveDate);
+            if($selectedAsc!=='')$this->assertArpaStageScope('ASC',$selectedAsc);
+            $options=$this->divisionFormOptions($selectedAsc,$effectiveDate,$systemContext,$this->requestedDivisionSelection());
+        } catch (AuthorizationException $exception) {
+            throw $exception;
+        } catch (DomainException $exception) {
+            error_log('ARPA appointment date refresh failed: '.$exception->getMessage());
+            $this->flash('danger',$exception->getMessage());
+            redirect('/hr/arpa-appointments/new');
+        }
+        $this->render('arpa_appointments/division_form',$options+[
             'selectedAsc'=>$selectedAsc,
             'effectiveDate'=>$effectiveDate,
             'ascDerivedFromContext'=>$ascContext!==null,
             'activeAsc'=>$ascContext,
         ]);
+    }
+
+    public function divisionOptions(): void
+    {
+        Auth::requirePermission('arpa.appointment.create');
+        try {
+            $ascContext=$this->activeAscCreationContext();
+            $systemContext=$this->isSystemCreationContext();
+            if($ascContext===null&&!$systemContext){
+                DataTableResponse::send(['error'=>'Select an authorized Agrarian Service Center working context.'],403);
+            }
+            $ascId=$ascContext===null?trim((string)($_GET['asc_location_id']??'')):(string)$ascContext['location_id'];
+            $businessDate=trim((string)($_GET['effective_from']??''));
+            if($ascId==='')throw new DomainException('Select an Agrarian Service Center.');
+            $this->assertArpaStageScope('ASC',$ascId);
+            $options=$this->divisionFormOptions($ascId,$businessDate,false,$this->requestedDivisionSelection());
+            DataTableResponse::send([
+                'effective_from'=>$businessDate,
+                'asc_location_id'=>$ascId,
+                'officers'=>array_map(static fn(array $row):array=>[
+                    'id'=>(string)$row['id'],
+                    'label'=>(string)$row['dad_number'].' - '.((string)($row['name_with_initials']?:'Unnamed')).' ['.DataTableFormat::enumLabel($row['arpa_service_permanency'],'Permanency not set').']',
+                    'allowed_appointment_types'=>array_values((array)($row['allowed_appointment_types']??[])),
+                ],$options['officers']),
+                'arpa_divisions'=>array_map(static fn(array $row):array=>[
+                    'id'=>(string)$row['id'],
+                    'label'=>(string)$row['dad_number'].' - '.(string)$row['name_en'],
+                    'required_next_start'=>$row['required_next_start']??null,
+                    'last_covered_through'=>$row['last_covered_through']??null,
+                    'continuity_relation'=>$row['relation']??null,
+                    'gap_end'=>$row['gap_end']??null,
+                ],$options['arpaDivisions']),
+                'selection'=>[
+                    'officer_id'=>$options['selectedOfficer'],
+                    'arpa_division_location_id'=>$options['selectedDivision'],
+                    'appointment_type'=>$options['selectedAppointmentType'],
+                    'blocking_data_issue'=>$options['continuityIssue'],
+                ],
+                'messages'=>$options['selectionMessages'],
+                'display_date'=>$options['displayDate'],
+            ]);
+        } catch (AuthorizationException $exception) {
+            error_log('Unauthorized ARPA appointment option request: '.$exception->getMessage());
+            DataTableResponse::send(['error'=>'The requested Agrarian Service Center is outside your current Active Working Context.'],403);
+        } catch (DomainException $exception) {
+            DataTableResponse::send(['error'=>$exception->getMessage()],422);
+        } catch (Throwable $exception) {
+            error_log('ARPA appointment option refresh failed: '.$exception->getMessage());
+            DataTableResponse::send(['error'=>'Unable to refresh appointment options.'],500);
+        }
     }
 
     public function storeDivision(): void
@@ -425,7 +485,7 @@ final class ArpaAppointmentController extends Controller
                 if(!$this->isSystemCreationContext())throw new DomainException('Select an Agrarian Service Center working context before creating an assignment.');
                 $ascId=$submittedAsc;
             }
-            $this->assertArpaStageScope('ASC',$ascId,(string)($data['effective_from']??''));
+            $this->assertArpaStageScope('ASC',$ascId);
             $service->createAndSubmitDivisionAppointmentRequest($data,$actor);
             $this->flash('success','Assignment submitted successfully.');
         },'/hr/arpa-appointments/new','/hr/arpa-appointments/submitted');
@@ -440,7 +500,7 @@ final class ArpaAppointmentController extends Controller
 
     public function divisionDetail(string $id):void
     {
-        Auth::requirePermission('arpa.appointment.view');$record=$this->divisionRecord($id);$this->assertLocationScope((string)$record['asc_location_id'],(string)$record['effective_from']);
+        Auth::requirePermission('arpa.appointment.view');$record=$this->divisionRecord($id);$this->assertLocationScope((string)$record['asc_location_id']);
         $pdo=Database::pdo();$stmt=$pdo->prepare('SELECT c.*,er.name_en end_reason FROM arpa_division_appointment_closure c LEFT JOIN arpa_appointment_end_reason er ON er.id=c.end_reason_id WHERE c.appointment_id=?');$stmt->execute([$id]);$closure=$stmt->fetch()?:null;
         $stmt=$pdo->prepare('SELECT r.*,creator.username creator_name,finalizer.username finalizer_name FROM arpa_division_appointment_request r LEFT JOIN system_user creator ON creator.id=r.created_by LEFT JOIN system_user finalizer ON finalizer.id=r.finalized_by WHERE r.id=?');$stmt->execute([$record['request_id']]);$request=$stmt->fetch()?:[];
         $corrections=$this->dataIssueCorrectionService()->correctionsForAppointment($id);
@@ -460,7 +520,7 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.subject.create'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor):void {
             $asc=(string)($_POST['asc_location_id']??'');
-            $this->assertArpaStageScope('ASC',$asc,(string)($_POST['effective_from']??''));
+            $this->assertArpaStageScope('ASC',$asc);
             $service->createAndSubmitSubjectAssignmentRequest($_POST,$actor);
             $this->flash('success','Assignment submitted successfully.');
         },'/hr/arpa-appointments/subjects/create','/hr/arpa-appointments/submitted');
@@ -477,10 +537,10 @@ final class ArpaAppointmentController extends Controller
         $table=$entity==='subject'?'arpa_subject_assignment_request':'arpa_division_appointment_request';$s=Database::pdo()->prepare("SELECT * FROM {$table} WHERE id=?");$s->execute([$id]);$request=$s->fetch();
         $actor=(string)Auth::user()['id'];$editable=$request&&in_array($request['workflow_status'],['CREATED','RETURNED'],true)&&(
             ($request['workflow_status']==='CREATED'&&(string)$request['created_by']===$actor)
-            ||($request['workflow_status']==='RETURNED'&&(new ArpaWorkflowQueuePolicy(Database::pdo()))->canCorrectReturnedRequest($actor,(string)$request['asc_location_id'],(string)($request['requested_effective_from']?:date('Y-m-d'))))
+            ||($request['workflow_status']==='RETURNED'&&(new ArpaWorkflowQueuePolicy(Database::pdo()))->canCorrectReturnedRequest($actor,(string)$request['asc_location_id']))
         );
         if(!$editable){http_response_code(403);$this->render('partials/forbidden',['permission'=>'ASC correction ownership and scope']);return;}
-        $this->assertArpaStageScope('ASC',(string)$request['asc_location_id'],(string)($request['requested_effective_from']?:date('Y-m-d')));
+        $this->assertArpaStageScope('ASC',(string)$request['asc_location_id']);
         $data=$this->formOptions()+['request'=>$request,'entity'=>$entity,'reasons'=>$this->endReasons()];
         $data['subjects']=Database::pdo()->query("SELECT * FROM subject_master WHERE active=1 AND approval_status='APPROVED' ORDER BY name_en")->fetchAll();
         $this->render('arpa_appointments/request_edit',$data);
@@ -490,7 +550,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.view');$division=$entity==='division';$table=$division?'arpa_division_appointment_request':'arpa_subject_assignment_request';$history=$division?'arpa_appointment_workflow_action':'arpa_subject_workflow_action';
         $s=Database::pdo()->prepare("SELECT r.*,o.dad_number officer_number,o.name_with_initials officer_name FROM {$table} r JOIN officer o ON o.id=r.officer_id WHERE r.id=?");$s->execute([$id]);$request=$s->fetch();if(!$request){http_response_code(404);$this->flash('danger','Request was not found.');redirect('/hr/arpa-appointments/pending');}
-        $location=$this->requestLocation($entity,$id);if($location)$this->assertLocationScope($location,date('Y-m-d'));
+        $location=$this->requestLocation($entity,$id);if($location)$this->assertLocationScope($location);
         $s=Database::pdo()->prepare("SELECT w.*,COALESCE(NULLIF(u.display_name,''),u.username) performed_by,u.username FROM {$history} w JOIN system_user u ON u.id=w.user_id WHERE w.request_id=? ORDER BY w.id");$s->execute([$id]);$workflowHistory=$s->fetchAll();
         $s=Database::pdo()->prepare('SELECT sr.*,u.username updated_by_name FROM arpa_appointment_stage_review sr JOIN system_user u ON u.id=sr.updated_by WHERE sr.entity_type=? AND sr.request_id=? ORDER BY FIELD(sr.review_stage,\'DISTRICT\',\'NATIONAL\')');$s->execute([strtoupper($entity),$id]);$stageReviews=$s->fetchAll();
         $impact=json_decode((string)($request['impact_snapshot_json']??'[]'),true);if(!is_array($impact))$impact=[];
@@ -500,14 +560,14 @@ final class ArpaAppointmentController extends Controller
     public function updateRequest(string $entity,string $id):void
     {
         Auth::requirePermission($entity==='subject'?'arpa.subject.create':'arpa.appointment.edit');Csrf::validate();
-        $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id):void{$asc=(string)($_POST['asc_location_id']??'');$date=(string)($_POST['effective_from']??$_POST['new_effective_from']??$_POST['effective_to']??date('Y-m-d'));if($asc===''){$request=$this->workflowRequest($entity,$id);$asc=(string)$request['asc_location_id'];}$this->assertArpaStageScope('ASC',$asc,$date);$service->updateAndResubmitRequest($entity,$id,$_POST,$actor);$this->flash('success','Assignment corrected and resubmitted successfully.');},'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/edit','/hr/arpa-appointments/submitted');
+        $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id):void{$asc=(string)($_POST['asc_location_id']??'');if($asc===''){$request=$this->workflowRequest($entity,$id);$asc=(string)$request['asc_location_id'];}$this->assertArpaStageScope('ASC',$asc);$service->updateAndResubmitRequest($entity,$id,$_POST,$actor);$this->flash('success','Assignment corrected and resubmitted successfully.');},'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/edit','/hr/arpa-appointments/submitted');
     }
 
     public function editStageReview(string $entity,string $id,string $stage):void
     {
         $stage=strtoupper($stage);$permission=$this->stageReviewEditPermission($stage);Auth::requirePermission($permission);
         $request=$this->workflowRequest($entity,$id);$this->assertStageReviewStatus($stage,(string)$request['workflow_status']);
-        $this->assertArpaStageScope($stage,(string)$request['asc_location_id'],(string)($request['requested_effective_from']?:date('Y-m-d')));
+        $this->assertArpaStageScope($stage,(string)$request['asc_location_id']);
         $s=Database::pdo()->prepare('SELECT * FROM arpa_appointment_stage_review WHERE entity_type=? AND request_id=? AND review_stage=?');$s->execute([strtoupper($entity),$id,$stage]);$review=$s->fetch()?:null;
         $this->render('arpa_appointments/stage_review_form',compact('entity','request','review','stage'));
     }
@@ -517,7 +577,7 @@ final class ArpaAppointmentController extends Controller
         $stage=strtoupper($stage);Auth::requirePermission($this->stageReviewEditPermission($stage));Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id,$stage):void{
             $request=$this->workflowRequest($entity,$id);$this->assertStageReviewStatus($stage,(string)$request['workflow_status']);
-            $this->assertArpaStageScope($stage,(string)$request['asc_location_id'],(string)($request['requested_effective_from']?:date('Y-m-d')));
+            $this->assertArpaStageScope($stage,(string)$request['asc_location_id']);
             $service->saveStageReview($entity,$id,$stage,$_POST['review_information']??null,$_POST['remarks']??null,$actor);
             $this->flash('success',ucfirst(strtolower($stage)).' review information saved and audited.');
         },'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/review/'.strtolower($stage),'/hr/arpa-appointments/requests/'.$entity.'/'.$id);
@@ -535,7 +595,7 @@ final class ArpaAppointmentController extends Controller
         }
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($entity,$id,$action,$stage):void {
             $request=$this->workflowRequest($entity,$id);$location=(string)($request['asc_location_id']??'');
-            if($location) $this->assertArpaStageScope($stage==='CREATOR'?'ASC':$stage,$location,(string)($request['requested_effective_from']?:date('Y-m-d')));
+            if($location) $this->assertArpaStageScope($stage==='CREATOR'?'ASC':$stage,$location);
             $new=$service->workflow($entity,$id,strtoupper($action),$stage,$_POST['comments']??null,$actor);
             $this->flash('success','Workflow action completed. New status: '.$new.'.');
         },'/hr/arpa-appointments/submitted',strtoupper($action)==='SUBMIT'?'/hr/arpa-appointments/submitted':'/hr/arpa-appointments/approval');
@@ -544,7 +604,7 @@ final class ArpaAppointmentController extends Controller
     public function endDivision(string $id): void
     {
         Auth::requirePermission('arpa.appointment.end');
-        $appointment=$this->divisionRecord($id); $this->assertArpaStageScope('ASC',(string)$appointment['asc_location_id'],date('Y-m-d'));
+        $appointment=$this->divisionRecord($id); $this->assertArpaStageScope('ASC',(string)$appointment['asc_location_id']);
         $this->render('arpa_appointments/end_form',['record'=>$appointment,'entity'=>'division','reasons'=>$this->endReasons(),'dependentCount'=>$this->dependentCount($appointment)]);
     }
 
@@ -552,7 +612,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.end'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
-            $record=$this->divisionRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id'],(string)($_POST['effective_to']??''));
+            $record=$this->divisionRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id']);
             $service->createAndSubmitEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
             $this->flash('success','Assignment ending submitted. Dependent appointments will be closed as separate historical events after final approval.');
         },'/hr/arpa-appointments/divisions/'.$id.'/end','/hr/arpa-appointments/submitted');
@@ -561,7 +621,7 @@ final class ArpaAppointmentController extends Controller
     public function transfer(string $id): void
     {
         Auth::requirePermission('arpa.appointment.transfer');
-        $record=$this->divisionRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id'],date('Y-m-d'));
+        $record=$this->divisionRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id']);
         if($record['appointment_type']!=='PERMANENT') throw new DomainException('Only a Permanent appointment can be transferred.');
         $data=$this->formOptions()+['record'=>$record,'reasons'=>$this->endReasons(),'dependentCount'=>$this->dependentCount($record)];
         $this->render('arpa_appointments/transfer_form',$data);
@@ -571,7 +631,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.transfer'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
-            $this->assertArpaStageScope('ASC',(string)($_POST['asc_location_id']??''),(string)($_POST['new_effective_from']??''));
+            $this->assertArpaStageScope('ASC',(string)($_POST['asc_location_id']??''));
             $service->createAndSubmitTransferRequest($id,(string)($_POST['asc_location_id']??''),(string)($_POST['arpa_division_location_id']??''),(string)($_POST['old_effective_to']??''),(string)($_POST['new_effective_from']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
             $this->flash('success','Transfer submitted successfully.');
         },'/hr/arpa-appointments/divisions/'.$id.'/transfer','/hr/arpa-appointments/submitted');
@@ -580,7 +640,7 @@ final class ArpaAppointmentController extends Controller
     public function endSubject(string $id): void
     {
         Auth::requirePermission('arpa.subject.end');
-        $record=$this->subjectRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id'],date('Y-m-d'));
+        $record=$this->subjectRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id']);
         $this->render('arpa_appointments/end_form',['record'=>$record,'entity'=>'subject','reasons'=>$this->endReasons(),'dependentCount'=>0]);
     }
 
@@ -588,7 +648,7 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.subject.end'); Csrf::validate();
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
-            $record=$this->subjectRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id'],(string)($_POST['effective_to']??''));
+            $record=$this->subjectRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id']);
             $service->createAndSubmitSubjectEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
             $this->flash('success','Subject assignment ending submitted successfully.');
         },'/hr/arpa-appointments/subjects/'.$id.'/end','/hr/arpa-appointments/submitted');
@@ -621,10 +681,22 @@ final class ArpaAppointmentController extends Controller
         return ['officers'=>$this->appointmentCandidateOptions(),'ascs'=>$this->locations('ASC'),'arpaDivisions'=>$this->locations('ARPA_DIVISION')];
     }
 
-    private function divisionFormOptions(string $ascId,string $effectiveDate,bool $includeAscOptions=false):array
+    /** @param array{officer_id?:string,arpa_division_location_id?:string,appointment_type?:string} $requestedSelection */
+    private function divisionFormOptions(string $ascId,string $effectiveDate,bool $includeAscOptions=false,array $requestedSelection=[]):array
     {
-        $read=new ArpaAppointmentReadService(Database::pdo());$userId=(string)Auth::user()['id'];
-        return ['officers'=>$ascId===''?[]:(new ArpaAppointmentCandidateService(Database::pdo()))->optionsForAsc($userId,$ascId,$effectiveDate),'ascs'=>$includeAscOptions?$this->locations('ASC'):[],'arpaDivisions'=>$ascId===''?[]:$read->vacantDivisionsForAsc($userId,$ascId,$effectiveDate)];
+        $empty=['officers'=>[],'arpaDivisions'=>[],'selectedOfficer'=>'','selectedDivision'=>'','selectedAppointmentType'=>'','selectionMessages'=>[],'displayDate'=>$effectiveDate,'continuityIssue'=>null];
+        $options=$ascId===''?$empty:(new ArpaAppointmentFormOptionsService(Database::pdo()))->load((string)Auth::user()['id'],$ascId,$effectiveDate,$requestedSelection);
+        return $options+['ascs'=>$includeAscOptions?$this->locations('ASC'):[]];
+    }
+
+    /** @return array{officer_id:string,arpa_division_location_id:string,appointment_type:string} */
+    private function requestedDivisionSelection():array
+    {
+        return [
+            'officer_id'=>trim((string)($_GET['officer_id']??'')),
+            'arpa_division_location_id'=>trim((string)($_GET['arpa_division_location_id']??'')),
+            'appointment_type'=>trim((string)($_GET['appointment_type']??'')),
+        ];
     }
 
     private function activeAscCreationContext():?array
@@ -906,7 +978,7 @@ final class ArpaAppointmentController extends Controller
     private function reviewActionPermission(string $action,string $status):?string{return match([$action,$status]){['RETURN_FOR_CORRECTION','SUBMITTED'],['REJECT','SUBMITTED']=>'arpa.appointment.asc-verify',['RETURN_FOR_CORRECTION','ASC_VERIFIED'],['REJECT','ASC_VERIFIED']=>'arpa.appointment.asc-approve',['RETURN_FOR_CORRECTION','ASC_APPROVED'],['REJECT','ASC_APPROVED']=>'arpa.appointment.district-verify',['RETURN_FOR_CORRECTION','DISTRICT_VERIFIED'],['REJECT','DISTRICT_VERIFIED']=>'arpa.appointment.district-approve',['RETURN_FOR_CORRECTION','DISTRICT_APPROVED'],['REJECT','DISTRICT_APPROVED']=>'arpa.appointment.national-verify',['RETURN_FOR_CORRECTION','NATIONAL_VERIFIED'],['REJECT','NATIONAL_VERIFIED']=>'arpa.appointment.national-approve',default=>in_array($action,['RETURN_FOR_CORRECTION','REJECT'],true)?'__invalid_stage__':null};}
     private function workflowRequest(string $entity,string $id):array{if(!in_array($entity,['division','subject'],true))throw new DomainException('Unsupported workflow entity.');$table=$entity==='division'?'arpa_division_appointment_request':'arpa_subject_assignment_request';$s=Database::pdo()->prepare("SELECT * FROM {$table} WHERE id=?");$s->execute([$id]);$request=$s->fetch();if(!$request)throw new DomainException('Workflow request was not found.');return $request;}
     private function assertOfficerScope(string $officerId):void{$u=Auth::user();if(!$u)throw new DomainException('Authentication required.');if(!ScopeService::canAccessOfficer((string)$u['id'],$officerId))throw new DomainException('This ARPA officer is outside your current authorized geographic scope.');}
-    private function assertLocationScope(string $locationId,string $date):void{$u=Auth::user();if(!$u)throw new DomainException('Authentication required.');if(!ScopeService::requiresGeographicRestriction((string)$u['id']))return;$scopeDate=preg_match('/^\d{4}-\d{2}-\d{2}$/',$date)?$date:date('Y-m-d');if(!ScopeService::canAccessLocation((string)$u['id'],$locationId,$scopeDate))throw new DomainException('The selected location is outside your authorized geographic scope.');}
-    private function assertArpaStageScope(string $stage,string $ascLocationId,string $date):void{$u=Auth::user();if(!$u)throw new DomainException('Authentication required.');$scopeDate=preg_match('/^\d{4}-\d{2}-\d{2}$/',$date)?$date:date('Y-m-d');if(!ScopeService::canAccessArpaStage((string)$u['id'],$stage,$ascLocationId,$scopeDate))throw new DomainException("The request is outside your authorized {$stage} scope.");}
+    private function assertLocationScope(string $locationId):void{$u=Auth::user();if(!$u)throw new AuthorizationException('Authentication is required.','an authenticated user');if(!ScopeService::requiresGeographicRestriction((string)$u['id']))return;if(!ScopeService::canAccessLocation((string)$u['id'],$locationId))throw new AuthorizationException('The selected location is outside your current authorized geographic scope.','your current Active Working Context');}
+    private function assertArpaStageScope(string $stage,string $ascLocationId):void{$u=Auth::user();if(!$u)throw new AuthorizationException('Authentication is required.','an authenticated user');if(!ScopeService::canAccessCurrentArpaStage((string)$u['id'],$stage,$ascLocationId))throw new AuthorizationException("The request is outside your current authorized {$stage} scope.","your current {$stage} Active Working Context");}
     private function perform(callable $callback,string $failure,string $success):never{try{$callback(new ArpaAppointmentService(Database::pdo()),(string)Auth::user()['id']);redirect($success);}catch(Throwable $e){error_log('ARPA appointment operation failed: '.$e->getMessage());$this->flash('danger',$e instanceof DomainException?$e->getMessage():'Unable to complete the operation.');redirect($failure);}}
 }

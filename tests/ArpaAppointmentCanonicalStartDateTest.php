@@ -10,8 +10,10 @@ final class ArpaAppointmentCanonicalStartDateTest
     public function run(): int
     {
         $view=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/division_form.php');
+        $formJs=file_get_contents(BASE_PATH.'/public/assets/js/arpa-division-form.js');
         $controller=file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');
         $service=file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentService.php');
+        $optionsService=file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentFormOptionsService.php');
         $routes=file_get_contents(BASE_PATH.'/routes/web.php');
         $tabs=file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/tabs.php');
         $layout=file_get_contents(BASE_PATH.'/app/Views/layouts/admin.php');
@@ -23,8 +25,9 @@ final class ArpaAppointmentCanonicalStartDateTest
         $selectedAsc='asc-kurunegala';
         $effectiveDate='2026-08-22';
         $ascs=[['id'=>'forged-asc','dad_number'=>'70004-9999999','name_en'=>'Other ASC']];
-        $officers=[['id'=>'officer-1','dad_number'=>'80000-0000001','name_with_initials'=>'A. Officer','arpa_service_permanency'=>'PERMANENT_IN_SERVICE']];
+        $officers=[['id'=>'officer-1','dad_number'=>'80000-0000001','name_with_initials'=>'A. Officer','arpa_service_permanency'=>'PERMANENT_IN_SERVICE','allowed_appointment_types'=>['PERMANENT']]];
         $arpaDivisions=[['id'=>'division-1','dad_number'=>'70007-0007026','name_en'=>'Wewagedara']];
+        $selectedOfficer='officer-1';$selectedDivision='division-1';$selectedAppointmentType='PERMANENT';$selectionMessages=[];$displayDate='22 Aug 2026';
         $_SERVER['REQUEST_URI']='/DEMS-PHP/public/hr/arpa-appointments/new';
         ob_start();require BASE_PATH.'/app/Views/arpa_appointments/division_form.php';$rendered=(string)ob_get_clean();
 
@@ -39,9 +42,13 @@ final class ArpaAppointmentCanonicalStartDateTest
         $this->contains('>Submit</button>',$view,'the normal action submits without a draft step');
         $this->contains('<?php if(!$ascDerivedFromContext): ?>',$view,'the ASC selector is excluded from an ASC-derived form');
         $this->contains('<strong>Agrarian Service Center:</strong>',$view,'the active ASC is shown as read-only information');
-        $this->contains("officer.value=''",$view,'changing the date clears the selected Officer');
-        $this->contains("division.value=''",$view,'changing the date clears the selected Division');
-        $this->contains("target.searchParams.set('effective_from',date.value)",$view,'changing the date reloads candidates for that date');
+        $this->same(false,str_contains($formJs,"officer.value=''"),'changing the date no longer clears the selected Officer before refresh');
+        $this->same(false,str_contains($formJs,"division.value=''"),'changing the date no longer clears the selected Division before refresh');
+        $this->contains("target.searchParams.set('effective_from',date.value)",$formJs,'changing the date reloads candidates for that business date');
+        $this->contains("target.searchParams.set('officer_id',previous.officer)",$formJs,'date refresh sends the previous Officer for server-side reconciliation');
+        $this->contains("target.searchParams.set('arpa_division_location_id',previous.division)",$formJs,'date refresh sends the previous Division for server-side reconciliation');
+        $this->contains("fetch(target.toString()",$formJs,'date-dependent options refresh without destroying the form');
+        $this->contains("division.addEventListener('change',refresh)",$formJs,'Division changes recheck continuity and Data Issues server-side');
         $this->contains('$ascContext=$this->activeAscCreationContext()',$controller,'the controller resolves the active ASC context');
         $this->contains("(string)\$ascContext['location_id']",$controller,'the active context supplies the assignment ASC');
         $this->contains("\$submittedAsc!==''&&\$submittedAsc!==\$ascId",$controller,'a forged ASC is rejected for ASC-context creation');
@@ -56,16 +63,23 @@ final class ArpaAppointmentCanonicalStartDateTest
         $this->same(false,str_contains($controller,'Draft assignments and records returned for correction.'),'outdated Draft-list wording is removed');
         $this->contains("redirect('/hr/arpa-appointments/submitted/asc/'.\$id)",$controller,'old ASC New list URL leads to Submitted');
         $this->contains("redirect('/hr/arpa-appointments/submitted/district/'.\$id)",$controller,'old District New list URL leads to Submitted');
-        $this->contains("data-refresh-url=\"<?= e(url('hr/arpa-appointments/new')) ?>\"",$view,'date refresh stays on the canonical form route');
+        $this->contains("data-options-url=\"<?= e(url('hr/arpa-appointments/new/options')) ?>\"",$view,'date refresh uses the secured dependent-options endpoint');
+        $this->contains("assets/js/arpa-division-form.js",$view,'the form loads the local dependent-data behavior');
+        $this->contains("get('/hr/arpa-appointments/new/options', [ArpaAppointmentController::class, 'divisionOptions'])",$routes,'dependent options use a dedicated GET route');
         $this->contains("href=\"<?= e(url('hr/arpa-appointments/submitted')) ?>\">Cancel",$view,'Cancel leaves the form for Submitted');
-        $this->contains('divisionFormOptions($selectedAsc,$effectiveDate,$systemContext)',$controller,'candidate loading receives the canonical ASC and date');
+        $this->contains('divisionFormOptions($selectedAsc,$effectiveDate,$systemContext,$this->requestedDivisionSelection())',$controller,'candidate loading receives the canonical ASC, date, and retained selections');
         $this->contains('assertEligibleOfficer($officerId,$ascId,$effectiveFrom)',$service,'Officer eligibility uses the canonical date');
         $this->contains('assertDivisionVacant($ascId,$divisionId,$effectiveFrom,true)',$service,'Division vacancy validation uses the canonical date');
+        $this->contains('ArpaDivisionContinuityService',$optionsService,'form options include the canonical Division continuity calculation');
+        $this->contains('Required Next Start Date',$view,'form displays the required next valid Division start date');
+        $this->contains('assertCanStart($divisionId,$effectiveFrom)',$service,'submission enforces Division continuity server-side');
         $this->same(false,str_contains($rendered,'name="asc_location_id"'),'ASC-context form renders no editable ASC field');
         $this->same(1,substr_count($rendered,'name="effective_from"'),'ASC-context form renders one Appointment Start Date');
         $this->contains('Agrarian Service Center:</strong> Kurunegala',$rendered,'ASC-context form displays its server-provided ASC');
         $this->contains('80000-0000001 - A. Officer',$rendered,'eligible Officer options render without another request');
         $this->contains('70007-0007026 - Wewagedara',$rendered,'vacant Division options render without another request');
+        $this->contains('value="officer-1" data-allowed-types="PERMANENT" selected',$rendered,'a still-eligible Officer remains selected');
+        $this->contains('value="division-1" data-required-next-start="" data-last-covered-through="" data-continuity-relation="" selected',$rendered,'a still-vacant Division remains selected with continuity metadata');
 
         echo "ArpaAppointmentCanonicalStartDateTest: {$this->assertions} assertions passed.\n";
         return 0;

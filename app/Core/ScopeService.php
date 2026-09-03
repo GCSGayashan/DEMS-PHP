@@ -80,10 +80,15 @@ final class ScopeService
         return ['level'=>$level,'enterprise'=>false,'scopes'=>$scopes,'primary'=>$scopes[0]??null];
     }
 
-    public static function canAccessArpaStage(string $userId, string $stage, string $ascLocationId, ?string $effectiveDate = null): bool
+    /**
+     * Authorize an ARPA workflow action from the actor's currently selected,
+     * currently effective Working Context. Appointment business dates must not
+     * be used here; date-sensitive domain validation belongs to ARPA services.
+     */
+    public static function canAccessCurrentArpaStage(string $userId, string $stage, string $ascLocationId): bool
     {
         $stage = strtoupper($stage);
-        $date = $effectiveDate ?: date('Y-m-d');
+        $date = date('Y-m-d');
         $pdo = Database::pdo();
 
         $context=Auth::activeContextForUser($userId);
@@ -92,7 +97,7 @@ final class ScopeService
             if($profile['level']==='SYSTEM')return true;
             if($stage==='NATIONAL')return $profile['level']==='NATIONAL';
             if(!in_array($stage,['ASC','DISTRICT'],true)||$profile['level']!==$stage)return false;
-            return self::canAccessLocation($userId,$ascLocationId,$date);
+            return self::canAccessLocation($userId,$ascLocationId);
         }
         if(Auth::isCurrentUser($userId))return false;
 
@@ -131,6 +136,16 @@ final class ScopeService
         $stmt=$pdo->prepare($sql);
         $stmt->execute([$ascLocationId,$date,$date,$requiredType,$userId,$date,$date,$date,$date,$ascLocationId]);
         return (int)$stmt->fetchColumn() > 0;
+    }
+
+    /**
+     * @deprecated Use canAccessCurrentArpaStage(). The optional fourth argument
+     * is intentionally ignored so historical appointment dates can never alter
+     * current actor authorization in older callers.
+     */
+    public static function canAccessArpaStage(string $userId, string $stage, string $ascLocationId, ?string $appointmentEffectiveDate = null): bool
+    {
+        return self::canAccessCurrentArpaStage($userId, $stage, $ascLocationId);
     }
 
     public static function requiresGeographicRestriction(string $userId): bool

@@ -31,7 +31,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         if($context!==null){
             return $context['role_code']==='ASC_SUBJECT_OFFICER'
                 && Auth::can(self::PERMISSION)
-                && ScopeService::canAccessArpaStage($userId,'ASC',$ascLocationId,date('Y-m-d'));
+                && ScopeService::canAccessCurrentArpaStage($userId,'ASC',$ascLocationId);
         }
         $sql="SELECT COUNT(*) FROM user_account_role uar
               JOIN system_user su ON su.id=uar.user_id AND su.enabled=1 AND su.account_status='ACTIVE'
@@ -44,7 +44,7 @@ final class ArpaAppointmentDataIssueCorrectionService
                 AND uas.active=1 AND uas.approval_status='APPROVED'
                 AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE())";
         $s=$this->pdo->prepare($sql);$s->execute([self::PERMISSION,$ascLocationId,$userId]);
-        return (int)$s->fetchColumn()>0&&ScopeService::canAccessArpaStage($userId,'ASC',$ascLocationId,date('Y-m-d'));
+        return (int)$s->fetchColumn()>0&&ScopeService::canAccessCurrentArpaStage($userId,'ASC',$ascLocationId);
     }
 
     public function issue(string $rowKey):?array
@@ -163,7 +163,7 @@ final class ArpaAppointmentDataIssueCorrectionService
             $this->pdo->prepare('UPDATE arpa_division_appointment SET appointment_type=? WHERE id=?')->execute([$type,$target['id']]);return;
         }
         if($action==='CORRECT_EFFECTIVE_FROM'){
-            $date=$this->date($input['effective_from']??null,'Correct Start Date');if($target['effective_to']!==null&&$target['effective_to']<$date)throw new DomainException('The corrected start date cannot be after the end date.');$this->pdo->prepare('UPDATE arpa_division_appointment SET effective_from=? WHERE id=?')->execute([$date,$target['id']]);return;
+            $date=$this->date($input['effective_from']??null,'Correct Start Date');if($target['effective_to']!==null&&$target['effective_to']<$date)throw new DomainException('The corrected start date cannot be after the end date.');(new ArpaDivisionContinuityService($this->pdo))->assertCanStart((string)$target['arpa_division_location_id'],$date,(string)$target['request_id'],(string)$target['id'],false);$this->pdo->prepare('UPDATE arpa_division_appointment SET effective_from=? WHERE id=?')->execute([$date,$target['id']]);return;
         }
         if($action==='CORRECT_END_REASON'){
             if($target['closure_id']===null)throw new DomainException('An end reason can only be corrected on an ended appointment.');$reason=$this->endReason($input['end_reason_id']??null);$this->pdo->prepare('UPDATE arpa_division_appointment_closure SET end_reason_id=?,data_correction_id=? WHERE id=?')->execute([$reason,$correctionId,$target['closure_id']]);return;
@@ -171,6 +171,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         if($action==='CORRECT_ARPA_DIVISION'){
             if($this->nullText($input['evidence_reference']??null)===null)throw new DomainException('Evidence reference is required to correct an ARPA Division.');
             $arpaId=trim((string)($input['arpa_division_location_id']??''));$snapshot=$this->locationSnapshot((string)$target['asc_location_id'],$arpaId,(string)$target['effective_from']);
+            (new ArpaDivisionContinuityService($this->pdo))->assertCanStart($arpaId,(string)$target['effective_from'],(string)$target['request_id'],(string)$target['id'],false);
             $this->pdo->prepare('UPDATE arpa_division_appointment SET province_location_id_snapshot=?,district_location_id_snapshot=?,arpa_division_location_id=?,province_dad_snapshot=?,province_name_snapshot=?,district_dad_snapshot=?,district_name_snapshot=?,arpa_dad_snapshot=?,arpa_name_snapshot=?,hierarchy_snapshot_json=? WHERE id=?')
                 ->execute([$snapshot['province']['id'],$snapshot['district']['id'],$snapshot['arpa']['id'],$snapshot['province']['dad_number'],$snapshot['province']['name_en'],$snapshot['district']['dad_number'],$snapshot['district']['name_en'],$snapshot['arpa']['dad_number'],$snapshot['arpa']['name_en'],$this->json($snapshot),$target['id']]);
             if($target['closure_id']!==null)$this->pdo->prepare('UPDATE arpa_division_appointment_closure SET context_snapshot_json=?,data_correction_id=? WHERE id=?')->execute([$this->json($snapshot),$correctionId,$target['closure_id']]);return;

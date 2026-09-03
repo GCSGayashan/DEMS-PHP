@@ -29,7 +29,13 @@ final class Router
                 }
                 [$class, $action] = $route['handler'];
                 $params = array_filter($m, 'is_string', ARRAY_FILTER_USE_KEY);
-                (new $class())->$action(...array_values($params));
+                try {
+                    (new $class())->$action(...array_values($params));
+                } catch (AuthorizationException $exception) {
+                    error_log('Authorization denied: '.$exception->getMessage());
+                    http_response_code(403);
+                    View::render('partials/forbidden', ['permission' => $exception->requiredAuthority]);
+                }
                 return;
             }
         }
