@@ -51,7 +51,8 @@ CREATE TEMPORARY TABLE tmp_gn_identifier_backfill (
   location_id CHAR(36) NOT NULL PRIMARY KEY,
   gn_code VARCHAR(20) NOT NULL,
   gn_code_for_plr VARCHAR(11) NOT NULL
-);
+) DEFAULT CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
 
 INSERT INTO tmp_gn_identifier_backfill(location_id,gn_code,gn_code_for_plr)
 SELECT r.location_id,TRIM(g.gnd_ocode),TRIM(g.gnd_code)

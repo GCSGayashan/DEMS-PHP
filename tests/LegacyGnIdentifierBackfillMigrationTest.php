@@ -31,9 +31,14 @@ final class LegacyGnIdentifierBackfillMigrationTest
             $this->contains('FROM {{LEGACY_DATABASE}}.tbl_gnd',$sql,'migration source schema is supplied by the configured legacy database');
             $this->contains('JOIN tmp_gn_identifier_source g ON g.gnd_id = CAST(r.legacy_id AS UNSIGNED)',$sql,'migration uses canonical legacy row ID linkage');
             $this->contains("r.legacy_id REGEXP '^[0-9]+$'",$sql,'canonical legacy IDs must be numeric GN row IDs');
+            $this->contains('COLLATE utf8mb4_unicode_ci',$sql,'temporary backfill identifiers use the canonical column collation');
             $this->same(false,str_contains(strtolower($sql),'name_en'), 'migration never matches by GN name');
             $sql=str_replace('{{LEGACY_DATABASE}}','`'.$this->sourceDatabase.'`',$sql);
 
+            $databaseCollation=$target->query('SELECT DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=DATABASE()')->fetchColumn();
+            $this->same('utf8mb4_0900_ai_ci',$databaseCollation,'target fixture reproduces the production database default collation');
+            $canonicalCollation=$target->query("SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='location' AND COLUMN_NAME='id'")->fetchColumn();
+            $this->same('utf8mb4_unicode_ci',$canonicalCollation,'canonical location identifier retains utf8mb4_unicode_ci');
             $this->same(14029,(int)$this->database($this->sourceDatabase)->query('SELECT COUNT(*) FROM tbl_gnd')->fetchColumn(),'source fixture includes 13 unreferenced rows');
             $this->same(14016,(int)$target->query('SELECT COUNT(*) FROM legacy_location_reference')->fetchColumn(),'only 14,016 canonical references are present');
             $dryRun=(new LegacyGnIdentifierBackfillService($this->database($this->sourceDatabase),$target,true))->run();
@@ -80,14 +85,14 @@ final class LegacyGnIdentifierBackfillMigrationTest
     private function createFixtures(): void
     {
         $this->server->exec('CREATE DATABASE `'.$this->sourceDatabase.'` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
-        $this->server->exec('CREATE DATABASE `'.$this->targetDatabase.'` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+        $this->server->exec('CREATE DATABASE `'.$this->targetDatabase.'` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci');
         $source=$this->database($this->sourceDatabase);
         $target=$this->database($this->targetDatabase);
         $source->exec('CREATE TABLE tbl_gnd(gnd_id INT PRIMARY KEY,gnd_ocode VARCHAR(20),gnd_code VARCHAR(11))');
-        $target->exec('CREATE TABLE location_type(id CHAR(36) PRIMARY KEY,system_key VARCHAR(80) NOT NULL)');
+        $target->exec('CREATE TABLE location_type(id CHAR(36) PRIMARY KEY,system_key VARCHAR(80) NOT NULL) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
         $target->exec("INSERT INTO location_type VALUES('gn-type','GN_DIVISION')");
-        $target->exec('CREATE TABLE location(id CHAR(36) PRIMARY KEY,dad_number VARCHAR(20),location_type_id CHAR(36),official_code VARCHAR(100),gn_code VARCHAR(20),gn_code_for_plr VARCHAR(11),name_en VARCHAR(255),effective_from DATE,operational_status VARCHAR(30),approval_status VARCHAR(30))');
-        $target->exec('CREATE TABLE legacy_location_reference(source_system VARCHAR(80),source_table VARCHAR(80),legacy_id VARCHAR(100),location_id CHAR(36))');
+        $target->exec('CREATE TABLE location(id CHAR(36) PRIMARY KEY,dad_number VARCHAR(20),location_type_id CHAR(36),official_code VARCHAR(100),gn_code VARCHAR(20),gn_code_for_plr VARCHAR(11),name_en VARCHAR(255),effective_from DATE,operational_status VARCHAR(30),approval_status VARCHAR(30)) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+        $target->exec('CREATE TABLE legacy_location_reference(source_system VARCHAR(80),source_table VARCHAR(80),legacy_id VARCHAR(100),location_id CHAR(36)) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
 
         $sourceInsert=$source->prepare('INSERT INTO tbl_gnd VALUES(?,?,?)');
         $locationInsert=$target->prepare('INSERT INTO location VALUES(?,?,?,?,?,?,?,?,?,?)');
