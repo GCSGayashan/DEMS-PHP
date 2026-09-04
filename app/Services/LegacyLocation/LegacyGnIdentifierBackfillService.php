@@ -10,6 +10,7 @@ use Throwable;
 final class LegacyGnIdentifierBackfillService
 {
     private const SOURCE_SYSTEM='AGRARIANADMIN_HR';
+    private const EXPECTED_REFERENCE_COUNT=14016;
 
     public function __construct(private PDO $source,private PDO $target,private bool $dryRun=true){}
 
@@ -24,17 +25,26 @@ final class LegacyGnIdentifierBackfillService
             ];
         }
 
-        $stmt=$this->target->prepare("SELECT r.legacy_id,r.location_id,l.gn_code,l.gn_code_for_plr FROM legacy_location_reference r JOIN location l ON l.id=r.location_id JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='GN_DIVISION' WHERE r.source_system=? AND r.source_table='tbl_gnd' ORDER BY r.legacy_id,r.location_id");
+        $stmt=$this->target->prepare("SELECT r.legacy_id,r.location_id,l.gn_code,l.gn_code_for_plr,lt.system_key AS target_type FROM legacy_location_reference r LEFT JOIN location l ON l.id=r.location_id LEFT JOIN location_type lt ON lt.id=l.location_type_id WHERE r.source_system=? AND r.source_table='tbl_gnd' ORDER BY r.legacy_id,r.location_id");
         $stmt->execute([self::SOURCE_SYSTEM]);$references=$stmt->fetchAll();
         $byLegacy=[];$byTarget=[];
         foreach($references as $row){$byLegacy[(string)$row['legacy_id']][]=$row;$byTarget[(string)$row['location_id']][]=$row;}
 
-        $ambiguousLegacy=0;$conflictingAliases=0;$existingConflicts=0;$matched=0;$alreadyComplete=0;$wouldUpdate=0;$wouldSetGn=0;$wouldSetPlr=0;$updates=[];
+        $ambiguousLegacy=0;$conflictingAliases=0;$existingConflicts=0;$matched=0;$missingGnCode=0;$missingPlrCode=0;$nonGnTargets=0;$alreadyComplete=0;$wouldUpdate=0;$wouldSetGn=0;$wouldSetPlr=0;$updates=[];
+        foreach($references as $row){
+            $legacyId=(string)$row['legacy_id'];
+            if(!isset($source[$legacyId]))continue;
+            $matched++;
+            $missingGnCode+=(int)($source[$legacyId]['gn_code']===null);
+            $missingPlrCode+=(int)($source[$legacyId]['gn_code_for_plr']===null);
+            $nonGnTargets+=(int)(($row['target_type']??null)!=='GN_DIVISION');
+        }
         foreach($byLegacy as $rows)if(count(array_unique(array_column($rows,'location_id')))>1)$ambiguousLegacy++;
         foreach($byTarget as $locationId=>$rows){
+            if(($rows[0]['target_type']??null)!=='GN_DIVISION')continue;
             $values=[];$legacyIds=[];
             foreach($rows as $row){$legacyId=(string)$row['legacy_id'];$legacyIds[]=$legacyId;if(isset($source[$legacyId]))$values[]=$source[$legacyId];}
-            if($values===[])continue;$matched+=count($values);
+            if($values===[])continue;
             $gnValues=array_values(array_unique(array_filter(array_column($values,'gn_code'),fn($v)=>$v!==null)));
             $plrValues=array_values(array_unique(array_filter(array_column($values,'gn_code_for_plr'),fn($v)=>$v!==null)));
             if(count($gnValues)>1||count($plrValues)>1){$conflictingAliases++;continue;}
@@ -46,22 +56,30 @@ final class LegacyGnIdentifierBackfillService
             $updates[]=['location_id'=>$locationId,'gn_code'=>$setGn?$gn:null,'gn_code_for_plr'=>$setPlr?$plr:null,'legacy_ids'=>$legacyIds];
         }
 
+        $referenceCount=count($references);$distinctLegacy=count($byLegacy);$distinctTargets=count($byTarget);
+        $referenceCountMismatch=(int)($referenceCount!==self::EXPECTED_REFERENCE_COUNT);
+        $duplicateLegacyMappings=max(0,$referenceCount-$distinctLegacy);
+        $duplicateTargetMappings=max(0,$referenceCount-$distinctTargets);
+        $referencesWithoutSource=count(array_diff_key($byLegacy,$source));
         $summary=[
             'mode'=>$this->dryRun?'DRY-RUN':'EXECUTE','source_records'=>count($source),
             'source_gn_code_available'=>count(array_filter($source,fn($r)=>$r['gn_code']!==null)),
             'source_plr_code_available'=>count(array_filter($source,fn($r)=>$r['gn_code_for_plr']!==null)),
-            'legacy_references'=>count($references),'distinct_referenced_locations'=>count($byTarget),
+            'legacy_references'=>$referenceCount,'distinct_referenced_legacy_ids'=>$distinctLegacy,'distinct_referenced_locations'=>$distinctTargets,
             'matched_source_records'=>$matched,'unmatched_source_records'=>count(array_diff_key($source,$byLegacy)),
-            'references_without_source'=>count(array_diff_key($byLegacy,$source)),
+            'references_without_source'=>$referencesWithoutSource,'referenced_gn_code_missing'=>$missingGnCode,
+            'referenced_plr_code_missing'=>$missingPlrCode,'non_gn_targets'=>$nonGnTargets,
+            'reference_count_mismatch'=>$referenceCountMismatch,'duplicate_legacy_mappings'=>$duplicateLegacyMappings,
+            'duplicate_target_mappings'=>$duplicateTargetMappings,
             'ambiguous_legacy_references'=>$ambiguousLegacy,'conflicting_target_aliases'=>$conflictingAliases,
             'populated_target_conflicts_preserved'=>$existingConflicts,'already_complete'=>$alreadyComplete,
             'would_update'=>$wouldUpdate,'would_set_gn_code'=>$wouldSetGn,'would_set_gn_code_for_plr'=>$wouldSetPlr,
-            'updated'=>0,'true_blockers'=>$ambiguousLegacy+$conflictingAliases,
+            'updated'=>0,'true_blockers'=>$referenceCountMismatch+$duplicateLegacyMappings+$duplicateTargetMappings+$referencesWithoutSource+$missingGnCode+$missingPlrCode+$nonGnTargets+$ambiguousLegacy+$conflictingAliases,
         ];
         if($this->dryRun)return $summary;
         if($summary['true_blockers']>0)throw new DomainException('GN identifier backfill has unresolved reference or alias conflicts.');
 
-        $update=$this->target->prepare('UPDATE location SET gn_code=COALESCE(gn_code,?),gn_code_for_plr=COALESCE(gn_code_for_plr,?),updated_at=NOW(),version=version+1 WHERE id=? AND ((gn_code IS NULL AND ? IS NOT NULL) OR (gn_code_for_plr IS NULL AND ? IS NOT NULL))');
+        $update=$this->target->prepare("UPDATE location SET gn_code=CASE WHEN NULLIF(TRIM(gn_code),'') IS NULL THEN ? ELSE gn_code END,gn_code_for_plr=CASE WHEN NULLIF(TRIM(gn_code_for_plr),'') IS NULL THEN ? ELSE gn_code_for_plr END WHERE id=? AND ((NULLIF(TRIM(gn_code),'') IS NULL AND ? IS NOT NULL) OR (NULLIF(TRIM(gn_code_for_plr),'') IS NULL AND ? IS NOT NULL))");
         $this->target->beginTransaction();
         try{foreach($updates as $row){$update->execute([$row['gn_code'],$row['gn_code_for_plr'],$row['location_id'],$row['gn_code'],$row['gn_code_for_plr']]);$summary['updated']+=$update->rowCount();}$this->target->commit();}
         catch(Throwable $e){if($this->target->inTransaction())$this->target->rollBack();throw $e;}

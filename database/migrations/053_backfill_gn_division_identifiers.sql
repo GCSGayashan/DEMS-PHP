@@ -1,6 +1,18 @@
 -- Controlled one-to-one GN identifier backfill from canonical legacy references.
--- Refuse to run unless the verified 14,016-row source/reference population is intact.
-SET @gn_identifier_expected_source_count = 14016;
+-- {{LEGACY_DATABASE}} is replaced from LEGACY_DB_NAME by bin/migrate.php.
+-- Unreferenced tbl_gnd rows are intentionally outside this migration.
+SET @gn_identifier_expected_reference_count = 14016;
+
+DROP TEMPORARY TABLE IF EXISTS tmp_gn_identifier_source;
+CREATE TEMPORARY TABLE tmp_gn_identifier_source (
+  gnd_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  gnd_ocode VARCHAR(20) NULL,
+  gnd_code VARCHAR(11) NULL
+);
+
+INSERT INTO tmp_gn_identifier_source(gnd_id,gnd_ocode,gnd_code)
+SELECT gnd_id,gnd_ocode,gnd_code
+FROM {{LEGACY_DATABASE}}.tbl_gnd;
 
 DROP TEMPORARY TABLE IF EXISTS tmp_gn_identifier_backfill_guard;
 CREATE TEMPORARY TABLE tmp_gn_identifier_backfill_guard (
@@ -10,28 +22,26 @@ CREATE TEMPORARY TABLE tmp_gn_identifier_backfill_guard (
 
 INSERT INTO tmp_gn_identifier_backfill_guard(blocker_count)
 SELECT IF(
-  (SELECT COUNT(*) FROM dems_legacy_hr.tbl_gnd) = @gn_identifier_expected_source_count
-  AND (SELECT COUNT(*) FROM dems_legacy_hr.tbl_gnd
-       WHERE NULLIF(TRIM(gnd_ocode),'') IS NOT NULL
-         AND NULLIF(TRIM(gnd_code),'') IS NOT NULL) = @gn_identifier_expected_source_count
-  AND (SELECT COUNT(*) FROM legacy_location_reference
+  (SELECT COUNT(*) FROM legacy_location_reference
        WHERE source_system = 'AGRARIANADMIN_HR'
-         AND source_table = 'tbl_gnd') = @gn_identifier_expected_source_count
+         AND source_table = 'tbl_gnd') = @gn_identifier_expected_reference_count
   AND (SELECT COUNT(DISTINCT legacy_id) FROM legacy_location_reference
        WHERE source_system = 'AGRARIANADMIN_HR'
-         AND source_table = 'tbl_gnd') = @gn_identifier_expected_source_count
+         AND source_table = 'tbl_gnd') = @gn_identifier_expected_reference_count
   AND (SELECT COUNT(DISTINCT location_id) FROM legacy_location_reference
        WHERE source_system = 'AGRARIANADMIN_HR'
-         AND source_table = 'tbl_gnd') = @gn_identifier_expected_source_count
+         AND source_table = 'tbl_gnd') = @gn_identifier_expected_reference_count
   AND (SELECT COUNT(*)
        FROM legacy_location_reference r
-       JOIN dems_legacy_hr.tbl_gnd g ON g.gnd_id = CAST(r.legacy_id AS UNSIGNED)
+       JOIN tmp_gn_identifier_source g ON g.gnd_id = CAST(r.legacy_id AS UNSIGNED)
        JOIN location l ON l.id = r.location_id
        JOIN location_type lt ON lt.id = l.location_type_id
                             AND lt.system_key = 'GN_DIVISION'
        WHERE r.source_system = 'AGRARIANADMIN_HR'
          AND r.source_table = 'tbl_gnd'
-         AND r.legacy_id REGEXP '^[0-9]+$') = @gn_identifier_expected_source_count,
+         AND r.legacy_id REGEXP '^[0-9]+$'
+         AND NULLIF(TRIM(g.gnd_ocode),'') IS NOT NULL
+         AND NULLIF(TRIM(g.gnd_code),'') IS NOT NULL) = @gn_identifier_expected_reference_count,
   0,
   1
 );
@@ -46,7 +56,7 @@ CREATE TEMPORARY TABLE tmp_gn_identifier_backfill (
 INSERT INTO tmp_gn_identifier_backfill(location_id,gn_code,gn_code_for_plr)
 SELECT r.location_id,TRIM(g.gnd_ocode),TRIM(g.gnd_code)
 FROM legacy_location_reference r
-JOIN dems_legacy_hr.tbl_gnd g ON g.gnd_id = CAST(r.legacy_id AS UNSIGNED)
+JOIN tmp_gn_identifier_source g ON g.gnd_id = CAST(r.legacy_id AS UNSIGNED)
 JOIN location l ON l.id = r.location_id
 JOIN location_type lt ON lt.id = l.location_type_id
                      AND lt.system_key = 'GN_DIVISION'
@@ -69,3 +79,4 @@ WHERE (NULLIF(TRIM(l.gn_code),'') IS NULL AND b.gn_code <> '')
 
 DROP TEMPORARY TABLE tmp_gn_identifier_backfill;
 DROP TEMPORARY TABLE tmp_gn_identifier_backfill_guard;
+DROP TEMPORARY TABLE tmp_gn_identifier_source;

@@ -97,6 +97,23 @@ try {
                 );
             }
 
+            if (str_contains($sql, '{{LEGACY_DATABASE}}')) {
+                $legacyDbCfg = config('legacy_database');
+                $legacyDbName = trim((string)($legacyDbCfg['database'] ?? ''));
+
+                if ($legacyDbName === '' || preg_match('/^[A-Za-z0-9_]+$/D', $legacyDbName) !== 1) {
+                    throw new RuntimeException(
+                        'LEGACY_DB_NAME must be a non-empty SQL identifier for this migration.'
+                    );
+                }
+
+                $sql = str_replace(
+                    '{{LEGACY_DATABASE}}',
+                    '`' . $legacyDbName . '`',
+                    $sql
+                );
+            }
+
             $pdo->exec($sql);
 
             $stmt = $pdo->prepare(
