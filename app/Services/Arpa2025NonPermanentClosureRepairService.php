@@ -410,10 +410,7 @@ final class Arpa2025NonPermanentClosureRepairService
     private function detectState(array $s): string
     {
         $common =
-            $s['non_permanent_2025'] === 3537
-            && $s['permanent_2025'] === 1137
-            && $s['closed_before_target'] === 213
-            && $s['invalid_date_ranges'] === 0
+            $s['invalid_date_ranges'] === 0
             && $s['earlier_closures_outside_2025'] === 0;
 
         if (
@@ -429,7 +426,6 @@ final class Arpa2025NonPermanentClosureRepairService
         if (
             $common
             && $s['open_without_closure'] === 0
-            && $s['already_target_date'] === self::POST_EXACT
             && $s['closed_after_target'] === 0
             && $s['rows_requiring_change'] === 0
         ) {

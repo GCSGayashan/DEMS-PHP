@@ -27,7 +27,8 @@ final class ArpaDivisionContinuityService
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               WHERE a.arpa_division_location_id IN({$marks}) AND a.id<>COALESCE(?, '')
                 AND (a.legacy_history_only=0 OR c.id IS NOT NULL)
-                AND a.effective_from<=? AND (c.effective_to IS NULL OR c.effective_to>=?)
+                AND a.effective_from IS NOT NULL
+                AND (a.effective_from>=? OR c.effective_to IS NULL OR c.effective_to>=?)
               UNION ALL
               SELECT r.arpa_division_location_id,r.id,r.requested_effective_from,
                      CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'RESERVATION'
@@ -36,16 +37,22 @@ final class ArpaDivisionContinuityService
                 AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                 AND r.request_type IN('APPOINTMENT','TRANSFER')
                 AND r.workflow_status IN({$statuses})
-                AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?";
+                AND r.requested_effective_from IS NOT NULL
+                AND (r.requested_effective_from>=? OR r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)";
         $params=array_merge(
-            $divisionIds,[$excludeAppointmentId,$proposedStart,self::BASELINE],
-            $divisionIds,[$excludeRequestId],ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES,[$proposedStart]
+            $divisionIds,[$excludeAppointmentId,self::BASELINE,self::BASELINE],
+            $divisionIds,[$excludeRequestId],ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES,[self::BASELINE,self::BASELINE]
         );
         $stmt=$this->pdo->prepare($sql);$stmt->execute($params);$byDivision=[];
         foreach($stmt->fetchAll() as $row)$byDivision[(string)$row['division_id']][]=$row;
 
         $result=[];
-        foreach($divisionIds as $divisionId)$result[$divisionId]=$this->calculate($byDivision[$divisionId]??[],$proposedStart);
+        foreach($divisionIds as $divisionId){
+            $diagnostic=$this->calculate($byDivision[$divisionId]??[],$proposedStart);
+            $diagnostic['unresolved_data_issue_count']=0;
+            $diagnostic['needs_action']=$diagnostic['timeline_status']!=='COMPLETE';
+            $result[$divisionId]=$diagnostic;
+        }
         return $result;
     }
 
@@ -64,17 +71,13 @@ final class ArpaDivisionContinuityService
         bool $checkDataIssues=true,
         bool $lock=true
     ):array {
-        if($lock){
-            $stmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$stmt->execute([$divisionId]);
-            if(!$stmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');
-        }
+        if($lock)$this->lockDivision($divisionId);
+        if($checkDataIssues)$this->assertNoUnresolvedDataIssues($divisionId,false);
         $requirement=$this->requirement($divisionId,$proposedStart,$excludeRequestId,$excludeAppointmentId);
-        if($checkDataIssues){
-            $issue=$this->blockingDataIssue($divisionId,$requirement,$proposedStart);
-            if($issue!==null){
-                throw new DomainException('This ARPA Division has an unresolved Appointment Data Issue for the required period. Resolve the Data Issue before adding a new assignment.');
-            }
-        }
+        $statuses=(array)($requirement['timeline_statuses']??[]);
+        if(in_array('INVALID_PERIOD',$statuses,true))throw new DomainException('This ARPA Division has an invalid authoritative assignment period. Resolve the Appointment Data Issue before creating a new request.');
+        if(in_array('MULTIPLE_OPEN_ASSIGNMENTS',$statuses,true))throw new DomainException('This ARPA Division has multiple Open assignments. Resolve the Appointment Data Issue before creating a new request.');
+        if(in_array('OVERLAP',$statuses,true))throw new DomainException('This ARPA Division has overlapping authoritative assignment periods. Resolve the timeline before creating a new request.');
         if($requirement['relation']==='GAP'){
             if((int)$requirement['authoritative_period_count']===0){
                 throw new DomainException('This ARPA Division has no assignment history from 01 Jan 2025. Complete the missing period starting 01 Jan 2025 first.');
@@ -87,20 +90,54 @@ final class ArpaDivisionContinuityService
         return $requirement;
     }
 
+    /**
+     * Validate a complete missing period. A bounded historical gap must be
+     * filled through the day immediately before the next authoritative record;
+     * an unbounded final gap must remain open.
+     *
+     * @return array<string,mixed>
+     */
+    public function assertCanFillPeriod(
+        string $divisionId,
+        string $proposedStart,
+        ?string $proposedEnd=null,
+        ?string $excludeRequestId=null,
+        ?string $excludeAppointmentId=null,
+        bool $checkDataIssues=true,
+        bool $lock=true
+    ):array {
+        $requirement=$this->assertCanStart($divisionId,$proposedStart,$excludeRequestId,$excludeAppointmentId,$checkDataIssues,$lock);
+        $maximumEnd=$requirement['maximum_end_date'];
+        if($maximumEnd!==null&&$proposedEnd===null){
+            throw new DomainException('This historical gap is bounded by a later assignment. The new assignment must end on '.$this->displayDate((string)$maximumEnd).'.');
+        }
+        if($maximumEnd!==null&&$proposedEnd!==$maximumEnd){
+            throw new DomainException('To preserve continuous history, this assignment must end on '.$this->displayDate((string)$maximumEnd).'.');
+        }
+        if($maximumEnd===null&&$proposedEnd!==null){
+            throw new DomainException('This is the final uncovered period. The new assignment must remain open unless it is later ended through the normal workflow.');
+        }
+        return $requirement;
+    }
+
+    public function assertNoUnresolvedDataIssues(string $divisionId,bool $lock=true):void
+    {
+        if($lock)$this->lockDivision($divisionId);
+        if($this->unresolvedDataIssues($divisionId)!==[])throw new DomainException('This ARPA Division has unresolved Appointment Data Issues. Review and complete them before creating a new appointment request.');
+    }
+
     /** @return array<string,mixed>|null */
     public function blockingDataIssue(string $divisionId,array $requirement,string $proposedStart):?array
     {
-        $windows=[[$proposedStart,'9999-12-31']];
-        if($requirement['relation']==='GAP')$windows[]=[(string)$requirement['required_next_start'],(string)$requirement['gap_end']];
-        if($requirement['last_authoritative_start']!==null)$windows[]=[(string)$requirement['last_authoritative_start'],(string)($requirement['last_authoritative_end']??'9999-12-31')];
+        return $this->unresolvedDataIssues($divisionId)[0]??null;
+    }
 
-        foreach($this->canonicalIssues($divisionId) as $issue){
-            foreach($windows as [$from,$to])if($this->overlaps((string)$issue['issue_from'],(string)$issue['issue_to'],$from,$to))return $issue;
-        }
-        foreach($this->reconciliationIssues($divisionId) as $issue){
-            foreach($windows as [$from,$to])if($this->overlaps((string)$issue['issue_from'],(string)$issue['issue_to'],$from,$to))return $issue;
-        }
-        return null;
+    /** Any unresolved issue for a Division blocks normal assignment creation until terminally completed. */
+    public function unresolvedDataIssues(string $divisionId):array
+    {
+        $rows=array_merge($this->canonicalIssues($divisionId),$this->reconciliationIssues($divisionId));$unique=[];
+        foreach($rows as $row)$unique[(string)($row['row_key']??$row['reconciliation_item_id'])]=$row;
+        return array_values($unique);
     }
 
     /** @return array<int,array<string,mixed>> */
@@ -122,11 +159,12 @@ final class ArpaDivisionContinuityService
             $requirement=$this->requirement((string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],(string)$request['id']);
             if($requirement['relation']!=='GAP')continue;
             $issue=$this->blockingDataIssue((string)$request['arpa_division_location_id'],$requirement,(string)$request['requested_effective_from']);
+            $reportedGapEnd=(new DateTimeImmutable((string)$request['requested_effective_from']))->modify('-1 day')->format('Y-m-d');
             $rows[]=$request+[
                 'last_covered_through'=>$requirement['last_covered_through'],
                 'required_next_start'=>$requirement['required_next_start'],
                 'gap_start'=>$requirement['required_next_start'],
-                'gap_end'=>$requirement['gap_end'],
+                'gap_end'=>$reportedGapEnd,
                 'unresolved_data_issue'=>$issue!==null,
                 'data_issue_key'=>$issue['row_key']??$issue['reconciliation_item_id']??null,
                 'data_issue_type'=>$issue['issue_type']??null,
@@ -139,29 +177,69 @@ final class ArpaDivisionContinuityService
     private function calculate(array $periods,string $proposedStart):array
     {
         usort($periods,static fn(array $a,array $b):int=>[(string)$a['effective_from'],(string)($a['effective_to']??'9999-12-31'),(string)$a['source_id']]<=>[(string)$b['effective_from'],(string)($b['effective_to']??'9999-12-31'),(string)$b['source_id']]);
-        $cursor=self::BASELINE;
-        $lastStart=null;$lastEnd=null;$used=0;
+        $cursor=self::BASELINE;$gaps=[];$overlaps=[];$invalid=[];$openCount=0;$valid=[];$coverage=[];
         foreach($periods as $period){
-            $start=max(self::BASELINE,(string)$period['effective_from']);$end=$period['effective_to']===null?'9999-12-31':(string)$period['effective_to'];
-            if($end<self::BASELINE)continue;
-            if($start>$cursor)break;
-            $used++;$lastStart=(string)$period['effective_from'];$lastEnd=$period['effective_to']===null?null:(string)$period['effective_to'];
-            if($end==='9999-12-31'){$cursor='9999-12-31';break;}
+            $rawStart=(string)$period['effective_from'];$rawEnd=$period['effective_to']===null?null:(string)$period['effective_to'];
+            if($rawEnd!==null&&$rawEnd<$rawStart){$invalid[]=$period;continue;}
+            if($rawEnd!==null&&$rawEnd<self::BASELINE)continue;
+            if($rawEnd===null)$openCount++;
+            $start=max(self::BASELINE,$rawStart);$end=$rawEnd??'9999-12-31';$period['effective_from']=$start;$period['effective_to']=$rawEnd;$valid[]=$period;
+            if($cursor==='9999-12-31'){$overlaps[]=$period;continue;}
+            if($start>$cursor){
+                $gaps[]=['gap_start'=>$cursor,'gap_end'=>(new DateTimeImmutable($start))->modify('-1 day')->format('Y-m-d'),'next_existing_start'=>$start,'next_existing_end'=>$rawEnd];
+                $coverage[]=['effective_from'=>$start,'effective_to'=>$rawEnd];
+            }elseif($start<$cursor){
+                $overlaps[]=$period;
+            }else{
+                $coverage[]=['effective_from'=>$start,'effective_to'=>$rawEnd];
+            }
+            if($end==='9999-12-31'){$cursor='9999-12-31';continue;}
             $next=(new DateTimeImmutable($end))->modify('+1 day')->format('Y-m-d');
-            if($next>$cursor)$cursor=$next;
+            if($cursor!=='9999-12-31'&&$next>$cursor)$cursor=$next;
         }
-        $relation=$proposedStart===$cursor?'EXACT':($proposedStart>$cursor?'GAP':'OVERLAP');
-        $lastCovered=$cursor===self::BASELINE||$cursor==='9999-12-31'?null:(new DateTimeImmutable($cursor))->modify('-1 day')->format('Y-m-d');
-        $gapEnd=$relation==='GAP'?(new DateTimeImmutable($proposedStart))->modify('-1 day')->format('Y-m-d'):null;
+        if($cursor!=='9999-12-31')$gaps[]=['gap_start'=>$cursor,'gap_end'=>null,'next_existing_start'=>null,'next_existing_end'=>null];
+
+        $required=$gaps[0]['gap_start']??null;$maximumEnd=$gaps[0]['gap_end']??null;
+        if($required===null){
+            $relation='OVERLAP';
+        }elseif($proposedStart===$required){
+            $relation='EXACT';
+        }elseif($proposedStart>$required&&($maximumEnd===null||$proposedStart<=$maximumEnd)){
+            $relation='GAP';
+        }else{
+            $relation='OVERLAP';
+        }
+        $lastCovered=$required===null||$required===self::BASELINE?null:(new DateTimeImmutable($required))->modify('-1 day')->format('Y-m-d');
+        $statuses=[];
+        if($invalid!==[])$statuses[]='INVALID_PERIOD';
+        if($openCount>1)$statuses[]='MULTIPLE_OPEN_ASSIGNMENTS';
+        if($overlaps!==[])$statuses[]='OVERLAP';
+        if($gaps!==[]){
+            if($gaps[0]['gap_start']===self::BASELINE)$statuses[]='MISSING_BASELINE_PERIOD';
+            elseif($gaps[0]['gap_end']!==null&&$openCount>0)$statuses[]='CURRENT_WITH_HISTORICAL_GAP';
+            else $statuses[]='HISTORICAL_GAP';
+        }
+        if($statuses===[])$statuses[]='COMPLETE';
         return [
-            'required_next_start'=>$cursor,
+            'required_next_start'=>$required,
             'last_covered_through'=>$lastCovered,
-            'last_authoritative_start'=>$lastStart,
-            'last_authoritative_end'=>$lastEnd,
-            'authoritative_period_count'=>$used,
+            'last_authoritative_start'=>$valid===[]?null:(string)$valid[array_key_last($valid)]['effective_from'],
+            'last_authoritative_end'=>$valid===[]?null:$valid[array_key_last($valid)]['effective_to'],
+            'authoritative_period_count'=>count($valid),
             'relation'=>$relation,
-            'gap_start'=>$relation==='GAP'?$cursor:null,
-            'gap_end'=>$gapEnd,
+            'gap_start'=>$gaps[0]['gap_start']??null,
+            'gap_end'=>$maximumEnd,
+            'maximum_end_date'=>$maximumEnd,
+            'next_existing_start'=>$gaps[0]['next_existing_start']??null,
+            'next_existing_end'=>$gaps[0]['next_existing_end']??null,
+            'gaps'=>$gaps,
+            'gap_count'=>count($gaps),
+            'overlap_count'=>count($overlaps),
+            'invalid_period_count'=>count($invalid),
+            'open_assignment_count'=>$openCount,
+            'timeline_status'=>$statuses[0],
+            'timeline_statuses'=>$statuses,
+            'coverage_segments'=>$coverage,
         ];
     }
 
@@ -169,25 +247,34 @@ final class ArpaDivisionContinuityService
     private function canonicalIssues(string $divisionId):array
     {
         $source=ArpaAppointmentReadService::issueSource();
-        $sql="SELECT q.row_key,q.issue_type,MIN(a.effective_from) issue_from,
-                     MAX(COALESCE(c.effective_to,'9999-12-31')) issue_to
+        $sql="SELECT q.row_key,q.issue_type,q.severity,q.officer_number,q.officer_name,q.appointment_types,q.effective_periods,
+                     MIN(a.effective_from) issue_from,MAX(COALESCE(c.effective_to,'9999-12-31')) issue_to
               FROM {$source} q
               JOIN arpa_division_appointment a ON FIND_IN_SET(a.id,q.related_ids)>0
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               WHERE a.arpa_division_location_id=?
                 AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
-                               WHERE dc.issue_row_key=q.row_key AND dc.resolution_status='KEPT_HISTORICAL_EXCEPTION')
-              GROUP BY q.row_key,q.issue_type";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$divisionId]);return $stmt->fetchAll();
+                               WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))
+              GROUP BY q.row_key,q.issue_type,q.severity,q.officer_number,q.officer_name,q.appointment_types,q.effective_periods
+              UNION ALL
+              SELECT q.row_key,q.issue_type,q.severity,q.officer_number,q.officer_name,q.appointment_types,q.effective_periods,
+                     COALESCE(r.requested_effective_from,?) issue_from,COALESCE(r.requested_effective_to,'9999-12-31') issue_to
+              FROM {$source} q JOIN arpa_division_appointment_request r ON r.id=q.related_ids
+              WHERE r.arpa_division_location_id=? AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id)
+                AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$divisionId,self::BASELINE,$divisionId]);return $stmt->fetchAll();
     }
 
     /** @return array<int,array<string,mixed>> */
     private function reconciliationIssues(string $divisionId):array
     {
-        $sql="SELECT i.id reconciliation_item_id,CONCAT('LEGACY_RECONCILIATION_',i.item_type) issue_type,
+        $sql="SELECT CONCAT('LEGACY_RECONCILIATION:',i.id) row_key,i.id reconciliation_item_id,CONCAT('LEGACY_RECONCILIATION_',i.item_type) issue_type,
+                     'HISTORICAL_EXCEPTION' severity,o.dad_number officer_number,o.name_with_initials officer_name,
+                     COALESCE(i.appointment_type,i.subject_kind) appointment_types,CONCAT(COALESCE(i.effective_from,'Unknown'),' to ',COALESCE(i.effective_to,'Open')) effective_periods,
                      COALESCE(i.effective_from,?) issue_from,COALESCE(i.effective_to,'9999-12-31') issue_to
               FROM legacy_arpa_reconciliation_item i
               JOIN legacy_arpa_appointment_preview p ON p.reconciled_business_key=i.reconciled_business_key AND p.active=1
+              JOIN officer o ON o.id=i.officer_id
               LEFT JOIN legacy_arpa_appointment_resolution r ON r.reconciliation_item_id=i.id
               WHERE i.active=1 AND i.diagnostic_blocker=1
                 AND COALESCE(r.selected_target_arpa_id,i.candidate_arpa_id,p.arpa_location_id)=?
@@ -196,5 +283,6 @@ final class ArpaDivisionContinuityService
     }
 
     private function overlaps(string $aStart,string $aEnd,string $bStart,string $bEnd):bool{return $aStart<=$bEnd&&$aEnd>=$bStart;}
+    private function lockDivision(string $divisionId):void{$stmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$stmt->execute([$divisionId]);if(!$stmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');}
     private function displayDate(string $date):string{$time=strtotime($date);return $time===false?$date:date('d M Y',$time);}
 }

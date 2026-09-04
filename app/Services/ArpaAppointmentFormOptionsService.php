@@ -24,14 +24,17 @@ final class ArpaAppointmentFormOptionsService
         $officers=(new ArpaAppointmentCandidateService($this->pdo))
             ->optionsForAsc($userId,$ascLocationId,$businessEffectiveDate);
         $divisions=(new ArpaAppointmentReadService($this->pdo))
-            ->vacantDivisionsForAsc($userId,$ascLocationId,$businessEffectiveDate);
+            ->timelineDivisionsForAsc($userId,$ascLocationId,$businessEffectiveDate);
         $requirements=(new ArpaDivisionContinuityService($this->pdo))->requirements(
             array_map(static fn(array $row):string=>(string)$row['id'],$divisions),
             $businessEffectiveDate
         );
         foreach($divisions as &$division){
             $requirement=$requirements[(string)$division['id']]??null;
-            if($requirement!==null)$division+=$requirement;
+            if($requirement!==null){
+                $division+=$requirement;
+                $division['timeline_label']=$this->timelineLabel($requirement);
+            }
         }
         unset($division);
 
@@ -41,11 +44,21 @@ final class ArpaAppointmentFormOptionsService
             $requestedSelection,
             $businessEffectiveDate
         );
-        $state['continuityIssue']=null;
+        $state['continuityIssue']=null;$state['unresolvedDataIssues']=[];
         if($state['selectedDivision']!==''){
-            $requirement=$requirements[$state['selectedDivision']];
-            $state['continuityIssue']=(new ArpaDivisionContinuityService($this->pdo))
-                ->blockingDataIssue($state['selectedDivision'],$requirement,$businessEffectiveDate);
+            $continuity=new ArpaDivisionContinuityService($this->pdo);
+            $state['unresolvedDataIssues']=$continuity->unresolvedDataIssues($state['selectedDivision']);
+            $state['continuityIssue']=$state['unresolvedDataIssues'][0]??null;
+            if($state['unresolvedDataIssues']!==[]){
+                foreach($divisions as &$division){
+                    if((string)$division['id']!==$state['selectedDivision'])continue;
+                    $division['unresolved_data_issue_count']=count($state['unresolvedDataIssues']);
+                    $division['timeline_status']='UNRESOLVED_DATA_ISSUE';
+                    $division['timeline_label']=$this->timelineLabel($division);
+                    break;
+                }
+                unset($division);
+            }
         }
         return $state+[
             'officers'=>$officers,
@@ -81,7 +94,7 @@ final class ArpaAppointmentFormOptionsService
 
         $selectedDivision=$requestedDivision!==''&&isset($divisionIds[$requestedDivision])?$requestedDivision:'';
         if($requestedDivision!==''&&$selectedDivision===''){
-            $messages[]='The previously selected ARPA Division is not vacant on the selected start date.';
+            $messages[]='The previously selected ARPA Division has no uncovered period available on the selected start date or is outside the selected ASC.';
         }
 
         $allowedTypes=$selectedOfficer===''?[]:(array)($officerById[$selectedOfficer]['allowed_appointment_types']??[]);
@@ -98,5 +111,31 @@ final class ArpaAppointmentFormOptionsService
             'selectionMessages'=>$messages,
             'displayDate'=>$timestamp===false?$businessEffectiveDate:date('d M Y',$timestamp),
         ];
+    }
+
+    /** @param array<string,mixed> $diagnostic */
+    private function timelineLabel(array $diagnostic):string
+    {
+        $issues=(int)($diagnostic['unresolved_data_issue_count']??0);
+        if($issues>0)return $issues===1?'Data Issue - Review First':$issues.' Data Issues - Review First';
+        $status=(string)($diagnostic['timeline_status']??'');
+        if($status==='INVALID_PERIOD')return 'Invalid Assignment Period';
+        if($status==='MULTIPLE_OPEN_ASSIGNMENTS')return 'Multiple Open Assignments';
+        if($status==='OVERLAP')return 'Overlapping Assignment History';
+        $start=$diagnostic['gap_start']??null;$end=$diagnostic['gap_end']??null;
+        if($start!==null){
+            if($start===ArpaDivisionContinuityService::BASELINE&&$end===null)return 'No History From 01 Jan 2025';
+            if($start===ArpaDivisionContinuityService::BASELINE)return 'Missing: 01 Jan 2025 - '.$this->displayDate((string)$end);
+            return 'Missing: '.$this->displayDate((string)$start).' - '.($end===null?'Open':$this->displayDate((string)$end));
+        }
+        return match($status){
+            'COMPLETE'=>'Complete Timeline - No Missing Period',
+            default=>'Available Period',
+        };
+    }
+
+    private function displayDate(string $date):string
+    {
+        $timestamp=strtotime($date);return $timestamp===false?$date:date('d M Y',$timestamp);
     }
 }

@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 use App\Controllers\ArpaAppointmentController;
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database};
-use App\Services\{ArpaAppointmentReadService,ArpaAppointmentService,ArpaWorkflowQueuePolicy,ScopedDashboardService,UserContextService};
+use App\Services\{ArpaAppointmentReadService,ArpaAppointmentService,ArpaDivisionContinuityService,ArpaWorkflowQueuePolicy,ScopedDashboardService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -48,11 +48,27 @@ final class ArpaWorkflowQueueTest
             $this->same(true,$policy->canUseWorkflowQueues($nationalSubject),'explicit NATIONAL scope enables the National queue');
 
             $read=new ArpaAppointmentReadService($this->pdo);$today=date('Y-m-d');
-            $officers=$read->eligibleOfficersForAsc($this->asctest,$this->asc,$today);$divisions=$read->vacantDivisionsForAsc($this->asctest,$this->asc,$today);
-            if($officers===[]||$divisions===[])throw new RuntimeException('Eligible Kurunegala Officer and vacant Division fixtures are required.');
-            $this->coverDivisionThroughYesterday((string)$officers[0]['id'],(string)$divisions[0]['id'],$today);
+            $divisions=$read->timelineDivisionsForAsc($this->asctest,$this->asc,$today);
+            $continuity=new ArpaDivisionContinuityService($this->pdo);
+            $fixture=null;
+            foreach($divisions as $division){
+                if($continuity->unresolvedDataIssues((string)$division['id'])!==[])continue;
+                $timeline=$continuity->requirement((string)$division['id'],$today);
+                $start=(string)($timeline['required_next_start']??'');
+                if($start===''||array_intersect(['INVALID_PERIOD','MULTIPLE_OPEN_ASSIGNMENTS','OVERLAP'],$timeline['timeline_statuses'])!==[])continue;
+                $officers=$read->eligibleOfficersForAsc($this->asctest,$this->asc,$start);
+                $eligible=array_values(array_filter($officers,static fn(array $row):bool=>in_array('DUTY_COVERING',$row['allowed_appointment_types']??[],true)));
+                if($eligible!==[]){$fixture=['division'=>$division,'timeline'=>$timeline,'officer'=>$eligible[0]];break;}
+            }
+            if($fixture===null)throw new RuntimeException('An eligible Officer and a Data-Issue-free ARPA Division timeline gap fixture are required.');
+            $date=(string)$fixture['timeline']['required_next_start'];$division=$fixture['division'];$officer=$fixture['officer'];
+            $payload=['officer_id'=>$officer['id'],'appointment_type'=>'DUTY_COVERING','asc_location_id'=>$this->asc,'arpa_division_location_id'=>$division['id'],'effective_from'=>$date,'remarks'=>'Transactional workflow queue test'];
+            if(($fixture['timeline']['maximum_end_date']??null)!==null){
+                $payload['effective_to']=$fixture['timeline']['maximum_end_date'];
+                $payload['end_reason_id']=(string)$this->scalar('SELECT id FROM arpa_appointment_end_reason WHERE active=1 ORDER BY display_order,id LIMIT 1');
+            }
             $service=new ArpaAppointmentService($this->pdo);
-            $request=$service->createDivisionAppointmentRequest(['officer_id'=>$officers[0]['id'],'appointment_type'=>'DUTY_COVERING','asc_location_id'=>$this->asc,'arpa_division_location_id'=>$divisions[0]['id'],'effective_from'=>$today,'remarks'=>'Transactional workflow queue test'],$this->asctest);
+            $request=$service->createDivisionAppointmentRequest($payload,$this->asctest);
 
             $new=DataTableRegistry::definition('arpa-new-appointments');$new['baseWhere'][]='r.id=?';$new['baseParams'][]=$request;
             $this->same(1,$this->tableCount($new),'asctest sees their own CREATED request in New Appointments');
@@ -61,9 +77,9 @@ final class ArpaWorkflowQueueTest
             $this->same(1,$this->inbox($this->asctest,$request),'asctest sees submitted Kurunegala request before ASC verification');
             $this->same(0,$this->completed($this->asctest,$request),'ASC verification is absent before action');
 
-            $other=$this->outsideAscRequest((string)$officers[0]['id'],$this->asctest,$today);
+            $other=$this->outsideAscRequest((string)$officer['id'],$this->asctest,$date);
             $this->same(0,$this->inbox($this->asctest,$other),'ASC EXACT scope excludes another ASC actionable request');
-            $historyOnly=$this->historyOnlyRequest((string)$officers[0]['id'],$this->asc,(string)$divisions[1]['id'],$this->asctest,$today);
+            $historyOnly=$this->historyOnlyRequest((string)$officer['id'],$this->asc,(string)$division['id'],$this->asctest,$date);
             $this->same(0,$this->inbox($this->asctest,$historyOnly),'legacy_history_only request is excluded from the live inbox');
 
             $service->workflow('division',$request,'VERIFY','ASC',null,$this->asctest);

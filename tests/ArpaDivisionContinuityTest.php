@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 use App\Core\Database;
-use App\Services\{ArpaAppointmentService,ArpaDivisionContinuityService};
+use App\Services\{ArpaAppointmentFormOptionsService,ArpaAppointmentReadService,ArpaAppointmentService,ArpaDivisionContinuityService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -41,19 +41,63 @@ final class ArpaDivisionContinuityTest
         $this->appointment($august,'2025-01-01','2025-08-31');
         $augustGap=$this->continuity->requirement($august,'2026-01-01');
         $this->same('2025-09-01',$augustGap['required_next_start'],'required date is previous end plus one day');
-        $this->same('2025-12-31',$augustGap['gap_end'],'gap end is the day before proposed start');
+        $this->same(null,$augustGap['gap_end'],'the final uncovered period is open rather than derived from the proposed date');
         $this->throwsContains(fn()=>$this->continuity->assertCanStart($august,'2026-01-01'),'01 Sep 2025','later proposal reports the exact required date');
 
         $kalahogedara=$this->division('Kalahogedara Regression');
         $prior=$this->appointment($kalahogedara,'2025-01-01','2025-12-31');
         $januaryGap=$this->continuity->requirement($kalahogedara,'2026-01-22');
         $this->same('2026-01-01',$januaryGap['required_next_start'],'Kalahogedara required next date is 01 January 2026');
-        $this->same('2026-01-21',$januaryGap['gap_end'],'Kalahogedara gap ends the day before the invalid proposal');
+        $this->same(null,$januaryGap['gap_end'],'Kalahogedara final missing period is not fabricated from the invalid proposal');
         $this->throwsContains(fn()=>$this->continuity->assertCanStart($kalahogedara,'2026-01-22'),'01 Jan 2026','Kalahogedara 22 January regression is blocked');
         $this->same('EXACT',$this->continuity->assertCanStart($kalahogedara,'2026-01-01')['relation'],'day immediately after prior end passes continuity');
         $this->throwsContains(fn()=>$this->continuity->assertCanStart($kalahogedara,'2025-12-31'),'overlaps an existing authoritative','start before required date is rejected as overlap');
         $this->same($this->officer,(string)$this->value('SELECT officer_id FROM arpa_division_appointment WHERE id=?',[$prior]),'prior period belongs to a specific Officer');
         $this->same('2026-01-01',$this->continuity->requirement($kalahogedara,'2026-01-22')['required_next_start'],'continuity remains Division-based and has no proposed-Officer input');
+
+        $bounded=$this->division('Current With Historical Gap');
+        $this->appointment($bounded,'2025-01-01','2025-04-30');
+        $this->appointment($bounded,'2026-01-01',null);
+        $boundedGap=$this->continuity->requirement($bounded,'2025-05-01');
+        $this->same('2025-05-01',$boundedGap['required_next_start'],'historical gap begins immediately after earlier coverage');
+        $this->same('2025-12-31',$boundedGap['gap_end'],'bounded gap ends immediately before the later current assignment');
+        $this->same('2026-01-01',$boundedGap['next_existing_start'],'later current assignment is exposed by the timeline');
+        $this->same('CURRENT_WITH_HISTORICAL_GAP',$boundedGap['timeline_status'],'current appointment does not hide the earlier historical gap');
+        $this->same('EXACT',$this->continuity->assertCanStart($bounded,'2025-05-01',null,null,false)['relation'],'the beginning of a bounded historical gap is a valid continuity start');
+        $this->same('2025-12-31',$this->continuity->assertCanFillPeriod($bounded,'2025-05-01','2025-12-31',null,null,false)['maximum_end_date'],'the complete bounded gap can be filled');
+        (new ArpaAppointmentReadService($this->pdo))->assertDivisionPeriodAvailable($this->asc,$bounded,'2025-05-01','2025-12-31');$this->assertions++;
+        $this->throwsContains(fn()=>(new ArpaAppointmentReadService($this->pdo))->assertDivisionPeriodAvailable($this->asc,$bounded,'2025-05-01',null),'proposed assignment period overlaps','an unbounded period cannot overlap the later current assignment');
+        $this->throwsContains(fn()=>$this->continuity->assertCanStart($bounded,'2025-08-01',null,null,false),'01 May 2025','starting in the middle of a bounded gap is rejected');
+        $this->throwsContains(fn()=>$this->continuity->assertCanStart($bounded,'2026-02-01',null,null,false),'overlaps an existing authoritative','a date covered by the later Open assignment is rejected');
+        $this->throwsContains(fn()=>$this->continuity->assertCanFillPeriod($bounded,'2025-05-01',null,null,null,false),'must end on 31 Dec 2025','bounded historical gap cannot be converted into an Open assignment');
+        $options=(new ArpaAppointmentFormOptionsService($this->pdo))->load($this->actor,$this->asc,'2025-05-01',['arpa_division_location_id'=>$bounded]);
+        $this->same(true,in_array($bounded,array_column($options['arpaDivisions'],'id'),true),'Division remains visible even though it has a later current appointment');
+        $this->same($bounded,$options['selectedDivision'],'historical-gap Division remains selectable');
+
+        $betweenClosed=$this->division('Gap Between Closed Assignments');
+        $this->appointment($betweenClosed,'2025-01-01','2025-03-31');
+        $this->appointment($betweenClosed,'2025-06-01','2025-12-31');
+        $closedGap=$this->continuity->requirement($betweenClosed,'2025-04-01');
+        $this->same('2025-04-01',$closedGap['gap_start'],'gap between closed assignments is detected');
+        $this->same('2025-05-31',$closedGap['gap_end'],'closed gap uses the next assignment minus one day');
+
+        $multipleGaps=$this->division('Multiple Gaps');
+        $this->appointment($multipleGaps,'2025-02-01','2025-02-28');
+        $this->appointment($multipleGaps,'2025-04-01','2025-04-30');
+        $this->same(3,$this->continuity->requirement($multipleGaps,'2025-01-01')['gap_count'],'all baseline, intermediate, and final gaps are detected');
+
+        $overlapDivision=$this->division('Historical Overlap');
+        $this->appointment($overlapDivision,'2025-01-01','2025-06-30');
+        $this->appointment($overlapDivision,'2025-05-01','2025-08-31');
+        $overlapDiagnostic=$this->continuity->requirement($overlapDivision,'2025-09-01');
+        $this->same('OVERLAP',$overlapDiagnostic['timeline_status'],'overlap is classified independently from the later uncovered period');
+        $this->same(1,$overlapDiagnostic['overlap_count'],'timeline reports the overlapping authoritative record');
+
+        $multipleOpen=$this->division('Multiple Open');
+        $this->appointment($multipleOpen,'2025-01-01',null);
+        $this->appointment($multipleOpen,'2026-01-01',null);
+        $multipleOpenDiagnostic=$this->continuity->requirement($multipleOpen,'2026-09-01');
+        $this->same(true,in_array('MULTIPLE_OPEN_ASSIGNMENTS',$multipleOpenDiagnostic['timeline_statuses'],true),'multiple Open assignments are classified as an invalid timeline');
 
         $issueDivision=$this->division('Data Issue Range');
         $this->appointment($issueDivision,'2025-01-01','2025-12-14');
@@ -96,7 +140,7 @@ final class ArpaDivisionContinuityTest
         $this->same(true,in_array('ca8868e8-46fd-43b7-944d-a7ff6aa4ae49',$productionInvalid,true),'read-only diagnostic identifies the existing Kalahogedara pending request');
 
         $service=(string)file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentService.php');
-        $this->same(true,substr_count($service,'assertCanStart(')>=5,'continuity is enforced on create, edit/resubmit, workflow stages, transfer, and final materialization');
+        $this->same(true,substr_count($service,'assertCanFillPeriod(')>=4,'complete-period continuity is enforced on create, edit/resubmit, workflow stages, and final materialization');
         $this->same(true,str_contains($service,"['SUBMIT','VERIFY','APPROVE']"),'every authoritative workflow stage revalidates continuity');
         $this->same('2025-01-01',ArpaDivisionContinuityService::BASELINE,'continuity baseline remains canonical');
     }
@@ -111,16 +155,19 @@ final class ArpaDivisionContinuityTest
         return $id;
     }
 
-    private function appointment(string $division,string $from,string $to,bool $withReason=true):string
+    private function appointment(string $division,string $from,?string $to,bool $withReason=true):string
     {
-        $request=$this->uuid();$appointment=$this->uuid();$location=$this->row('SELECT a.dad_number asc_dad,a.name_en asc_name,d.dad_number arpa_dad,d.name_en arpa_name FROM location a JOIN location d ON d.id=? WHERE a.id=?',[$division,$this->asc]);
-        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,created_by,finalized_by,finalized_at) VALUES(?,'LEGACY_IMPORT','APPOINTMENT',?,'PERMANENT',?,?,?,'DISTRICT_APPROVED',1,?,?,NOW())")
-            ->execute([$request,$this->officer,$this->asc,$division,$from,$this->actor,$this->actor]);
+        $request=$this->uuid();$appointment=$this->uuid();$historyOnly=$to===null?0:1;$location=$this->row('SELECT a.dad_number asc_dad,a.name_en asc_name,d.dad_number arpa_dad,d.name_en arpa_name FROM location a JOIN location d ON d.id=? WHERE a.id=?',[$division,$this->asc]);
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,created_by,finalized_by,finalized_at) VALUES(?,'LEGACY_IMPORT','APPOINTMENT',?,'PERMANENT',?,?,?,'DISTRICT_APPROVED',?,?,?,NOW())")
+            ->execute([$request,$this->officer,$this->asc,$division,$from,$historyOnly,$this->actor,$this->actor]);
         $this->pdo->prepare("INSERT INTO arpa_division_appointment(id,record_origin,request_id,officer_id,appointment_type,service_permanency_snapshot,service_permanency_source,asc_location_id,arpa_division_location_id,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at,approval_timestamp_provenance,legacy_history_only) VALUES(?,'LEGACY_IMPORT',?,?,'PERMANENT','PERMANENT_IN_SERVICE','EXACT_PERMANENTED_DATE',?,?,?,?,?,?,'{}',?,?,NULL,'UNAVAILABLE_FROM_LEGACY_SOURCE',1)")
             ->execute([$appointment,$request,$this->officer,$this->asc,$division,$location['asc_dad'],$location['asc_name'],$location['arpa_dad'],$location['arpa_name'],$from,$this->actor]);
-        $reason=$withReason?(string)$this->value('SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1'):null;
-        $this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,end_reason_id,closure_kind,context_snapshot_json,approved_by,approved_at,approval_timestamp_provenance) VALUES(?,'LEGACY_IMPORT',?,?,?,?,'DIRECT','{}',?,NULL,'UNAVAILABLE_FROM_LEGACY_SOURCE')")
-            ->execute([$this->uuid(),$appointment,$request,$to,$reason,$this->actor]);
+        if($historyOnly===0)$this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=0 WHERE id=?')->execute([$appointment]);
+        if($to!==null){
+            $reason=$withReason?(string)$this->value('SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1'):null;
+            $this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,end_reason_id,closure_kind,context_snapshot_json,approved_by,approved_at,approval_timestamp_provenance) VALUES(?,'LEGACY_IMPORT',?,?,?,?,'DIRECT','{}',?,NULL,'UNAVAILABLE_FROM_LEGACY_SOURCE')")
+                ->execute([$this->uuid(),$appointment,$request,$to,$reason,$this->actor]);
+        }
         return $appointment;
     }
 

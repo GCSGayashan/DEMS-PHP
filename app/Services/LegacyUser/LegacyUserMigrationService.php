@@ -404,8 +404,8 @@ final class LegacyUserMigrationService
         $dir=BASE_PATH.'/storage/reports';if(!is_dir($dir)&&!mkdir($dir,0775,true)&&!is_dir($dir))throw new RuntimeException('Unable to create migration report directory.');
         $stamp=date('Ymd-His');$base=$dir.'/legacy-user-migration-'.$stamp;
         $handle=fopen($base.'.csv','wb');if($handle===false)throw new RuntimeException('Unable to create migration CSV report.');
-        fputcsv($handle,['legacy_user_id','legacy_username','target_username','display_name','classification','match_method','target_user_id','target_officer_id','target_email','target_mobile','legacy_status','legacy_role','legacy_level','context_count','access_metadata_count','issue_types','issue_messages']);
-        foreach($this->plans as $p){$r=$p['row'];fputcsv($handle,[$p['legacy_id'],$p['legacy_username'],$p['username'],$p['display_name'],$p['classification'],$p['match_method'],$p['target_user_id'],$p['target_officer_id'],$p['email'],$p['phone'],$r['status'],$r['role_name'],$r['user_level_name'],count($p['contexts']),count($p['access']),implode('|',array_column($p['issues'],'issue_type')),implode('|',array_column($p['issues'],'message'))]);}
+        fputcsv($handle,['legacy_user_id','legacy_username','target_username','display_name','classification','match_method','target_user_id','target_officer_id','target_email','target_mobile','legacy_status','legacy_role','legacy_level','context_count','access_metadata_count','issue_types','issue_messages'],',','"','');
+        foreach($this->plans as $p){$r=$p['row'];fputcsv($handle,[$p['legacy_id'],$p['legacy_username'],$p['username'],$p['display_name'],$p['classification'],$p['match_method'],$p['target_user_id'],$p['target_officer_id'],$p['email'],$p['phone'],$r['status'],$r['role_name'],$r['user_level_name'],count($p['contexts']),count($p['access']),implode('|',array_column($p['issues'],'issue_type')),implode('|',array_column($p['issues'],'message'))],',','"','');}
         fclose($handle);
         file_put_contents($base.'.json',$this->json($summary),LOCK_EX);
         return ['csv'=>$base.'.csv','json'=>$base.'.json'];

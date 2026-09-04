@@ -44,8 +44,14 @@ final class DashboardCounterTest
         $this->same($expectedActive,$counts['active_users'],'activated operational STAFF identities count as Active Users');
         $this->same($expectedHistorical,$counts['historical_users'],'remaining HISTORICAL identities count as Historical Users');
         $this->same($expectedTotal,$counts['total_user_identities'],'all system_user rows count as Total User Identities');
-        $this->same($expectedActive+$expectedHistorical,$expectedTotal,'database identity population reconciles');
-        $this->same($counts['active_users']+$counts['historical_users'],$counts['total_user_identities'],'dashboard identity population reconciles');
+        $expectedOther=(int)$pdo->query("
+            SELECT COUNT(*)
+            FROM system_user
+            WHERE NOT(identity_type='STAFF' AND account_status='ACTIVE' AND enabled=1)
+              AND NOT(identity_type='HISTORICAL' AND enabled=0)
+        ")->fetchColumn();
+        $this->same($expectedActive+$expectedHistorical+$expectedOther,$expectedTotal,'all current, historical, and pending/other identities reconcile to the total');
+        $this->same($expectedOther,$counts['total_user_identities']-$counts['active_users']-$counts['historical_users'],'dashboard retains identities that do not belong in either headline subset');
         $this->same($expectedOfficers,$counts['officers'],'dashboard counts every approved Officer');
 
         $admin=$pdo->query("SELECT identity_type,account_status,enabled FROM system_user WHERE username='dems.admin'")->fetch();

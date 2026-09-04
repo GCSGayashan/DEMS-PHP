@@ -14,9 +14,11 @@ final class LoginThrottleTest
     private string $password = 'ThrottlePassword!123';
     private array $createdKeys = [];
     private array $auditTargets = [];
+    private string $sessionDirectory = '';
 
     public function run(): int
     {
+        $this->configureSessionDirectory();
         $this->pdo = Database::pdo();
         $this->userId = (string)$this->pdo->query('SELECT UUID()')->fetchColumn();
         $this->username = 'throttletest-' . substr(str_replace('-', '', $this->userId), 0, 10);
@@ -44,6 +46,7 @@ final class LoginThrottleTest
                 $this->pdo->prepare('DELETE FROM login_attempt_throttle WHERE throttle_key=?')->execute([$key]);
             }
             $this->pdo->prepare('DELETE FROM system_user WHERE id=?')->execute([$this->userId]);
+            $this->removeSessionDirectory();
         }
 
         echo "LoginThrottleTest: {$this->assertions} assertions passed.\n";
@@ -233,6 +236,30 @@ final class LoginThrottleTest
             session_id('');
             SessionManager::start();
         }
+    }
+
+    private function configureSessionDirectory(): void
+    {
+        $this->sessionDirectory = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'dems-login-throttle-test-' . bin2hex(random_bytes(8));
+        if (!mkdir($this->sessionDirectory, 0700) && !is_dir($this->sessionDirectory)) {
+            throw new RuntimeException('Unable to create the isolated login-throttle session directory.');
+        }
+        if (ini_set('session.save_path', $this->sessionDirectory) === false) {
+            throw new RuntimeException('Unable to configure the isolated login-throttle session directory.');
+        }
+    }
+
+    private function removeSessionDirectory(): void
+    {
+        if ($this->sessionDirectory === '' || !is_dir($this->sessionDirectory)) {
+            return;
+        }
+        foreach (glob($this->sessionDirectory . DIRECTORY_SEPARATOR . 'sess_*') ?: [] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+        rmdir($this->sessionDirectory);
     }
 
     private function same(mixed $expected, mixed $actual, string $message): void

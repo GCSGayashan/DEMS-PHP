@@ -65,9 +65,9 @@ final class ArpaAppointmentBusinessRulesTest
         $firstDuty=$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[2],$today),$actor);
         $secondDuty=$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[3],$today),$actor);
         $this->same(2,$this->count("SELECT COUNT(*) FROM arpa_division_appointment_request WHERE id IN(?,?) AND workflow_status='SUBMITTED'",[$firstDuty,$secondDuty]),'multiple Duty Covering assignments to different Divisions are allowed');
-        $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[2],$today),$actor),'This officer already covers this ARPA Division for the selected period.','duplicate submitted Duty Covering is blocked for the same Division');
+        $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[2],$today),$actor),'The proposed start date overlaps an existing authoritative ARPA Division assignment period.','duplicate submitted Duty Covering is blocked by the authoritative Division reservation');
         $this->createApprovedAppointment($permanentOfficer,'DUTY_COVERING',$asc,$divisions[4],$future,$actor);
-        $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[4],$today),$actor),'This officer already covers this ARPA Division for the selected period.','future scheduled Duty Covering reserves its Division period');
+        $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[4],$today),$actor),'This historical gap is bounded by a later assignment. The new assignment must end on '.date('d M Y',strtotime($future.' -1 day')).'.','future scheduled Duty Covering cannot be bypassed by creating an unbounded earlier assignment');
 
         foreach(['ACTING','ATTEND_TO_DUTY','DUTY_COVERING'] as $dependent)$this->throwsMessage(
             fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($nonPermanentOfficer,$dependent,$asc,$divisions[5],$today),$actor),
@@ -97,7 +97,6 @@ final class ArpaAppointmentBusinessRulesTest
     /** @return array{asc_id:string,office_id:string,divisions:list<string>} */
     private function locationFixture(string $date):array
     {
-        $status="'SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'";
         $stmt=$this->pdo->prepare("SELECT lr.parent_location_id asc_id,ofc.id office_id,COUNT(*) available
             FROM location_relationship lr JOIN location l ON l.id=lr.child_location_id
             JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ARPA_DIVISION'
@@ -105,16 +104,16 @@ final class ArpaAppointmentBusinessRulesTest
             WHERE lr.relationship_type='ASC_ARPA_DIVISION' AND lr.active=1 AND lr.approval_status='APPROVED'
               AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
               AND l.approval_status='APPROVED' AND l.operational_status='ACTIVE'
-              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0 AND (c.effective_to IS NULL OR c.effective_to>=?))
-              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=l.id AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$status}))
+              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.arpa_division_location_id=l.id)
+              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=l.id)
             GROUP BY lr.parent_location_id,ofc.id HAVING available>=10 ORDER BY available DESC LIMIT 1");
-        $stmt->execute([$date,$date,$date]);$row=$stmt->fetch();if(!$row)throw new RuntimeException('An ASC with ten vacant ARPA Divisions is required.');
+        $stmt->execute([$date,$date]);$row=$stmt->fetch();if(!$row)throw new RuntimeException('An ASC with ten unused ARPA Divisions is required.');
         $divisionStmt=$this->pdo->prepare("SELECT l.id FROM location_relationship lr JOIN location l ON l.id=lr.child_location_id JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ARPA_DIVISION'
             WHERE lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION' AND lr.active=1 AND lr.approval_status='APPROVED'
-              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0 AND (c.effective_to IS NULL OR c.effective_to>=?))
-              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=l.id AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$status}))
+              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.arpa_division_location_id=l.id)
+              AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=l.id)
             ORDER BY l.dad_number LIMIT 10 FOR UPDATE");
-        $divisionStmt->execute([$row['asc_id'],$date]);$divisions=array_map('strval',$divisionStmt->fetchAll(PDO::FETCH_COLUMN));
+        $divisionStmt->execute([$row['asc_id']]);$divisions=array_map('strval',$divisionStmt->fetchAll(PDO::FETCH_COLUMN));
         return ['asc_id'=>(string)$row['asc_id'],'office_id'=>(string)$row['office_id'],'divisions'=>$divisions];
     }
 

@@ -12,9 +12,17 @@ final class SessionSecurityTest
     private string $userId = '';
     private string $username = '';
     private string $password = 'SessionPassword!123';
+    private string $sessionDirectory = '';
 
     public function run(): int
     {
+        $this->sessionDirectory = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'dems-session-test-' . bin2hex(random_bytes(8));
+        if (!mkdir($this->sessionDirectory, 0700) && !is_dir($this->sessionDirectory)) {
+            throw new RuntimeException('Unable to create the isolated session-test directory.');
+        }
+        if (ini_set('session.save_path', $this->sessionDirectory) === false) {
+            throw new RuntimeException('Unable to configure the isolated session-test directory.');
+        }
         $this->pdo = Database::pdo();
         $this->userId = (string)$this->pdo->query('SELECT UUID()')->fetchColumn();
         $this->username = 'sessiontest-' . substr(str_replace('-', '', $this->userId), 0, 10);
@@ -35,6 +43,7 @@ final class SessionSecurityTest
                 Auth::logout();
             }
             $this->pdo->prepare('DELETE FROM system_user WHERE id = ?')->execute([$this->userId]);
+            $this->removeSessionDirectory();
         }
 
         echo "SessionSecurityTest: {$this->assertions} assertions passed.\n";
@@ -144,6 +153,19 @@ final class SessionSecurityTest
         }
         session_id('');
         SessionManager::start();
+    }
+
+    private function removeSessionDirectory(): void
+    {
+        if ($this->sessionDirectory === '' || !is_dir($this->sessionDirectory)) {
+            return;
+        }
+        foreach (glob($this->sessionDirectory . DIRECTORY_SEPARATOR . 'sess_*') ?: [] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+        rmdir($this->sessionDirectory);
     }
 
     private function same(mixed $expected, mixed $actual, string $message): void

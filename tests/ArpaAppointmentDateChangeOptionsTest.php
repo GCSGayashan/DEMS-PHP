@@ -54,7 +54,7 @@ final class ArpaAppointmentDateChangeOptionsTest
         $this->same('',$invalid['selectedOfficer'],'invalidated Officer is cleared alone');
         $this->same('',$invalid['selectedDivision'],'invalidated Division is cleared alone');
         $this->same(true,in_array('The previously selected Officer is not eligible on the selected start date.',$invalid['selectionMessages'],true),'invalid Officer receives a controlled message');
-        $this->same(true,in_array('The previously selected ARPA Division is not vacant on the selected start date.',$invalid['selectionMessages'],true),'invalid Division receives a controlled message');
+        $this->same(true,in_array('The previously selected ARPA Division has no uncovered period available on the selected start date or is outside the selected ASC.',$invalid['selectionMessages'],true),'invalid Division receives a controlled message');
 
         ArpaAppointmentRules::assertNativeEffectiveDate('2025-01-01');$this->assertions++;
         $this->throws(fn()=>$formOptions->load($user,$asc,'2024-12-31'),'pre-baseline option request is rejected by business-date validation');
@@ -75,11 +75,13 @@ final class ArpaAppointmentDateChangeOptionsTest
         $this->appointment($user,$officer,$asc,(string)$divisions[2]['id'],'2026-04-01');
         $scheduled=array_column($read->vacantDivisionsForAsc($user,$asc,$date),'id');
         $this->same(false,in_array((string)$divisions[2]['id'],$scheduled,true),'scheduled open appointment continues to reserve the Division');
+        $timelineOptions=$formOptions->load($user,$asc,$date,['arpa_division_location_id'=>(string)$divisions[2]['id']]);
+        $this->same(true,in_array((string)$divisions[2]['id'],array_column($timelineOptions['arpaDivisions'],'id'),true),'New Assignment keeps a Division with later coverage visible for historical timeline evaluation');
 
         $view=(string)file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/division_form.php');
         $controller=(string)file_get_contents(BASE_PATH.'/app/Controllers/ArpaAppointmentController.php');
         $this->same(true,str_contains($view,'No eligible ARPA Officers are available for'),'empty Officer state is explicit');
-        $this->same(true,str_contains($view,'No vacant ARPA Divisions are available for'),'empty Division state is explicit');
+        $this->same(true,str_contains($view,'No ARPA Divisions are available within this Agrarian Service Center'),'empty Division state is explicit');
         $this->same(true,str_contains($controller,"assertArpaStageScope('ASC',\$ascId)"),'dependent endpoint enforces current ASC scope server-side');
         $this->same(false,str_contains($controller,"assertArpaStageScope('ASC',\$ascId,\$businessDate)"),'business date is not passed into actor authorization');
     }

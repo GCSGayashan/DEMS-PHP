@@ -156,6 +156,8 @@ final class ArpaAppointmentIssuePresentation
             'CORRECT_END_REASON' => 'Correct End Reason',
             'SELECT_CURRENT_RECORD' => 'Select the Current Appointment',
             'KEEP_AS_HISTORICAL_EXCEPTION' => 'Keep as Historical Record',
+            'RESOLVE_CANONICAL_ASSIGNMENT' => 'Resolve and Add to Assignments',
+            'CLEAR_EFFECTIVE_TO' => 'Reopen Assignment',
             default => ucwords(strtolower(str_replace('_', ' ', $action))),
         };
     }

@@ -753,9 +753,9 @@ final class LegacyArpaOfficerMigrationService
             throw new RuntimeException('Unable to create Officer migration CSV report.');
         }
         $columns = ['legacy_officer_id', 'legacy_nic', 'canonical_nic', 'name_with_initials', 'full_name_en', 'legacy_designation_id', 'legacy_designation_name', 'legacy_status', 'legacy_grade', 'class_system_key', 'officer_id', 'dad_number', 'migration_status', 'issue_types', 'issue_messages'];
-        fputcsv($handle, $columns);
+        fputcsv($handle, $columns, ',', '"', '');
         foreach ($this->reportRows as $row) {
-            fputcsv($handle, array_map(static fn(string $column): mixed => $row[$column] ?? null, $columns));
+            fputcsv($handle, array_map(static fn(string $column): mixed => $row[$column] ?? null, $columns), ',', '"', '');
         }
         fclose($handle);
         $jsonPath = substr($csvPath, 0, -4) . '.json';

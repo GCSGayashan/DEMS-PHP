@@ -189,11 +189,10 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission(ArpaAppointmentDataIssueCorrectionService::PERMISSION);
         $service=$this->dataIssueCorrectionService();$rowKey=rawurldecode($key);$issue=$service->issue($rowKey);$actor=(string)Auth::user()['id'];
-        if(!$issue){http_response_code(404);$this->flash('danger','The issue is no longer active.');redirect('/hr/arpa-appointments/issues');}
-        if(!$service->canCorrect($actor,(string)$issue['asc_location_id'])){http_response_code(403);$this->render('partials/forbidden',['permission'=>'an active ASC Subject Officer role and approved ASC EXACT scope']);return;}
         Csrf::validate();
+        if($issue&&!$service->canCorrect($actor,(string)$issue['asc_location_id'])){http_response_code(403);$this->render('partials/forbidden',['permission'=>'an active ASC Subject Officer role and approved ASC EXACT scope']);return;}
         try{$result=$service->correct($rowKey,$_POST,$actor);$this->flash('success',$result['issue_remaining']?'Correction saved. This record still needs checking.':'Correction saved. This issue is now resolved.');redirect('/hr/arpa-appointments/issues/corrections/'.$result['correction_id']);}
-        catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues/'.rawurlencode($rowKey));}
+        catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect($issue?'/hr/arpa-appointments/issues/'.rawurlencode($rowKey):'/hr/arpa-appointments/issues?category=RESOLVED_REVIEWED');}
         catch(Throwable $e){error_log('ARPA data-issue correction failed: '.$e->getMessage());$this->flash('danger','The correction could not be saved. No information was changed.');redirect('/hr/arpa-appointments/issues/'.rawurlencode($rowKey));}
     }
 
@@ -202,6 +201,21 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');
         try{$correction=$this->dataIssueCorrectionService()->correction($id,(string)Auth::user()['id']);$this->render('arpa_appointments/issues/correction_detail',compact('correction'));}
         catch(DomainException $e){http_response_code(404);$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues?category=RESOLVED_REVIEWED');}
+    }
+
+    public function editHistoricalCanonicalAssignment(string $id):void
+    {
+        Auth::requirePermission(ArpaAppointmentDataIssueCorrectionService::PERMISSION);
+        try{$data=$this->dataIssueCorrectionService()->canonicalCorrectionForm($id,(string)Auth::user()['id']);$this->render('arpa_appointments/historical_canonical_correction',$data);}
+        catch(DomainException $e){http_response_code(403);$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/divisions/'.$id);}
+    }
+
+    public function updateHistoricalCanonicalAssignment(string $id):void
+    {
+        Auth::requirePermission(ArpaAppointmentDataIssueCorrectionService::PERMISSION);Csrf::validate();
+        try{$result=$this->dataIssueCorrectionService()->correctCanonicalEndDate($id,$_POST,(string)Auth::user()['id']);$this->flash('success',$result['appointment_status']==='OPEN'?'Assignment reopened and returned to Current Assignments.':'Assignment end details corrected; it now appears in Assignment History.');redirect('/hr/arpa-appointments/divisions/'.$id);}
+        catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/divisions/'.$id.'/correct-historical');}
+        catch(Throwable $e){error_log('ARPA historical canonical correction failed: '.get_class($e).' '.$e->getMessage());$this->flash('danger','The correction could not be saved. No information was changed.');redirect('/hr/arpa-appointments/divisions/'.$id.'/correct-historical');}
     }
 
     public function history(): void
@@ -446,17 +460,32 @@ final class ArpaAppointmentController extends Controller
                 ],$options['officers']),
                 'arpa_divisions'=>array_map(static fn(array $row):array=>[
                     'id'=>(string)$row['id'],
-                    'label'=>(string)$row['dad_number'].' - '.(string)$row['name_en'],
+                    'label'=>(string)$row['dad_number'].' - '.(string)$row['name_en'].' ['.(string)($row['timeline_label']??'Available').']',
                     'required_next_start'=>$row['required_next_start']??null,
                     'last_covered_through'=>$row['last_covered_through']??null,
                     'continuity_relation'=>$row['relation']??null,
                     'gap_end'=>$row['gap_end']??null,
+                    'maximum_end_date'=>$row['maximum_end_date']??null,
+                    'next_existing_start'=>$row['next_existing_start']??null,
+                    'next_existing_end'=>$row['next_existing_end']??null,
+                    'timeline_status'=>$row['timeline_status']??null,
+                    'timeline_statuses'=>$row['timeline_statuses']??[],
+                    'unresolved_data_issue_count'=>(int)($row['unresolved_data_issue_count']??0),
                 ],$options['arpaDivisions']),
                 'selection'=>[
                     'officer_id'=>$options['selectedOfficer'],
                     'arpa_division_location_id'=>$options['selectedDivision'],
                     'appointment_type'=>$options['selectedAppointmentType'],
                     'blocking_data_issue'=>$options['continuityIssue'],
+                    'unresolved_data_issues'=>array_map(static fn(array $issue):array=>[
+                        'row_key'=>$issue['row_key']??null,
+                        'reconciliation_item_id'=>$issue['reconciliation_item_id']??null,
+                        'officer'=>(string)($issue['officer_number']??'').' - '.(string)($issue['officer_name']??'Unknown Officer'),
+                        'appointment_type'=>(string)($issue['appointment_types']??$issue['issue_type']??'Appointment'),
+                        'period'=>(string)($issue['effective_periods']??(($issue['issue_from']??'Unknown').' to '.(($issue['issue_to']??'9999-12-31')==='9999-12-31'?'Open':$issue['issue_to']))),
+                        'issue_type'=>(string)($issue['issue_type']??'APPOINTMENT_DATA_ISSUE'),
+                        'status'=>'UNRESOLVED',
+                    ],$options['unresolvedDataIssues']),
                 ],
                 'messages'=>$options['selectionMessages'],
                 'display_date'=>$options['displayDate'],
@@ -503,8 +532,9 @@ final class ArpaAppointmentController extends Controller
         Auth::requirePermission('arpa.appointment.view');$record=$this->divisionRecord($id);$this->assertLocationScope((string)$record['asc_location_id']);
         $pdo=Database::pdo();$stmt=$pdo->prepare('SELECT c.*,er.name_en end_reason FROM arpa_division_appointment_closure c LEFT JOIN arpa_appointment_end_reason er ON er.id=c.end_reason_id WHERE c.appointment_id=?');$stmt->execute([$id]);$closure=$stmt->fetch()?:null;
         $stmt=$pdo->prepare('SELECT r.*,creator.username creator_name,finalizer.username finalizer_name FROM arpa_division_appointment_request r LEFT JOIN system_user creator ON creator.id=r.created_by LEFT JOIN system_user finalizer ON finalizer.id=r.finalized_by WHERE r.id=?');$stmt->execute([$record['request_id']]);$request=$stmt->fetch()?:[];
-        $corrections=$this->dataIssueCorrectionService()->correctionsForAppointment($id);
-        $this->render('arpa_appointments/appointment_detail',compact('record','closure','request','corrections'));
+        $correctionService=$this->dataIssueCorrectionService();$corrections=$correctionService->correctionsForAppointment($id);
+        $canCorrectHistorical=false;try{$correctionService->canonicalCorrectionForm($id,(string)Auth::user()['id']);$canCorrectHistorical=true;}catch(DomainException){}
+        $this->render('arpa_appointments/appointment_detail',compact('record','closure','request','corrections','canCorrectHistorical'));
     }
 
     public function createSubjectAssignment(): void
@@ -684,9 +714,9 @@ final class ArpaAppointmentController extends Controller
     /** @param array{officer_id?:string,arpa_division_location_id?:string,appointment_type?:string} $requestedSelection */
     private function divisionFormOptions(string $ascId,string $effectiveDate,bool $includeAscOptions=false,array $requestedSelection=[]):array
     {
-        $empty=['officers'=>[],'arpaDivisions'=>[],'selectedOfficer'=>'','selectedDivision'=>'','selectedAppointmentType'=>'','selectionMessages'=>[],'displayDate'=>$effectiveDate,'continuityIssue'=>null];
+        $empty=['officers'=>[],'arpaDivisions'=>[],'selectedOfficer'=>'','selectedDivision'=>'','selectedAppointmentType'=>'','selectionMessages'=>[],'displayDate'=>$effectiveDate,'continuityIssue'=>null,'unresolvedDataIssues'=>[]];
         $options=$ascId===''?$empty:(new ArpaAppointmentFormOptionsService(Database::pdo()))->load((string)Auth::user()['id'],$ascId,$effectiveDate,$requestedSelection);
-        return $options+['ascs'=>$includeAscOptions?$this->locations('ASC'):[]];
+        return $options+['ascs'=>$includeAscOptions?$this->locations('ASC'):[],'reasons'=>$this->endReasons()];
     }
 
     /** @return array{officer_id:string,arpa_division_location_id:string,appointment_type:string} */

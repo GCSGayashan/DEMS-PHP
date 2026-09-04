@@ -23,7 +23,14 @@ final class LegacyArpaLocationRepairTest
         $this->same($postRepair?0:11780, $report['request_layer']['mismatched'], 'verified request mismatch count');
         $this->same($postRepair?0:11780, $report['request_layer']['repairable'], 'all remaining mismatched requests deterministically repairable');
         $this->same(0, $report['request_layer']['manual_review'], 'no request candidate needs manual review');
-        $this->same(13485, $report['operational_layer']['examined'], 'all imported operational Division appointments examined');
+        $expectedOperational=(int)$this->pdo->query(
+            "SELECT COUNT(*)
+             FROM arpa_division_appointment a
+             INNER JOIN arpa_division_appointment_request r ON r.id=a.request_id
+             WHERE a.record_origin='LEGACY_IMPORT'
+               AND JSON_UNQUOTE(JSON_EXTRACT(r.origin_metadata_json,'$.location_provenance.target_context_id')) IS NOT NULL"
+        )->fetchColumn();
+        $this->same($expectedOperational, $report['operational_layer']['examined'], 'every imported operational Division appointment in the repair population is examined');
         $this->same($postRepair?0:11268, $report['operational_layer']['mismatched'], 'verified operational mismatch count');
         $this->same($postRepair?0:11268, $report['operational_layer']['repairable'], 'all remaining mismatched operational rows repairable');
         $this->same(0, $report['operational_layer']['manual_review'], 'no operational candidate needs manual review');
@@ -57,13 +64,10 @@ final class LegacyArpaLocationRepairTest
             'ARPA 2025 year-end repair is either absent or fully applied'
         );
 
-        $expectedDependentWithoutPermanent =
-            $yearEndRepairCorrections === 3316 ? 23 : 43;
-
         $this->same(
-            $expectedDependentWithoutPermanent,
+            $report['collision_projection']['before']['dependent_without_qualifying_permanent'],
             $report['collision_projection']['after']['dependent_without_qualifying_permanent'],
-            'location repair preserves the Officer dependency projection appropriate to the ARPA 2025 repair state'
+            'a location-only repair does not alter the Officer dependency projection'
         );
 
         $this->same('70007-0007026', $report['wewagedara']['dad_number'], 'Wewagedara regression target found');

@@ -73,6 +73,8 @@ $router->get('/hr/arpa-appointments/issues', [ArpaAppointmentController::class, 
 $router->get('/hr/arpa-appointments/issues/corrections/{id}', [ArpaAppointmentController::class, 'dataIssueCorrectionDetail']);
 $router->get('/hr/arpa-appointments/issues/{key}', [ArpaAppointmentController::class, 'dataIssueDetail']);
 $router->post('/hr/arpa-appointments/issues/{key}/correct', [ArpaAppointmentController::class, 'correctDataIssue']);
+$router->get('/hr/arpa-appointments/divisions/{id}/correct-historical', [ArpaAppointmentController::class, 'editHistoricalCanonicalAssignment']);
+$router->post('/hr/arpa-appointments/divisions/{id}/correct-historical', [ArpaAppointmentController::class, 'updateHistoricalCanonicalAssignment']);
 $router->get('/hr/arpa-appointments/divisions', [ArpaAppointmentController::class, 'divisions']);
 $router->get('/hr/arpa-appointments/divisions/create', [ArpaAppointmentController::class, 'createDivision']);
 $router->post('/hr/arpa-appointments/divisions', [ArpaAppointmentController::class, 'storeDivision']);

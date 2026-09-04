@@ -92,7 +92,8 @@ final class LocationBaselineEffectiveDateCorrectionTest
         $this->same(25,$first['offices']['by_type']['DISTRICT_OFFICE']['already_2024_01_05'],'all District Offices use 2024-01-05');
         $this->same(566,$first['offices']['by_type']['ASC_OFFICE']['already_2024_01_05'],'all ASC Offices use 2024-01-05');
         $this->same([],$first['offices']['old_to_new_examples'],'corrected Offices produce no old-to-new proposals');
-        $this->same(13485,$first['appointment_hierarchy_issues']['appointments_examined'],'all migrated operational appointments are checked read-only');
+        $appointmentCount=(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment')->fetchColumn();
+        $this->same($appointmentCount,$first['appointment_hierarchy_issues']['appointments_examined'],'every current canonical appointment row is checked read-only');
         $this->same(0,$first['appointment_hierarchy_issues']['projected_issues_after'],'corrected baseline hierarchy resolves projected appointment checks');
         $this->same(0,$first['appointment_hierarchy_issues']['appointment_rows_would_change'],'no appointment row is proposed for update');
         $this->same(true,$first['integrity']['dry_run_target_and_legacy_unchanged'],'dry-run integrity fingerprint is unchanged');

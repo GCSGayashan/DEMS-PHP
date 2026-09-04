@@ -47,9 +47,9 @@ final class DataTableController
                 throw new \RuntimeException('Unable to open CSV output stream.');
             }
             fwrite($output, "\xEF\xBB\xBF");
-            fputcsv($output, $query->exportHeaders());
+            fputcsv($output, $query->exportHeaders(), ',', '"', '');
             foreach ($query->exportRows() as $row) {
-                fputcsv($output, array_map([$this, 'safeCsvValue'], array_values($row)));
+                fputcsv($output, array_map([$this, 'safeCsvValue'], array_values($row)), ',', '"', '');
             }
             fclose($output);
             exit;

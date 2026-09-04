@@ -46,19 +46,26 @@ final class ArpaAppointmentService
         $ascId = trim((string)($data['asc_location_id'] ?? ''));
         $divisionId = trim((string)($data['arpa_division_location_id'] ?? ''));
         $effectiveFrom = trim((string)($data['effective_from'] ?? ''));
+        $effectiveTo = $this->nullText($data['effective_to'] ?? null);
+        $endReasonId = $this->nullText($data['end_reason_id'] ?? null);
         $this->assertDate($effectiveFrom, 'Effective from');
+        if($effectiveTo!==null)$this->assertDate($effectiveTo,'Effective to');
         ArpaAppointmentRules::assertNativeEffectiveDate($effectiveFrom);
-        return $this->transaction(function() use($officerId,$type,$ascId,$divisionId,$effectiveFrom,$data,$actorId):string {
+        return $this->transaction(function() use($officerId,$type,$ascId,$divisionId,$effectiveFrom,$effectiveTo,$endReasonId,$data,$actorId):string {
+            $continuity=new ArpaDivisionContinuityService($this->pdo);$continuity->assertNoUnresolvedDataIssues($divisionId,true);
+            $continuity->assertCanFillPeriod($divisionId,$effectiveFrom,$effectiveTo,null,null,false,false);
+            if($effectiveTo!==null&&$endReasonId===null)throw new DomainException('End Reason is required when filling a bounded historical gap.');
+            if($effectiveTo===null&&$endReasonId!==null)throw new DomainException('End Reason cannot be recorded without an End Date.');
+            if($endReasonId!==null)$this->endReason($endReasonId);
             $this->arpaOfficer($officerId,true);
             $read = new ArpaAppointmentReadService($this->pdo);
             $read->assertEligibleOfficer($officerId,$ascId,$effectiveFrom);
-            $read->assertAppointmentTypeAvailable($officerId,$type,$divisionId,$effectiveFrom);
-            (new ArpaDivisionContinuityService($this->pdo))->assertCanStart($divisionId,$effectiveFrom);
-            $read->assertDivisionVacant($ascId,$divisionId,$effectiveFrom,true);
+            $read->assertAppointmentTypeAvailable($officerId,$type,$divisionId,$effectiveFrom,$effectiveTo);
+            $read->assertDivisionPeriodAvailable($ascId,$divisionId,$effectiveFrom,$effectiveTo,true);
             $snapshot = $this->locationSnapshot($ascId, $divisionId, $effectiveFrom);
             $id = $this->uuid();
-            $sql = 'INSERT INTO arpa_division_appointment_request(id,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,request_remarks,location_snapshot_json,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)';
-            $this->pdo->prepare($sql)->execute([$id, 'APPOINTMENT', $officerId, $type, $ascId, $divisionId, $effectiveFrom, $this->nullText($data['remarks'] ?? null), $this->json($snapshot), $actorId]);
+            $sql = 'INSERT INTO arpa_division_appointment_request(id,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,requested_effective_to,end_reason_id,request_remarks,location_snapshot_json,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)';
+            $this->pdo->prepare($sql)->execute([$id, 'APPOINTMENT', $officerId, $type, $ascId, $divisionId, $effectiveFrom,$effectiveTo,$endReasonId, $this->nullText($data['remarks'] ?? null), $this->json($snapshot), $actorId]);
             $this->audit($actorId, 'arpa.appointment-request.create', 'ARPA_APPOINTMENT_REQUEST', $id, ['type' => $type]);
             return $id;
         });
@@ -79,9 +86,9 @@ final class ArpaAppointmentService
             $stmt=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=? FOR UPDATE');$stmt->execute([$id]);$request=$stmt->fetch();
             $this->assertEditableRequest($request,$actorId);
             if($request['request_type']==='APPOINTMENT'){
-                $officerId=trim((string)($data['officer_id']??''));$type=strtoupper(trim((string)($data['appointment_type']??'')));$ascId=trim((string)($data['asc_location_id']??''));$divisionId=trim((string)($data['arpa_division_location_id']??''));$from=trim((string)($data['effective_from']??''));
-                $this->assertDate($from,'Effective from');ArpaAppointmentRules::assertNativeEffectiveDate($from);$this->arpaOfficer($officerId,true);$read=new ArpaAppointmentReadService($this->pdo);$read->assertEligibleOfficer($officerId,$ascId,$from);$read->assertAppointmentTypeAvailable($officerId,$type,$divisionId,$from,null,$id);(new ArpaDivisionContinuityService($this->pdo))->assertCanStart($divisionId,$from,$id);$read->assertDivisionVacant($ascId,$divisionId,$from,true,$id);$snapshot=$this->locationSnapshot($ascId,$divisionId,$from);
-                $this->pdo->prepare('UPDATE arpa_division_appointment_request SET officer_id=?,appointment_type=?,asc_location_id=?,arpa_division_location_id=?,requested_effective_from=?,request_remarks=?,location_snapshot_json=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$officerId,$type,$ascId,$divisionId,$from,$this->nullText($data['remarks']??null),$this->json($snapshot),$actorId,$id]);
+                $officerId=trim((string)($data['officer_id']??''));$type=strtoupper(trim((string)($data['appointment_type']??'')));$ascId=trim((string)($data['asc_location_id']??''));$divisionId=trim((string)($data['arpa_division_location_id']??''));$from=trim((string)($data['effective_from']??''));$to=$this->nullText($data['effective_to']??null);$endReason=$this->nullText($data['end_reason_id']??null);
+                $this->assertDate($from,'Effective from');if($to!==null)$this->assertDate($to,'Effective to');ArpaAppointmentRules::assertNativeEffectiveDate($from);$continuity=new ArpaDivisionContinuityService($this->pdo);$continuity->assertCanFillPeriod($divisionId,$from,$to,$id);if($to!==null&&$endReason===null)throw new DomainException('End Reason is required when filling a bounded historical gap.');if($to===null&&$endReason!==null)throw new DomainException('End Reason cannot be recorded without an End Date.');if($endReason!==null)$this->endReason($endReason);$this->arpaOfficer($officerId,true);$read=new ArpaAppointmentReadService($this->pdo);$read->assertEligibleOfficer($officerId,$ascId,$from);$read->assertAppointmentTypeAvailable($officerId,$type,$divisionId,$from,$to,$id);$read->assertDivisionPeriodAvailable($ascId,$divisionId,$from,$to,true,$id);$snapshot=$this->locationSnapshot($ascId,$divisionId,$from);
+                $this->pdo->prepare('UPDATE arpa_division_appointment_request SET officer_id=?,appointment_type=?,asc_location_id=?,arpa_division_location_id=?,requested_effective_from=?,requested_effective_to=?,end_reason_id=?,request_remarks=?,location_snapshot_json=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$officerId,$type,$ascId,$divisionId,$from,$to,$endReason,$this->nullText($data['remarks']??null),$this->json($snapshot),$actorId,$id]);
             }elseif($request['request_type']==='END'){
                 $to=trim((string)($data['effective_to']??''));$reason=trim((string)($data['end_reason_id']??''));$this->assertDate($to,'Effective to');$source=$this->appointment((string)$request['source_appointment_id']);if($to<$source['effective_from'])throw new DomainException('Effective to cannot precede the source appointment.');$this->endReason($reason);$impact=$this->dependentAppointments($source,$to);
                 $this->pdo->prepare('UPDATE arpa_division_appointment_request SET requested_effective_to=?,end_reason_id=?,request_remarks=?,impact_snapshot_json=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$to,$reason,$this->nullText($data['remarks']??null),$this->json($impact),$actorId,$id]);
@@ -271,12 +278,23 @@ final class ArpaAppointmentService
             if($entity==='division'
                 &&in_array((string)$request['request_type'],['APPOINTMENT','TRANSFER'],true)
                 &&in_array(strtoupper($action),['SUBMIT','VERIFY','APPROVE'],true)){
-                (new ArpaDivisionContinuityService($this->pdo))->assertCanStart(
-                    (string)$request['arpa_division_location_id'],
-                    (string)$request['requested_effective_from'],
-                    $requestId,
-                    $request['source_appointment_id']?:null
-                );
+                $continuity=new ArpaDivisionContinuityService($this->pdo);
+                if((string)$request['request_type']==='APPOINTMENT'){
+                    $continuity->assertCanFillPeriod(
+                        (string)$request['arpa_division_location_id'],
+                        (string)$request['requested_effective_from'],
+                        $request['requested_effective_to']?:null,
+                        $requestId,
+                        $request['source_appointment_id']?:null
+                    );
+                }else{
+                    $continuity->assertCanStart(
+                        (string)$request['arpa_division_location_id'],
+                        (string)$request['requested_effective_from'],
+                        $requestId,
+                        $request['source_appointment_id']?:null
+                    );
+                }
             }
             if (strtoupper($action) === 'SUBMIT' && !$this->canSubmitRequest($request,$actorId)) {
                 throw new DomainException('Only the draft creator or an authorized ASC correction officer may submit this request.');
@@ -287,8 +305,13 @@ final class ArpaAppointmentService
                 if($entity==='division'&&in_array((string)$request['request_type'],['APPOINTMENT','TRANSFER'],true)){
                     $this->arpaOfficer((string)$request['officer_id'],true);
                     $read=new ArpaAppointmentReadService($this->pdo);$sourceId=$request['source_appointment_id']?:null;
-                    $read->assertAppointmentTypeAvailable((string)$request['officer_id'],(string)$request['appointment_type'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],null,$requestId,$sourceId);
-                    $read->assertDivisionVacant((string)$request['asc_location_id'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],true,$requestId,$sourceId);
+                    if((string)$request['request_type']==='APPOINTMENT'){
+                        $read->assertAppointmentTypeAvailable((string)$request['officer_id'],(string)$request['appointment_type'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],$request['requested_effective_to']?:null,$requestId,$sourceId);
+                        $read->assertDivisionPeriodAvailable((string)$request['asc_location_id'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],$request['requested_effective_to']?:null,true,$requestId,$sourceId);
+                    }else{
+                        $read->assertAppointmentTypeAvailable((string)$request['officer_id'],(string)$request['appointment_type'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],null,$requestId,$sourceId);
+                        $read->assertDivisionVacant((string)$request['asc_location_id'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],true,$requestId,$sourceId);
+                    }
                 }
             }
             if (strtoupper($action) === 'VERIFY' && in_array(strtoupper($stage), ['DISTRICT','NATIONAL'], true)) {
@@ -382,21 +405,34 @@ final class ArpaAppointmentService
         $type = (string)$request['appointment_type'];
         $snapshot = $this->locationSnapshot((string)$request['asc_location_id'], (string)$request['arpa_division_location_id'], $effectiveFrom, true);
         $read=new ArpaAppointmentReadService($this->pdo);$sourceId=$request['source_appointment_id']?:null;
-        $read->assertAppointmentTypeAvailable((string)$request['officer_id'],$type,(string)$request['arpa_division_location_id'],$effectiveFrom,null,(string)$request['id'],$sourceId);
-        (new ArpaDivisionContinuityService($this->pdo))->assertCanStart((string)$request['arpa_division_location_id'],$effectiveFrom,(string)$request['id'],$sourceId);
-        $read->assertDivisionVacant((string)$request['asc_location_id'],(string)$request['arpa_division_location_id'],$effectiveFrom,true,(string)$request['id'],$sourceId);
+        $historicalGapEnd=(string)$request['request_type']==='APPOINTMENT'?($request['requested_effective_to']?:null):null;
+        $read->assertAppointmentTypeAvailable((string)$request['officer_id'],$type,(string)$request['arpa_division_location_id'],$effectiveFrom,$historicalGapEnd,(string)$request['id'],$sourceId);
+        $continuity=new ArpaDivisionContinuityService($this->pdo);
+        if((string)$request['request_type']==='APPOINTMENT'){
+            $continuity->assertCanFillPeriod((string)$request['arpa_division_location_id'],$effectiveFrom,$historicalGapEnd,(string)$request['id'],$sourceId);
+            $read->assertDivisionPeriodAvailable((string)$request['asc_location_id'],(string)$request['arpa_division_location_id'],$effectiveFrom,$historicalGapEnd,true,(string)$request['id'],$sourceId);
+        }else{
+            $continuity->assertCanStart((string)$request['arpa_division_location_id'],$effectiveFrom,(string)$request['id'],$sourceId);
+            $read->assertDivisionVacant((string)$request['asc_location_id'],(string)$request['arpa_division_location_id'],$effectiveFrom,true,(string)$request['id'],$sourceId);
+        }
         if ($this->hasExclusiveSubjectAt((string)$request['officer_id'], $effectiveFrom)) {
             throw new DomainException('The officer has an exclusive Bank, Sales Shop, or Sithamu assignment. Close it first.');
         }
         $sql = 'INSERT INTO arpa_division_appointment(id,request_id,officer_id,appointment_type,service_permanency_snapshot,province_location_id_snapshot,district_location_id_snapshot,asc_location_id,arpa_division_location_id,province_dad_snapshot,province_name_snapshot,district_dad_snapshot,district_name_snapshot,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())';
+        $appointmentId=$this->uuid();
         $this->pdo->prepare($sql)->execute([
-            $this->uuid(), $request['id'], $request['officer_id'], $type, $officer['arpa_service_permanency'],
+            $appointmentId, $request['id'], $request['officer_id'], $type, $officer['arpa_service_permanency'],
             $snapshot['province']['id'] ?? null, $snapshot['district']['id'] ?? null, $snapshot['asc']['id'], $snapshot['arpa']['id'],
             $snapshot['province']['dad_number'] ?? null, $snapshot['province']['name_en'] ?? null,
             $snapshot['district']['dad_number'] ?? null, $snapshot['district']['name_en'] ?? null,
             $snapshot['asc']['dad_number'], $snapshot['asc']['name_en'], $snapshot['arpa']['dad_number'], $snapshot['arpa']['name_en'],
             $this->json($snapshot), $effectiveFrom, $actorId,
         ]);
+        if($historicalGapEnd!==null){
+            if(empty($request['end_reason_id']))throw new DomainException('End Reason is required when filling a bounded historical gap.');
+            $appointment=$this->appointment($appointmentId,true);
+            $this->insertAppointmentClosure($appointment,$request,$historicalGapEnd,$actorId,'DIRECT');
+        }
     }
 
     private function closeAppointmentAndDependents(array $source, array $request, string $actorId, string $kind): void

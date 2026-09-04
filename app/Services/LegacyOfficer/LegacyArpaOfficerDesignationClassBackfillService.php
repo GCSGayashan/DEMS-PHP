@@ -280,9 +280,9 @@ final class LegacyArpaOfficerDesignationClassBackfillService
             throw new RuntimeException('Unable to create backfill CSV report.');
         }
         $columns = ['legacy_officer_id', 'officer_id', 'dad_number', 'legacy_grade', 'class_system_key', 'migration_status', 'message'];
-        fputcsv($handle, $columns);
+        fputcsv($handle, $columns, ',', '"', '');
         foreach ($this->reportRows as $row) {
-            fputcsv($handle, array_map(static fn(string $column): mixed => $row[$column] ?? null, $columns));
+            fputcsv($handle, array_map(static fn(string $column): mixed => $row[$column] ?? null, $columns), ',', '"', '');
         }
         fclose($handle);
         file_put_contents(substr($path, 0, -4) . '.json', json_encode($summary, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));

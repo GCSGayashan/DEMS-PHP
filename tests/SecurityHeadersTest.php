@@ -8,20 +8,29 @@ require dirname(__DIR__) . '/bootstrap.php';
 final class SecurityHeadersTest
 {
     private int $assertions = 0;
+    private string $sessionDirectory = '';
 
     public function run(): int
     {
+        $this->configureSessionDirectory();
         $nonce = SecurityHeaders::generateNonce();
         $development = SecurityHeaders::headersFor('development', 'http://localhost/DEMS-PHP/public', $nonce);
         $production = SecurityHeaders::headersFor('production', 'https://dems.example.gov.lk', $nonce);
         $csp = $development['Content-Security-Policy'] ?? '';
 
-        $this->testRequiredHeaders($development, $production);
-        $this->testPolicy($csp, $nonce);
-        $this->testNonceBehavior();
-        $this->testInlineScripts();
-        $this->testRenderedLayouts();
-        $this->testResponseCompatibility();
+        try {
+            $this->testRequiredHeaders($development, $production);
+            $this->testPolicy($csp, $nonce);
+            $this->testNonceBehavior();
+            $this->testInlineScripts();
+            $this->testRenderedLayouts();
+            $this->testResponseCompatibility();
+        } finally {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                Auth::logout();
+            }
+            $this->removeSessionDirectory();
+        }
 
         echo "SecurityHeadersTest: {$this->assertions} assertions passed.\n";
         return 0;
@@ -178,6 +187,30 @@ final class SecurityHeadersTest
             session_id('');
             SessionManager::start();
         }
+    }
+
+    private function configureSessionDirectory(): void
+    {
+        $this->sessionDirectory = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'dems-security-headers-test-' . bin2hex(random_bytes(8));
+        if (!mkdir($this->sessionDirectory, 0700) && !is_dir($this->sessionDirectory)) {
+            throw new RuntimeException('Unable to create the isolated security-headers session directory.');
+        }
+        if (ini_set('session.save_path', $this->sessionDirectory) === false) {
+            throw new RuntimeException('Unable to configure the isolated security-headers session directory.');
+        }
+    }
+
+    private function removeSessionDirectory(): void
+    {
+        if ($this->sessionDirectory === '' || !is_dir($this->sessionDirectory)) {
+            return;
+        }
+        foreach (glob($this->sessionDirectory . DIRECTORY_SEPARATOR . 'sess_*') ?: [] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+        rmdir($this->sessionDirectory);
     }
 
     private function same(mixed $expected, mixed $actual, string $message): void

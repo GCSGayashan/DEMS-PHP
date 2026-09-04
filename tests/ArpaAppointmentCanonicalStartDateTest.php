@@ -27,6 +27,7 @@ final class ArpaAppointmentCanonicalStartDateTest
         $ascs=[['id'=>'forged-asc','dad_number'=>'70004-9999999','name_en'=>'Other ASC']];
         $officers=[['id'=>'officer-1','dad_number'=>'80000-0000001','name_with_initials'=>'A. Officer','arpa_service_permanency'=>'PERMANENT_IN_SERVICE','allowed_appointment_types'=>['PERMANENT']]];
         $arpaDivisions=[['id'=>'division-1','dad_number'=>'70007-0007026','name_en'=>'Wewagedara']];
+        $reasons=[];
         $selectedOfficer='officer-1';$selectedDivision='division-1';$selectedAppointmentType='PERMANENT';$selectionMessages=[];$displayDate='22 Aug 2026';
         $_SERVER['REQUEST_URI']='/DEMS-PHP/public/hr/arpa-appointments/new';
         ob_start();require BASE_PATH.'/app/Views/arpa_appointments/division_form.php';$rendered=(string)ob_get_clean();
@@ -69,17 +70,19 @@ final class ArpaAppointmentCanonicalStartDateTest
         $this->contains("href=\"<?= e(url('hr/arpa-appointments/submitted')) ?>\">Cancel",$view,'Cancel leaves the form for Submitted');
         $this->contains('divisionFormOptions($selectedAsc,$effectiveDate,$systemContext,$this->requestedDivisionSelection())',$controller,'candidate loading receives the canonical ASC, date, and retained selections');
         $this->contains('assertEligibleOfficer($officerId,$ascId,$effectiveFrom)',$service,'Officer eligibility uses the canonical date');
-        $this->contains('assertDivisionVacant($ascId,$divisionId,$effectiveFrom,true)',$service,'Division vacancy validation uses the canonical date');
+        $this->contains('assertDivisionPeriodAvailable($ascId,$divisionId,$effectiveFrom,$effectiveTo,true)',$service,'Division period validation uses the canonical business range');
         $this->contains('ArpaDivisionContinuityService',$optionsService,'form options include the canonical Division continuity calculation');
-        $this->contains('Required Next Start Date',$view,'form displays the required next valid Division start date');
-        $this->contains('assertCanStart($divisionId,$effectiveFrom)',$service,'submission enforces Division continuity server-side');
+        $this->contains('Required Start Date',$view,'form displays the required next valid Division start date');
+        $this->contains('assertCanFillPeriod($divisionId,$effectiveFrom,$effectiveTo',$service,'submission enforces complete-period Division continuity server-side');
         $this->same(false,str_contains($rendered,'name="asc_location_id"'),'ASC-context form renders no editable ASC field');
         $this->same(1,substr_count($rendered,'name="effective_from"'),'ASC-context form renders one Appointment Start Date');
         $this->contains('Agrarian Service Center:</strong> Kurunegala',$rendered,'ASC-context form displays its server-provided ASC');
         $this->contains('80000-0000001 - A. Officer',$rendered,'eligible Officer options render without another request');
         $this->contains('70007-0007026 - Wewagedara',$rendered,'vacant Division options render without another request');
         $this->contains('value="officer-1" data-allowed-types="PERMANENT" selected',$rendered,'a still-eligible Officer remains selected');
-        $this->contains('value="division-1" data-required-next-start="" data-last-covered-through="" data-continuity-relation="" selected',$rendered,'a still-vacant Division remains selected with continuity metadata');
+        $this->contains('value="division-1" data-required-next-start="" data-last-covered-through="" data-continuity-relation="" data-gap-end=""',$rendered,'a Division remains selected with full timeline metadata');
+        $this->contains('ARPA Division / Period to Fill *',$view,'form no longer describes the timeline selector as current vacancy only');
+        $this->contains('Maximum End Date',$view,'bounded historical gaps expose their maximum end date');
 
         echo "ArpaAppointmentCanonicalStartDateTest: {$this->assertions} assertions passed.\n";
         return 0;

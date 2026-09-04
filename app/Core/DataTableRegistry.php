@@ -1207,7 +1207,7 @@ final class DataTableRegistry
             self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'])),self::col('Type','appointment_type','a.appointment_type',fn($r)=>DataTableFormat::badge($r['appointment_type'])),
             self::col('Start Date','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),self::col('End Date','effective_to','c.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'])),
             self::col('End Reason','end_reason','er.name_en',fn($r)=>DataTableFormat::text($r['end_reason'],'Not available')),self::col('Workflow','workflow_status','req.workflow_status',fn($r)=>DataTableFormat::badge($r['workflow_status'])),self::col('Source','record_origin','a.record_origin',fn($r)=>DataTableFormat::badge($r['record_origin'])),
-            self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/officers/'.$r['officer_id'])).'">Officer Profile</a>')];
+            self::actionColumn(fn($r)=>self::arpaDivisionActions($r))];
         $definition['defaultOrder']=[0,'ASC'];
         return $definition;
     }

@@ -106,6 +106,28 @@ final class ArpaAppointmentReadService
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);return $stmt->fetchAll();
     }
 
+    /**
+     * All ARPA Divisions in the current actor's ASC context which are valid on
+     * the business date. Timeline diagnostics, rather than current vacancy,
+     * decide whether each Division requires action on the New Assignment form.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function timelineDivisionsForAsc(string $userId,string $ascLocationId,string $effectiveDate):array
+    {
+        if(!ScopeService::canAccessCurrentArpaStage($userId,'ASC',$ascLocationId))return [];
+        $sql="SELECT l.id,l.dad_number,l.name_en
+              FROM location l
+              JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
+              JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=?
+                AND lr.relationship_type='ASC_ARPA_DIVISION' AND lr.active=1 AND lr.approval_status='APPROVED'
+                AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
+              WHERE l.approval_status='APPROVED' AND l.operational_status='ACTIVE'
+                AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)
+              ORDER BY l.name_en,l.dad_number";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);return $stmt->fetchAll();
+    }
+
     public function assertEligibleOfficer(string $officerId, string $ascLocationId, string $effectiveDate): void
     {
         $sql="SELECT COUNT(*) FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER'
@@ -146,6 +168,42 @@ final class ArpaAppointmentReadService
                     AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?))";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$divisionId,$effectiveDate,$effectiveDate,$excludeAppointmentId,$effectiveDate,$excludeRequestId,$effectiveDate]);
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Division is outside the ASC, inactive, or already has an open or scheduled appointment.');
+    }
+
+    public function assertDivisionPeriodAvailable(
+        string $ascLocationId,
+        string $divisionId,
+        string $effectiveFrom,
+        ?string $effectiveTo=null,
+        bool $lock=false,
+        ?string $excludeRequestId=null,
+        ?string $excludeAppointmentId=null
+    ):void {
+        if($lock){$lockStmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$lockStmt->execute([$divisionId]);if(!$lockStmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');}
+        $periodEnd=$effectiveTo??'9999-12-31';$statuses=$this->reservingStatusSql();
+        $sql="SELECT COUNT(*) FROM location l
+              JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
+              JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=?
+                AND lr.relationship_type='ASC_ARPA_DIVISION' AND lr.active=1 AND lr.approval_status='APPROVED'
+                AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
+              WHERE l.id=? AND l.approval_status='APPROVED' AND l.operational_status='ACTIVE'
+                AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a
+                  LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                  WHERE a.arpa_division_location_id=l.id AND a.id<>COALESCE(?, '')
+                    AND (a.legacy_history_only=0 OR c.id IS NOT NULL)
+                    AND a.effective_from<=? AND COALESCE(c.effective_to,'9999-12-31')>=?)
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r
+                  WHERE r.arpa_division_location_id=l.id AND r.id<>COALESCE(?, '')
+                    AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?
+                    AND COALESCE(CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'9999-12-31')>=?)";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([
+            $ascLocationId,$effectiveFrom,$effectiveFrom,$divisionId,$effectiveFrom,$effectiveFrom,
+            $excludeAppointmentId,$periodEnd,$effectiveFrom,$excludeRequestId,$periodEnd,$effectiveFrom,
+        ]);
+        if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Division is outside the ASC, inactive, or the proposed assignment period overlaps an authoritative assignment.');
     }
 
     /** @return array<string,mixed> */
