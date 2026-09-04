@@ -320,7 +320,7 @@ final class ScopeService
         if ($profile['level']==='ASC') {
             $sql=self::visibleLocationsCte($userId)." SELECT DISTINCT o.id,o.dad_number,o.name_en,ot.system_key office_type,l.name_en location_name FROM office o JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' JOIN location l ON l.id=o.linked_location_id JOIN scope_seeds s ON s.id=l.id WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' ORDER BY o.name_en";
         } else {
-            $sql=self::visibleLocationsCte($userId)." SELECT DISTINCT o.id,o.dad_number,o.name_en,ot.system_key office_type,l.name_en location_name FROM office o JOIN office_type ot ON ot.id=o.office_type_id JOIN location l ON l.id=o.linked_location_id JOIN visible_locations vl ON vl.id=l.id WHERE ot.system_key IN('DISTRICT_OFFICE','ASC_OFFICE') AND o.approval_status='APPROVED' AND o.operational_status='ACTIVE' ORDER BY ot.display_order,o.name_en";
+            $sql=self::visibleLocationsCte($userId)." SELECT DISTINCT o.id,o.dad_number,o.name_en,ot.system_key office_type,l.name_en location_name,ot.display_order office_type_display_order FROM office o JOIN office_type ot ON ot.id=o.office_type_id JOIN location l ON l.id=o.linked_location_id JOIN visible_locations vl ON vl.id=l.id WHERE ot.system_key IN('DISTRICT_OFFICE','ASC_OFFICE') AND o.approval_status='APPROVED' AND o.operational_status='ACTIVE' ORDER BY office_type_display_order,o.name_en";
         }
         $s=$pdo->prepare($sql);$s->execute(self::visibleLocationParams($userId));return $s->fetchAll();
     }

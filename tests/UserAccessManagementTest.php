@@ -124,7 +124,7 @@ final class UserAccessManagementTest
         $this->same(false,in_array($arpaY,array_column($arpaResults,'id'),true),'ASC location lookup excludes another ASC');
 
         $this->activeUserVisibilityCases($actors,$system,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
-        $this->accountRequestCases($actors,$system,$checker,$districtX,$ascX,$arpaX,$ascY,$arpaY);
+        $this->accountRequestCases($actors,$system,$checker,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
         $this->effectiveDateAndInactiveCases($actors,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
 
         $expired=$this->createActor('ASC_ADMIN',$ascX,'expired-manager',1,'APPROVED',date('Y-m-d',strtotime('-2 days')));
@@ -163,7 +163,7 @@ final class UserAccessManagementTest
         $this->same(true,str_contains($activationView,"check.addEventListener('change'")&&str_contains($activationView,'fetch(endpoint'),'role selection enables controls and requests authorized locations');
     }
 
-    private function accountRequestCases(array $actors,string $system,string $checker,string $districtX,string $ascX,string $arpaX,string $ascY,string $arpaY):void
+    private function accountRequestCases(array $actors,string $system,string $checker,string $districtX,string $ascX,string $arpaX,string $districtY,string $ascY,string $arpaY):void
     {
         $service=new UserAccountRequestService($this->pdo);$password='Manual-User-1!';$today=date('Y-m-d');
         $activeStatus=$this->statusId('ACTIVE');
@@ -236,6 +236,20 @@ final class UserAccessManagementTest
         $ascRequest=$service->request($actors['ASC_ADMIN'],$this->manualAccountData('manual.asc.user','Manual ASC User','ASC_SUBJECT_OFFICER',$ascX,$today,$password,$activeStatus));
         $this->assertInitialOffice($ascRequest,'ASC_OFFICE',$ascX,'ASC staff registration uses the selected ASC Office');
         $this->same($this->designationId('AGRARIAN_DEVELOPMENT_OFFICER'),(string)$this->value('SELECT primary_designation_id FROM officer WHERE id=?',[$ascRequest['officer_id']]),'ASC Application Role remains independent from the selected Officer Designation');
+        $this->useContext($actors['DISTRICT_SUBJECT_OFFICER'],'DISTRICT_SUBJECT_OFFICER');
+        $districtScopedOffices=ScopeService::scopedOffices($actors['DISTRICT_SUBJECT_OFFICER']);
+        $this->same(true,in_array('DISTRICT_OFFICE',array_column($districtScopedOffices,'office_type'),true),'District Subject Officer can load its District Office option without MySQL 3065');
+        $this->same(true,in_array('ASC_OFFICE',array_column($districtScopedOffices,'office_type'),true),'District Subject Officer can load descendant ASC Office options without MySQL 3065');
+        foreach(['id','dad_number','name_en','office_type','location_name'] as $field)$this->same(true,array_key_exists($field,$districtScopedOffices[0]??[]),"scoped Office options preserve the {$field} return field");
+        $outsideOffices=$this->pdo->prepare('SELECT id FROM office WHERE linked_location_id IN (?,?)');$outsideOffices->execute([$districtY,$ascY]);
+        $this->same([],array_values(array_intersect(array_map('strval',$outsideOffices->fetchAll(PDO::FETCH_COLUMN)),array_map('strval',array_column($districtScopedOffices,'id')))),'District scoped Office options exclude another District and its ASC');
+        $districtAscSubjectRequest=$service->request($actors['DISTRICT_SUBJECT_OFFICER'],$this->manualAccountData('manual.district.asc.subject','Manual District ASC Subject User','ASC_SUBJECT_OFFICER',$ascX,$today,$password,$activeStatus));
+        $this->assertInitialOffice($districtAscSubjectRequest,'ASC_OFFICE',$ascX,'District Subject Officer request for ASC Subject Officer uses the permitted ASC Office');
+        $districtAscAdminRequest=$service->request($actors['DISTRICT_SUBJECT_OFFICER'],$this->manualAccountData('manual.district.asc.admin','Manual District ASC Admin','ASC_ADMIN',$ascX,$today,$password,$activeStatus));
+        $this->assertInitialOffice($districtAscAdminRequest,'ASC_OFFICE',$ascX,'District Subject Officer request for permitted ASC Administrator uses the permitted ASC Office');
+        $this->useContext($actors['DISTRICT_ADMIN'],'DISTRICT_ADMIN');
+        $districtSubjectRequest=$service->request($actors['DISTRICT_ADMIN'],$this->manualAccountData('manual.district.subject','Manual District Subject User','DISTRICT_SUBJECT_OFFICER',$districtX,$today,$password,$activeStatus));
+        $this->assertInitialOffice($districtSubjectRequest,'DISTRICT_OFFICE',$districtX,'District Administrator request uses the permitted District Office');
         $this->useContext($actors['NATIONAL_SUBJECT_OFFICER'],'NATIONAL_SUBJECT_OFFICER');
         $districtRequest=$service->request($actors['NATIONAL_SUBJECT_OFFICER'],$this->manualAccountData('manual.district.user','Manual District User','DISTRICT_ADMIN',$districtX,$today,$password,$activeStatus));
         $this->assertInitialOffice($districtRequest,'DISTRICT_OFFICE',$districtX,'District staff registration uses the selected District Office');
