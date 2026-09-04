@@ -363,6 +363,8 @@ final class LegacyLocationMigrationService
         }
 
         $code = $this->officialCode($type, $row);
+        $gnCode = $type === 'gn' ? LegacyLocationRules::clean($row['gnd_ocode'] ?? null) : null;
+        $gnCodeForPlr = $type === 'gn' ? LegacyLocationRules::clean($row['gnd_code'] ?? null) : null;
         if ($code === null) {
             $this->issue($spec['table'], $legacyId, 'INVALID_CODE', 'WARNING', 'No usable official code was supplied; Location was migrated with a NULL official code.', $row);
         }
@@ -389,15 +391,17 @@ final class LegacyLocationMigrationService
             $locationId = LegacyLocationRules::uuid();
             $stmt = $this->target->prepare(
                 "INSERT INTO location
-                 (id, dad_number, location_type_id, official_code, name_en, name_si, name_ta,
+                 (id, dad_number, location_type_id, official_code, gn_code, gn_code_for_plr, name_en, name_si, name_ta,
                   effective_from, operational_status, approval_status, created_by, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', NULL, NOW())"
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', NULL, NOW())"
             );
             $stmt->execute([
                 $locationId,
                 $dadNumber,
                 $this->locationTypes[$spec['type']],
                 $code,
+                $gnCode,
+                $gnCodeForPlr,
                 $nameEn,
                 LegacyLocationRules::clean($row[$spec['name_si']] ?? null),
                 LegacyLocationRules::clean($row[$spec['name_ta']] ?? null),

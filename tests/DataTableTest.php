@@ -189,7 +189,7 @@ final class DataTableTest
             'AI_RANGE' => ['DAD Number','Official Code','Province','District','AI Range','Start Date','Status','Approval','Actions'],
             'MAHAWELI_DIVISION' => ['DAD Number','Official Code','Province','District','Mahaweli Division','Start Date','Status','Approval','Actions'],
             'ARPA_DIVISION' => ['DAD Number','Official Code','Province','District','Agrarian Service Center','ARPA Division','Start Date','Status','Approval','Actions'],
-            'GN_DIVISION' => ['DAD Number','Official Code','Province','District','GN Division','Start Date','Status','Approval','Actions'],
+            'GN_DIVISION' => ['DAD Number','Official Code','GN Code','GN Code for PLR','Province','District','DS Division','ASC','ARPA Division','GN Division','Start Date','Status','Approval','Actions'],
         ];
 
         $general = DataTableRegistry::definition('locations');
@@ -202,7 +202,7 @@ final class DataTableTest
             $this->same(false, in_array('Type', $labels, true), "{$type} removes redundant Type column");
             $this->same([0, 'ASC'], $config['defaultOrder'], "{$type} defaults to ascending DAD Number order");
             foreach ($config['columns'] as $column) {
-                if (in_array($column['label'], ['Province','District','Agrarian Service Center','ARPA Division','GN Division','DS Division','AI Range','Mahaweli Division'], true)) {
+                if (in_array($column['label'], ['Province','District','Agrarian Service Center','ASC','ARPA Division','GN Division','DS Division','AI Range','Mahaweli Division'], true)) {
                     $this->same(true, !empty($column['sort']), "{$type} {$column['label']} is sortable");
                 }
             }
@@ -248,12 +248,58 @@ final class DataTableTest
         $this->same((string)$expected['asc_name'], $asc, 'ARPA Agrarian Service Center comes from approved hierarchy');
 
         $gn = DataTableRegistry::definition('locations', ['scope_type' => 'GN_DIVISION']);
+        $this->same(true, in_array('l.gn_code', $gn['searchable'], true), 'GN Code participates in server-side search');
+        $this->same(true, in_array('l.gn_code_for_plr', $gn['searchable'], true), 'GN Code for PLR participates in server-side search');
+        $gnCodeIndex = array_search('gn_code', array_column($gn['columns'], 'key'), true);
+        $gnPlrIndex = array_search('gn_code_for_plr', array_column($gn['columns'], 'key'), true);
+        $this->same(true, $gnCodeIndex !== false && !empty($gn['columns'][$gnCodeIndex]['sort']), 'GN Code is server-side sortable');
+        $this->same(true, $gnPlrIndex !== false && !empty($gn['columns'][$gnPlrIndex]['sort']), 'GN Code for PLR is server-side sortable');
+        $codeFixture=$this->pdo->query("SELECT l.id FROM location l JOIN location_type lt ON lt.id=l.location_type_id WHERE lt.system_key='GN_DIVISION' ORDER BY l.id LIMIT 1")->fetchColumn();
+        $this->pdo->beginTransaction();
+        try{
+            $this->pdo->prepare('UPDATE location SET gn_code=?,gn_code_for_plr=? WHERE id=?')->execute(['GN-CODE-SEARCH','00PLRTEST01',$codeFixture]);
+            $byGnCode=(new DataTableQuery($this->pdo,$gn,new DataTableRequest(['length'=>10,'search'=>['value'=>'GN-CODE-SEARCH']])))->response();
+            $this->same(1,$byGnCode['recordsFiltered'],'GN Code search finds the canonical GN identifier');
+            $byPlrCode=(new DataTableQuery($this->pdo,$gn,new DataTableRequest(['length'=>10,'search'=>['value'=>'00PLRTEST01']])))->response();
+            $this->same(1,$byPlrCode['recordsFiltered'],'GN Code for PLR search finds the canonical PLR identifier');
+            $sorted=(new DataTableQuery($this->pdo,$gn,new DataTableRequest(['length'=>10,'order'=>[['column'=>$gnCodeIndex,'dir'=>'asc']]])))->response();
+            $this->same(true,count($sorted['data'])>0,'GN Code sorting executes server-side');
+            $export=iterator_to_array((new DataTableQuery($this->pdo,$gn,new DataTableRequest(['search'=>['value'=>'00PLRTEST01']])))->exportRows());
+            $this->same('00PLRTEST01',$export[0]['gn_code_for_plr']??null,'filtered CSV export includes GN Code for PLR');
+        }finally{$this->pdo->rollBack();}
         $gnRow = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10])))->response()['data'][0] ?? [];
         $expectedGn = $this->pdo->prepare("SELECT province.name_en province_name,district.name_en district_name FROM location leaf JOIN location_relationship arpa_rel ON arpa_rel.child_location_id=leaf.id AND arpa_rel.relationship_type='ARPA_GN_DIVISION' AND arpa_rel.active=1 AND arpa_rel.approval_status='APPROVED' AND arpa_rel.effective_from<=CURRENT_DATE() AND (arpa_rel.effective_to IS NULL OR arpa_rel.effective_to>=CURRENT_DATE()) JOIN location arpa ON arpa.id=arpa_rel.parent_location_id JOIN location_relationship asc_rel ON asc_rel.child_location_id=arpa.id AND asc_rel.relationship_type='ASC_ARPA_DIVISION' AND asc_rel.active=1 AND asc_rel.approval_status='APPROVED' AND asc_rel.effective_from<=CURRENT_DATE() AND (asc_rel.effective_to IS NULL OR asc_rel.effective_to>=CURRENT_DATE()) JOIN location asc_location ON asc_location.id=asc_rel.parent_location_id JOIN location_relationship district_rel ON district_rel.child_location_id=asc_location.id AND district_rel.relationship_type='DISTRICT_ASC' AND district_rel.active=1 AND district_rel.approval_status='APPROVED' AND district_rel.effective_from<=CURRENT_DATE() AND (district_rel.effective_to IS NULL OR district_rel.effective_to>=CURRENT_DATE()) JOIN location district ON district.id=district_rel.parent_location_id JOIN location_relationship province_rel ON province_rel.child_location_id=district.id AND province_rel.relationship_type='PROVINCE_DISTRICT' AND province_rel.active=1 AND province_rel.approval_status='APPROVED' AND province_rel.effective_from<=CURRENT_DATE() AND (province_rel.effective_to IS NULL OR province_rel.effective_to>=CURRENT_DATE()) JOIN location province ON province.id=province_rel.parent_location_id WHERE leaf.dad_number=? LIMIT 1");
         $expectedGn->execute([strip_tags((string)$gnRow['dad_number'])]);
         $expected = $expectedGn->fetch();
         $this->same((string)$expected['province_name'], trim(strip_tags((string)$gnRow['province_name'])), 'GN Province comes from approved ARPA hierarchy');
         $this->same((string)$expected['district_name'], trim(strip_tags((string)$gnRow['district_name'])), 'GN District comes from approved ARPA hierarchy');
+
+        $uniqueArpaGn = $this->pdo->query("SELECT l.dad_number,MIN(arpa.name_en) arpa_division_name,MIN(asc_location.name_en) asc_name FROM location l JOIN location_type lt ON lt.id=l.location_type_id JOIN location_relationship arpa_rel ON arpa_rel.child_location_id=l.id AND arpa_rel.relationship_type='ARPA_GN_DIVISION' AND arpa_rel.active=1 AND arpa_rel.approval_status='APPROVED' AND arpa_rel.effective_from<=CURRENT_DATE() AND (arpa_rel.effective_to IS NULL OR arpa_rel.effective_to>=CURRENT_DATE()) JOIN location arpa ON arpa.id=arpa_rel.parent_location_id JOIN location_relationship asc_rel ON asc_rel.child_location_id=arpa.id AND asc_rel.relationship_type='ASC_ARPA_DIVISION' AND asc_rel.active=1 AND asc_rel.approval_status='APPROVED' AND asc_rel.effective_from<=CURRENT_DATE() AND (asc_rel.effective_to IS NULL OR asc_rel.effective_to>=CURRENT_DATE()) JOIN location asc_location ON asc_location.id=asc_rel.parent_location_id WHERE lt.system_key='GN_DIVISION' GROUP BY l.id,l.dad_number HAVING COUNT(DISTINCT arpa_rel.parent_location_id)=1 AND COUNT(DISTINCT asc_rel.parent_location_id)=1 ORDER BY l.dad_number LIMIT 1")->fetch();
+        $this->same(true, is_array($uniqueArpaGn), 'test data includes a GN Division with one approved current ARPA Division parent');
+        $gnByArpaDad = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $uniqueArpaGn['dad_number']]])))->response();
+        $this->same((string)$uniqueArpaGn['arpa_division_name'], trim(strip_tags((string)($gnByArpaDad['data'][0]['arpa_division_name'] ?? ''))), 'GN ARPA Division comes from its approved effective hierarchy relationship');
+        $this->same((string)$uniqueArpaGn['asc_name'], trim(strip_tags((string)($gnByArpaDad['data'][0]['asc_name'] ?? ''))), 'GN ASC is derived through its approved ARPA Division parent');
+        $arpaGnSearch = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $uniqueArpaGn['arpa_division_name']]])))->response();
+        $this->same(true, $arpaGnSearch['recordsFiltered'] > 0, 'GN search matches ARPA Division hierarchy name');
+        $ascGnSearch = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $uniqueArpaGn['asc_name']]])))->response();
+        $this->same(true, $ascGnSearch['recordsFiltered'] > 0, 'GN search matches ASC derived through ARPA Division');
+
+        $uniqueDsGn = $this->pdo->query("SELECT l.dad_number,MIN(ds.name_en) ds_division_name FROM location l JOIN location_type lt ON lt.id=l.location_type_id JOIN location_relationship ds_rel ON ds_rel.child_location_id=l.id AND ds_rel.relationship_type='DS_DIVISION_GN_DIVISION' AND ds_rel.active=1 AND ds_rel.approval_status='APPROVED' AND ds_rel.effective_from<=CURRENT_DATE() AND (ds_rel.effective_to IS NULL OR ds_rel.effective_to>=CURRENT_DATE()) JOIN location ds ON ds.id=ds_rel.parent_location_id WHERE lt.system_key='GN_DIVISION' GROUP BY l.id,l.dad_number HAVING COUNT(*)=1 ORDER BY l.dad_number LIMIT 1")->fetch();
+        $this->same(true, is_array($uniqueDsGn), 'test data includes a GN Division with one approved current DS Division parent');
+        $gnByDad = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $uniqueDsGn['dad_number']]])))->response();
+        $this->same((string)$uniqueDsGn['ds_division_name'], trim(strip_tags((string)($gnByDad['data'][0]['ds_division_name'] ?? ''))), 'GN DS Division comes from its approved effective hierarchy relationship');
+        $dsSearch = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $uniqueDsGn['ds_division_name']]])))->response();
+        $this->same(true, $dsSearch['recordsFiltered'] > 0, 'GN search matches DS Division hierarchy name');
+
+        $multipleDsGn = $this->pdo->query("SELECT l.dad_number FROM location l JOIN location_type lt ON lt.id=l.location_type_id JOIN location_relationship ds_rel ON ds_rel.child_location_id=l.id AND ds_rel.relationship_type='DS_DIVISION_GN_DIVISION' AND ds_rel.active=1 AND ds_rel.approval_status='APPROVED' AND ds_rel.effective_from<=CURRENT_DATE() AND (ds_rel.effective_to IS NULL OR ds_rel.effective_to>=CURRENT_DATE()) WHERE lt.system_key='GN_DIVISION' GROUP BY l.id,l.dad_number HAVING COUNT(*)>1 ORDER BY l.dad_number LIMIT 1")->fetchColumn();
+        $this->same(true, is_string($multipleDsGn), 'test data includes a GN Division with multiple current DS relationships');
+        $multipleRow = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $multipleDsGn]])))->response()['data'][0] ?? [];
+        $this->same('Data Issue', trim(strip_tags((string)($multipleRow['ds_division_name'] ?? ''))), 'GN table identifies multiple current DS relationships without choosing one');
+
+        $noDsGn = $this->pdo->query("SELECT l.dad_number FROM location l JOIN location_type lt ON lt.id=l.location_type_id WHERE lt.system_key='GN_DIVISION' AND NOT EXISTS(SELECT 1 FROM location_relationship ds_rel WHERE ds_rel.child_location_id=l.id AND ds_rel.relationship_type='DS_DIVISION_GN_DIVISION' AND ds_rel.active=1 AND ds_rel.approval_status='APPROVED' AND ds_rel.effective_from<=CURRENT_DATE() AND (ds_rel.effective_to IS NULL OR ds_rel.effective_to>=CURRENT_DATE())) ORDER BY l.dad_number LIMIT 1")->fetchColumn();
+        $this->same(true, is_string($noDsGn), 'test data includes a GN Division without a current DS relationship');
+        $noDsRow = (new DataTableQuery($this->pdo, $gn, new DataTableRequest(['length' => 10, 'search' => ['value' => $noDsGn]])))->response()['data'][0] ?? [];
+        $this->same('', trim(strip_tags((string)($noDsRow['ds_division_name'] ?? ''))), 'GN table leaves missing DS Division blank');
     }
 
     private function testResponsiveContract(): void

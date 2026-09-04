@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,LocationDirectEditPolicy,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -124,6 +124,14 @@ final class DataTableRegistry
         }
         $geo = self::geo();
         $hierarchy = self::locationTypeHierarchy($scopeType);
+        $gnIdentifiers = $scopeType === 'GN_DIVISION' ? [
+            'select' => ['l.gn_code', 'l.gn_code_for_plr'],
+            'searchable' => ['l.gn_code', 'l.gn_code_for_plr'],
+            'columns' => [
+                self::col('GN Code', 'gn_code', 'l.gn_code', fn($r) => DataTableFormat::text($r['gn_code'] ?? null, '')),
+                self::col('GN Code for PLR', 'gn_code_for_plr', 'l.gn_code_for_plr', fn($r) => DataTableFormat::text($r['gn_code_for_plr'] ?? null, '')),
+            ],
+        ] : ['select' => [], 'searchable' => [], 'columns' => []];
         $baseWhere = [];
         $baseParams = $geo['params'];
         if ($scopeType !== '') {
@@ -152,12 +160,13 @@ final class DataTableRegistry
             'from' => 'location l ' . $geo['joinLocation'] . ' JOIN location_type lt ON lt.id=l.location_type_id' . $hierarchy['joins'],
             'select' => array_merge(
                 ['l.id', 'l.dad_number', 'l.official_code', 'l.name_en', 'l.name_si', 'l.name_ta', 'lt.name_en AS type_name', 'lt.system_key AS type_key', 'l.effective_from', 'l.operational_status', 'l.approval_status', 'l.created_by'],
+                $gnIdentifiers['select'],
                 $hierarchy['select']
             ),
             'count' => 'l.id', 'baseWhere' => $baseWhere, 'baseParams' => $baseParams,
             'searchable' => array_merge(
                 ['l.dad_number', 'l.official_code', 'l.name_en', 'l.name_si', 'l.name_ta'],
-                $scopeType === '' ? ['lt.name_en'] : $hierarchy['searchable']
+                $scopeType === '' ? ['lt.name_en'] : array_merge($gnIdentifiers['searchable'], $hierarchy['searchable'])
             ),
             'filters' => $filters,
             'columns' => $scopeType === '' ? [
@@ -174,6 +183,7 @@ final class DataTableRegistry
                     self::col('DAD Number', 'dad_number', 'l.dad_number', fn($r) => DataTableFormat::text($r['dad_number'])),
                     self::col('Official Code', 'official_code', 'l.official_code', fn($r) => DataTableFormat::text($r['official_code'])),
                 ],
+                $gnIdentifiers['columns'],
                 $hierarchy['columns'],
                 [
                     self::col('Start Date', 'effective_from', 'l.effective_from', fn($r) => DataTableFormat::date($r['effective_from'])),
@@ -188,7 +198,7 @@ final class DataTableRegistry
 
     /**
      * Type-specific lists follow the approved, effective hierarchy using one
-     * set-based join chain. Ambiguous relationship versions are left blank
+     * set-based join chain. Ambiguous GN hierarchy is labelled as a data issue
      * instead of multiplying a location row or choosing an arbitrary parent.
      */
     private static function locationTypeHierarchy(string $scopeType): array
@@ -212,7 +222,25 @@ final class DataTableRegistry
             . " LEFT JOIN current_location_relationship asc_arpa_rel ON asc_arpa_rel.child_location_id=arpa_location.id AND asc_arpa_rel.relationship_type='ASC_ARPA_DIVISION'"
             . " LEFT JOIN location asc_location ON asc_location.id=asc_arpa_rel.parent_location_id"
             . " LEFT JOIN current_location_relationship district_asc_rel ON district_asc_rel.child_location_id=asc_location.id AND district_asc_rel.relationship_type='DISTRICT_ASC'"
-            . " LEFT JOIN location district_location ON district_location.id=district_asc_rel.parent_location_id" . $provinceJoin;
+            . " LEFT JOIN location agrarian_district_location ON agrarian_district_location.id=district_asc_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship agrarian_province_rel ON agrarian_province_rel.child_location_id=agrarian_district_location.id AND agrarian_province_rel.relationship_type='PROVINCE_DISTRICT'"
+            . " LEFT JOIN location agrarian_province_location ON agrarian_province_location.id=agrarian_province_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship ds_gn_rel ON ds_gn_rel.child_location_id=l.id AND ds_gn_rel.relationship_type='DS_DIVISION_GN_DIVISION'"
+            . " LEFT JOIN location ds_location ON ds_location.id=ds_gn_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship district_ds_gn_rel ON district_ds_gn_rel.child_location_id=ds_location.id AND district_ds_gn_rel.relationship_type='DISTRICT_DS_DIVISION'"
+            . " LEFT JOIN location administrative_district_location ON administrative_district_location.id=district_ds_gn_rel.parent_location_id"
+            . " LEFT JOIN current_location_relationship administrative_province_rel ON administrative_province_rel.child_location_id=administrative_district_location.id AND administrative_province_rel.relationship_type='PROVINCE_DISTRICT'"
+            . " LEFT JOIN location administrative_province_location ON administrative_province_location.id=administrative_province_rel.parent_location_id";
+        $gnHierarchyIssue = "COALESCE(ds_gn_rel.relationship_count,0)>1"
+            . " OR COALESCE(arpa_gn_rel.relationship_count,0)>1"
+            . " OR COALESCE(asc_arpa_rel.relationship_count,0)>1"
+            . " OR COALESCE(district_ds_gn_rel.relationship_count,0)>1"
+            . " OR COALESCE(district_asc_rel.relationship_count,0)>1"
+            . " OR COALESCE(administrative_province_rel.relationship_count,0)>1"
+            . " OR COALESCE(agrarian_province_rel.relationship_count,0)>1"
+            . " OR (administrative_district_location.id IS NOT NULL AND agrarian_district_location.id IS NOT NULL AND administrative_district_location.id<>agrarian_district_location.id)"
+            . " OR (administrative_province_location.id IS NOT NULL AND agrarian_province_location.id IS NOT NULL AND administrative_province_location.id<>agrarian_province_location.id)";
+        $gnValue = static fn(string $expression): string => "CASE WHEN ({$gnHierarchyIssue}) THEN 'Data Issue' ELSE {$expression} END";
 
         $definition = match ($scopeType) {
             'PROVINCE' => ['', [], 'Province', []],
@@ -245,9 +273,12 @@ final class DataTableRegistry
                 ['Agrarian Service Center', 'asc_name', 'asc_location.name_en'],
             ], 'ARPA Division', ['PROVINCE_DISTRICT','DISTRICT_ASC','ASC_ARPA_DIVISION']],
             'GN_DIVISION' => [$gnChain, [
-                ['Province', 'province_name', 'province_location.name_en'],
-                ['District', 'district_name', 'district_location.name_en'],
-            ], 'GN Division', ['PROVINCE_DISTRICT','DISTRICT_ASC','ASC_ARPA_DIVISION','ARPA_GN_DIVISION']],
+                ['Province', 'province_name', $gnValue('COALESCE(administrative_province_location.name_en,agrarian_province_location.name_en)')],
+                ['District', 'district_name', $gnValue('COALESCE(administrative_district_location.name_en,agrarian_district_location.name_en)')],
+                ['DS Division', 'ds_division_name', $gnValue('ds_location.name_en')],
+                ['ASC', 'asc_name', $gnValue('asc_location.name_en')],
+                ['ARPA Division', 'arpa_division_name', $gnValue('arpa_location.name_en')],
+            ], 'GN Division', ['PROVINCE_DISTRICT','DISTRICT_DS_DIVISION','DISTRICT_ASC','ASC_ARPA_DIVISION','ARPA_GN_DIVISION','DS_DIVISION_GN_DIVISION']],
             default => throw new RuntimeException('Unknown Location Type.'),
         };
 
@@ -262,7 +293,8 @@ final class DataTableRegistry
                 $searchable[] = $expression;
                 $sortParts[] = "COALESCE({$expression},'')";
             }
-            $columns[] = self::col($label, $key, $expression === 'NULL' ? 'l.name_en' : $expression, fn($r) => DataTableFormat::text($r[$key] ?? null));
+            $empty = $scopeType === 'GN_DIVISION' && in_array($key, ['ds_division_name','asc_name','arpa_division_name'], true) ? '' : '—';
+            $columns[] = self::col($label, $key, $expression === 'NULL' ? 'l.name_en' : $expression, fn($r) => DataTableFormat::text($r[$key] ?? null, $empty));
         }
         $sortParts[] = 'l.name_en';
         $locationSort = count($sortParts) === 1 ? 'l.name_en' : 'CONCAT_WS(CHAR(31),' . implode(',', $sortParts) . ')';
@@ -283,14 +315,16 @@ final class DataTableRegistry
         if ($relationshipTypes === []) {
             return $baseWith;
         }
-        $allowed = ['PROVINCE_DISTRICT','DISTRICT_DS_DIVISION','DISTRICT_ASC','ASC_ARPA_DIVISION','ARPA_GN_DIVISION'];
+        $allowed = ['PROVINCE_DISTRICT','DISTRICT_DS_DIVISION','DISTRICT_ASC','ASC_ARPA_DIVISION','ARPA_GN_DIVISION','DS_DIVISION_GN_DIVISION'];
         if (array_diff($relationshipTypes, $allowed) !== []) {
             throw new RuntimeException('Unknown Location Relationship Type.');
         }
         $typeList = "'" . implode("','", $relationshipTypes) . "'";
         $cte = "current_location_relationship AS ("
-            . "SELECT relationship_type,child_location_id,"
-            . "CASE WHEN COUNT(DISTINCT parent_location_id)=1 THEN MIN(parent_location_id) END parent_location_id"
+            . "SELECT relationship_type,child_location_id,COUNT(*) relationship_count,"
+            . "CASE WHEN relationship_type='DS_DIVISION_GN_DIVISION'"
+            . " THEN CASE WHEN COUNT(*)=1 THEN MIN(parent_location_id) END"
+            . " ELSE CASE WHEN COUNT(DISTINCT parent_location_id)=1 THEN MIN(parent_location_id) END END parent_location_id"
             . " FROM location_relationship WHERE relationship_type IN ({$typeList})"
             . " AND active=1 AND approval_status='APPROVED'"
             . " AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE())"
@@ -1811,6 +1845,9 @@ final class DataTableRegistry
     private static function locationActions(array $row): string
     {
         $actions=Auth::can('location.view')?'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('locations/'.$row['id'])).'">View</a>':'';
+        if(LocationDirectEditPolicy::allowed()){
+            $actions.='<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('locations/'.$row['id'].'/edit')).'">Edit</a>';
+        }
         if($row['approval_status']==='DRAFT'&&Auth::can('location.submit')){
             $actions.=DataTableFormat::actionForm('locations/'.$row['id'].'/submit','Submit','btn-outline-primary');
         }elseif($row['approval_status']==='SUBMITTED'&&Auth::can('location.approve')&&!self::isMaker($row['created_by'])){
