@@ -15,7 +15,11 @@ final class ArpaAppointmentOperationalViewsTest
         $this->pdo=Database::pdo();$before=$this->state();
         $this->actor=(string)$this->pdo->query("SELECT su.id FROM system_user su JOIN user_account_role ur ON ur.user_id=su.id JOIN application_role r ON r.id=ur.role_id WHERE r.role_code='SYSTEM_ADMIN' LIMIT 1")->fetchColumn();
         if($this->actor==='')throw new RuntimeException('SYSTEM_ADMIN fixture required.');$this->activateContext($this->actor,'SYSTEM_ADMIN');
-        $this->staticRuleCoverage();$this->transactionalReadModels();
+        $originalSqlMode=(string)$this->pdo->query('SELECT @@SESSION.sql_mode')->fetchColumn();
+        $strictModes=array_values(array_unique(array_filter(array_merge(explode(',',$originalSqlMode),['ONLY_FULL_GROUP_BY']))));
+        $this->pdo->exec('SET SESSION sql_mode='.$this->pdo->quote(implode(',',$strictModes)));
+        try{$this->staticRuleCoverage();$this->transactionalReadModels();}
+        finally{$this->pdo->exec('SET SESSION sql_mode='.$this->pdo->quote($originalSqlMode));}
         $this->same($before,$this->state(),'operational-view tests leave all appointment and safety state unchanged');
         echo "ArpaAppointmentOperationalViewsTest: {$this->assertions} assertions passed.\n";return 0;
     }
@@ -249,20 +253,52 @@ final class ArpaAppointmentOperationalViewsTest
 
             $first=$this->appointment((string)$ids[0],$asc,$division,'PERMANENT',$today);$second=$this->appointment((string)$ids[1],$asc,$division,'ACTING',$today);
             $issues=$this->rawIssues();$this->same(true,in_array('DIVISION_MULTIPLE_OPEN',$issues,true),'same Division with multiple open appointments is detected');$this->same(true,in_array('DEPENDENT_WITHOUT_PERMANENT',$issues,true),'Acting without the same Officer Permanent is detected');
+            $divisionIssue=$this->issueRow('DIVISION_MULTIPLE_OPEN:'.$division);
+            $this->same(null,$divisionIssue['officer_id'],'Division-level conflict does not claim one arbitrary Officer as its owner');
+            $related=explode(',',(string)$divisionIssue['related_ids']);sort($related);$expectedRelated=[$first,$second];sort($expectedRelated);
+            $this->same($expectedRelated,$related,'Division-level conflict retains both competing appointment IDs');
+            $officerNames=$this->officerNames([(string)$ids[0],(string)$ids[1]]);
+            foreach($officerNames as $name)$this->same(true,str_contains((string)$divisionIssue['officer_name'],$name),'Division-level conflict names every involved Officer');
             $this->pdo->prepare("UPDATE officer SET arpa_service_permanency='NOT_PERMANENT_IN_SERVICE' WHERE id=?")->execute([$ids[1]]);$issues=$this->rawIssues();$this->same(true,in_array('NON_PERMANENT_SERVICE_WITH_ACTING',$issues,true),'Not-Permanent-in-Service with Acting is detected');
             $third=$this->appointment((string)$ids[0],$asc,(string)$divisions[1],'DUTY_COVERING',$today);$fourth=$this->appointment((string)$ids[0],$asc,(string)$divisions[2],'DUTY_COVERING',$today);$issues=$this->rawIssues();$this->same(false,in_array('OFFICER_MULTIPLE_DUTY_COVERING',$issues,true),'multiple Duty Covering appointments remain allowed');
             $this->appointment((string)$ids[0],$asc,(string)$divisions[3],'PERMANENT',$today);$this->appointment((string)$ids[1],$asc,(string)$divisions[4],'ACTING',$today);$this->appointment((string)$ids[1],$asc,(string)$divisions[5],'ATTEND_TO_DUTY',$today);$this->appointment((string)$ids[1],$asc,(string)$divisions[6],'ATTEND_TO_DUTY',$today);$this->appointment((string)$ids[0],$asc,(string)$divisions[7],'ATTEND_TO_DUTY',$today);
             $issues=$this->rawIssues();foreach(['OFFICER_MULTIPLE_PERMANENT','OFFICER_MULTIPLE_ACTING','OFFICER_MULTIPLE_ATTEND_TO_DUTY','PERMANENT_SERVICE_WITH_ATTEND_TO_DUTY'] as $issue)$this->same(true,in_array($issue,$issues,true),"{$issue} is detected at runtime");
+            foreach([['OFFICER_MULTIPLE_PERMANENT',(string)$ids[0]],['OFFICER_MULTIPLE_ACTING',(string)$ids[1]]] as [$type,$officerId]){
+                $row=$this->issueRow($type.':'.$officerId);$officer=$this->officer($officerId);
+                $this->same($officerId,(string)$row['officer_id'],"{$type} retains its grouped Officer ID");
+                $this->same($officer['dad_number'],(string)$row['officer_number'],"{$type} retains the correct Officer Number");
+                $this->same($officer['name_with_initials'],(string)$row['officer_name'],"{$type} retains the correct Officer Name");
+                $this->same($officer['nic'],(string)$row['nic'],"{$type} retains the correct NIC");
+            }
+            $futureFirst=$this->appointment((string)$ids[0],$asc,(string)$divisions[8],'PERMANENT',$future);$futureSecond=$this->appointment((string)$ids[1],$asc,(string)$divisions[8],'ACTING',$future);
+            $futureIssue=$this->issueRow('FUTURE_OVERLAP_CONFLICT:'.$divisions[8]);$futureRelated=explode(',',(string)$futureIssue['related_ids']);sort($futureRelated);$expectedFuture=[$futureFirst,$futureSecond];sort($expectedFuture);
+            $this->same($expectedFuture,$futureRelated,'future Division conflict retains every competing appointment');
+            $this->same(null,$futureIssue['officer_id'],'future Division conflict does not claim one arbitrary Officer');
             foreach(['AGRARIAN_BANK','SALES_SHOP','SITHAMU'] as $kind)$this->subject((string)$ids[0],$asc,$kind,$today);
             $rows=$this->pdo->query("SELECT issue_type,appointment_types FROM ".ArpaAppointmentReadService::issueSource()." q WHERE issue_type IN('EXCLUSIVE_FUNCTION_OVERLAP','MULTIPLE_EXCLUSIVE_FUNCTIONS')")->fetchAll();$this->same(true,in_array('MULTIPLE_EXCLUSIVE_FUNCTIONS',array_column($rows,'issue_type'),true),'multiple exclusive functions are detected');
             foreach(['AGRARIAN_BANK','SALES_SHOP','SITHAMU'] as $kind)$this->same(true,count(array_filter($rows,fn($row)=>$row['issue_type']==='EXCLUSIVE_FUNCTION_OVERLAP'&&str_contains((string)$row['appointment_types'],$kind)))>0,"{$kind} overlap is detected");
+            $exclusive=$this->issueRow('MULTIPLE_EXCLUSIVE_FUNCTIONS:'.$ids[0]);$exclusiveOfficer=$this->officer((string)$ids[0]);
+            $this->same($exclusiveOfficer['dad_number'],(string)$exclusive['officer_number'],'exclusive-function grouping retains the correct Officer Number under strict mode');
+            $this->same($exclusiveOfficer['name_with_initials'],(string)$exclusive['officer_name'],'exclusive-function grouping retains the correct Officer Name under strict mode');
+
+            $issueDefinition=DataTableRegistry::definition('arpa-appointment-issues');$issueDefinition['baseWhere'][]='q.row_key=?';$issueDefinition['baseParams'][]='DIVISION_MULTIPLE_OPEN:'.$division;
+            $this->same(1,(new DataTableQuery($this->pdo,$issueDefinition,new DataTableRequest(['length'=>10])))->response()['recordsFiltered'],'Appointment Data Issue DataTable executes under ONLY_FULL_GROUP_BY');
+            $duplicateRows=(int)$this->pdo->query('SELECT COUNT(*) FROM (SELECT q.row_key FROM '.ArpaAppointmentReadService::issueSource().' q GROUP BY q.row_key HAVING COUNT(*)>1) duplicate_issues')->fetchColumn();
+            $this->same(0,$duplicateRows,'issue source returns no duplicate logical row keys');
+            $expectedIssueCount=(int)$this->pdo->query("SELECT COUNT(DISTINCT q.row_key) FROM ".ArpaAppointmentReadService::issueSource()." q WHERE q.severity='ERROR'")->fetchColumn();
+            $dashboard=(new ScopedDashboardService($this->pdo))->arpaModuleCounts($this->actor);
+            $this->same($expectedIssueCount,$dashboard['issues'],'dashboard issue count matches unique ERROR issue row keys under strict mode');
+            $continuityIssues=(new \App\Services\ArpaDivisionContinuityService($this->pdo))->unresolvedDataIssues($division);
+            $this->same(true,in_array('DIVISION_MULTIPLE_OPEN',array_column($continuityIssues,'issue_type'),true),'continuity service consumes the corrected strict-mode issue source');
+            $this->scopedIssueVisibility($asc,$division);
+            $this->activateContext($this->actor,'SYSTEM_ADMIN');
 
             $open=$DataTable=DataTableRegistry::definition('arpa-open-appointments');$open['baseWhere'][]='a.id=?';$open['baseParams'][]=$first;$response=(new DataTableQuery($this->pdo,$open,new DataTableRequest(['length'=>10])))->response();$this->same(1,$response['recordsFiltered'],'open list includes unclosed operational appointment');
             $history=DataTableRegistry::definition('arpa-historical-appointments');$history['baseWhere'][]='a.id=?';$history['baseParams'][]=$scheduled;$response=(new DataTableQuery($this->pdo,$history,new DataTableRequest(['length'=>10])))->response();$this->same(1,$response['recordsFiltered'],'historical list includes formally closed appointment');
             $this->same(0,(new DataTableQuery($this->pdo,$history,new DataTableRequest(['length'=>10])))->response()['data'][0]['effective_to']===''?1:0,'historical row exposes an end date');
             $dashboard=(new ScopedDashboardService($this->pdo))->arpaModuleCounts($this->actor);foreach(['openPermanent','openActing','openDutyCovering','openAttendToDuty','openSubjects','pending','vacantDivisions','issues','appointmentMix','divisionCoverage'] as $key)$this->same(true,array_key_exists($key,$dashboard),"dashboard returns scoped {$key}");
             unset($second,$third,$fourth);
-        }finally{$this->pdo->rollBack();}
+        }finally{$this->pdo->rollBack();$this->activateContext($this->actor,'SYSTEM_ADMIN');}
     }
 
     private function appointment(string $officer,string $asc,string $division,string $type,string $from):string
@@ -919,7 +955,7 @@ final class ArpaAppointmentOperationalViewsTest
                AND (lr.effective_to IS NULL OR lr.effective_to>=CURRENT_DATE())
                AND asc_l.approval_status='APPROVED'
                AND asc_l.operational_status='ACTIVE'
-             ORDER BY asc_l.name_en"
+             ORDER BY asc_l.id"
         );
 
         $stmt->execute([$districtId]);
@@ -970,6 +1006,44 @@ final class ArpaAppointmentOperationalViewsTest
         $context=array_values(array_filter($contexts,static fn(array $row):bool=>($roleCode===null||$row['role_code']===$roleCode)&&($roleLevel===null||$row['role_level']===$roleLevel)))[0]??null;
         if(!$context)throw new RuntimeException('Required working context fixture is unavailable.');
         (new UserContextService($this->pdo))->select($userId,(string)$context['role_assignment_id'],$context['scope_assignment_id']===null?null:(string)$context['scope_assignment_id']);Auth::forgetRequestCache();
+    }
+    private function issueRow(string $rowKey):array
+    {
+        $s=$this->pdo->prepare('SELECT q.* FROM '.ArpaAppointmentReadService::issueSource().' q WHERE q.row_key=?');$s->execute([$rowKey]);$row=$s->fetch();
+        if(!$row)throw new RuntimeException("Issue fixture {$rowKey} was not produced.");
+        return $row;
+    }
+    private function officer(string $id):array
+    {
+        $s=$this->pdo->prepare('SELECT dad_number,name_with_initials,nic FROM officer WHERE id=?');$s->execute([$id]);return $s->fetch()?:[];
+    }
+    private function officerNames(array $ids):array
+    {
+        $marks=implode(',',array_fill(0,count($ids),'?'));$s=$this->pdo->prepare("SELECT name_with_initials FROM officer WHERE id IN({$marks}) ORDER BY id");$s->execute($ids);return array_map('strval',$s->fetchAll(PDO::FETCH_COLUMN));
+    }
+    private function scopedIssueVisibility(string $ascId,string $divisionId):void
+    {
+        $district=(string)$this->pdo->query("WITH RECURSIVE ancestors(id) AS (SELECT '{$ascId}' UNION DISTINCT SELECT lr.parent_location_id FROM location_relationship lr JOIN ancestors a ON a.id=lr.child_location_id WHERE lr.active=1 AND lr.approval_status='APPROVED') SELECT l.id FROM ancestors a JOIN location l ON l.id=a.id JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='DISTRICT' LIMIT 1")->fetchColumn();
+        if($district==='')throw new RuntimeException('District ancestor fixture required.');
+        foreach([
+            ['ASC_SUBJECT_OFFICER','ASC','EXACT',$ascId],
+            ['DISTRICT_SUBJECT_OFFICER','DISTRICT','INCLUDE_CHILDREN',$district],
+            ['NATIONAL_SUBJECT_OFFICER','NATIONAL','NATIONAL',null],
+        ] as [$role,$scopeType,$scopeMode,$locationId]){
+            $actor=$this->scopedActor($role,$scopeType,$scopeMode,$locationId);$this->activateContext($actor,$role);
+            $definition=DataTableRegistry::definition('arpa-appointment-issues');$definition['baseWhere'][]='q.row_key=?';$definition['baseParams'][]='DIVISION_MULTIPLE_OPEN:'.$divisionId;
+            $this->same(1,(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>10])))->response()['recordsFiltered'],"{$role} sees the permitted strict-mode issue through geographic scope");
+        }
+    }
+    private function scopedActor(string $roleCode,string $scopeType,string $scopeMode,?string $locationId):string
+    {
+        $userId=$this->uuid();$assignmentId=$this->uuid();$username='strict.issue.'.strtolower($roleCode).'.'.substr(str_replace('-','',$userId),0,8);
+        $this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,display_name,account_status,approval_status,enabled) VALUES(?,'STAFF',?,?,'ACTIVE','APPROVED',1)")->execute([$userId,$username,$username]);
+        $roleId=(string)$this->pdo->query("SELECT id FROM application_role WHERE role_code=".$this->pdo->quote($roleCode)." AND active=1 AND approval_status='APPROVED'")->fetchColumn();
+        if($roleId==='')throw new RuntimeException("Role {$roleCode} fixture required.");
+        $this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason) VALUES(?,?,?,'2025-01-01','APPROVED',1,'Strict issue-source test')")->execute([$assignmentId,$userId,$roleId]);
+        $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason) VALUES(UUID(),?,?,?,?,?,'2025-01-01','APPROVED',1,'Strict issue-source test')")->execute([$userId,$assignmentId,$scopeType,$scopeMode,$locationId]);
+        return $userId;
     }
     private function rawIssues():array{return $this->pdo->query('SELECT DISTINCT issue_type FROM '.ArpaAppointmentReadService::issueSource().' q')->fetchAll(PDO::FETCH_COLUMN);}
     private function state():array{return ['requests'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment_request')->fetchColumn(),'appointments'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment')->fetchColumn(),'closures'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_division_appointment_closure')->fetchColumn(),'subjects'=>(int)$this->pdo->query('SELECT COUNT(*) FROM arpa_subject_assignment')->fetchColumn(),'offices'=>(int)$this->pdo->query('SELECT COUNT(*) FROM officer_office_assignment')->fetchColumn(),'decisions'=>(int)$this->pdo->query("SELECT COUNT(*) FROM legacy_arpa_appointment_resolution WHERE resolution_status='CONFIRMED'")->fetchColumn(),'roles'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_role')->fetchColumn(),'scopes'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_scope')->fetchColumn()];}

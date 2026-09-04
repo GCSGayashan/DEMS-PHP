@@ -127,7 +127,7 @@ final class ArpaAppointmentDataIssueCorrectionService
             $origins=array_values(array_unique(array_column($before,'record_origin')));$origin=count($origins)===1?$origins[0]:'MIXED';
             $requestId=$target['request_id']??null;
             $this->pdo->prepare('INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,remarks,evidence_reference,before_json,after_json,record_origin,legacy_source_references_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-                ->execute([$correctionId,$rowKey,$issue['issue_type'],$issue['officer_id'],$target['id']??null,$requestId,$this->json($related),$issue['asc_location_id'],$actorId,$action,$resolution,$reason,$this->nullText($input['remarks']??null),$this->nullText($input['evidence_reference']??null),$this->json($before),$this->json($after),$origin,$this->json($this->legacyReferences($before))]);
+                ->execute([$correctionId,$rowKey,$issue['issue_type'],$target['officer_id'],$target['id']??null,$requestId,$this->json($related),$issue['asc_location_id'],$actorId,$action,$resolution,$reason,$this->nullText($input['remarks']??null),$this->nullText($input['evidence_reference']??null),$this->json($before),$this->json($after),$origin,$this->json($this->legacyReferences($before))]);
             $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,source_ip) VALUES(?,'arpa.appointment.data-issue.correct','ARPA_APPOINTMENT_DATA_ISSUE',?,?, 'WARNING',?)")
                 ->execute([$actorId,$correctionId,$this->json(['issue_row_key'=>$rowKey,'issue_type'=>$issue['issue_type'],'action'=>$action,'resolution_status'=>$resolution,'reason'=>$reason,'appointment_ids'=>$related]),$_SERVER['REMOTE_ADDR']??'CLI']);
             return ['correction_id'=>$correctionId,'resolution_status'=>$resolution,'issue_remaining'=>$remaining];
@@ -317,8 +317,9 @@ final class ArpaAppointmentDataIssueCorrectionService
     private function appointments(array $ids):array
     {
         if($ids===[])return [];$marks=implode(',',array_fill(0,count($ids),'?'));
-        $sql="SELECT a.*,r.workflow_status,r.legacy_history_only request_legacy_history_only,r.origin_metadata_json request_origin_metadata_json,c.id closure_id,c.effective_to,c.end_reason_id,c.legacy_reason_text,c.closure_source,er.name_en end_reason_name
+        $sql="SELECT a.*,r.workflow_status,r.legacy_history_only request_legacy_history_only,r.origin_metadata_json request_origin_metadata_json,c.id closure_id,c.effective_to,c.end_reason_id,c.legacy_reason_text,c.closure_source,er.name_en end_reason_name,ao.dad_number appointment_officer_number,ao.name_with_initials appointment_officer_name,ao.nic appointment_officer_nic
               FROM arpa_division_appointment a JOIN arpa_division_appointment_request r ON r.id=a.request_id
+              JOIN officer ao ON ao.id=a.officer_id
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               LEFT JOIN arpa_appointment_end_reason er ON er.id=c.end_reason_id WHERE a.id IN({$marks}) ORDER BY a.effective_from,a.id";
         $s=$this->pdo->prepare($sql);$s->execute($ids);return $s->fetchAll();
