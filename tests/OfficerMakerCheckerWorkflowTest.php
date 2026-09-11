@@ -35,6 +35,7 @@ final class OfficerMakerCheckerWorkflowTest
         $districtContext=$service->creationContext($districtMaker['user']);
         $this->same($districtA,$districtContext['scope_location_id'],'District maker snapshot uses the active District context');
         $districtOfficer=$this->officer($districtMaker['user'],'DISTRICT_SUBJECT_OFFICER',$districtA,'SUBMITTED');
+        $this->same(null,$this->value('SELECT photograph_path FROM officer WHERE id=?',[$districtOfficer]),'Officer can be created and submitted without a photograph');
         $this->same(true,$service->canAccess($districtOfficer,$districtMaker['user']),'District maker can review their submitted Officer');
         $this->throws(fn()=>$service->approve($districtOfficer,$districtMaker['user']),'maker cannot self-approve');
         $queueDad=(string)$this->value('SELECT dad_number FROM officer WHERE id=?',[$districtOfficer]);
@@ -57,6 +58,7 @@ final class OfficerMakerCheckerWorkflowTest
         $this->same(true,$service->canAccess($districtOfficer,$districtChecker['user']),'same-District Admin can review the submission');
         $service->approve($districtOfficer,$districtChecker['user']);
         $this->same('APPROVED',$this->value('SELECT approval_status FROM officer WHERE id=?',[$districtOfficer]),'same-District Admin approves the canonical Officer');
+        $this->same(null,$this->value('SELECT photograph_path FROM officer WHERE id=?',[$districtOfficer]),'Officer approval does not require a photograph');
         $after=(new DataTableQuery($this->pdo,DataTableRegistry::definition('officers'),new DataTableRequest(['length'=>25,'search'=>['value'=>$this->value('SELECT dad_number FROM officer WHERE id=?',[$districtOfficer])]])))->response();
         $this->same(1,$after['recordsFiltered'],'approved scoped Officer appears in the normal directory');
 
@@ -81,11 +83,17 @@ final class OfficerMakerCheckerWorkflowTest
 
     private function testCodeContracts():void
     {
-        $controller=(string)file_get_contents(BASE_PATH.'/app/Controllers/OfficerController.php');$view=(string)file_get_contents(BASE_PATH.'/app/Views/officers/index.php');$routes=(string)file_get_contents(BASE_PATH.'/routes/web.php');
+        $controller=(string)file_get_contents(BASE_PATH.'/app/Controllers/OfficerController.php');$view=(string)file_get_contents(BASE_PATH.'/app/Views/officers/index.php');$form=(string)file_get_contents(BASE_PATH.'/app/Views/officers/form.php');$edit=(string)file_get_contents(BASE_PATH.'/app/Views/officers/edit.php');$routes=(string)file_get_contents(BASE_PATH.'/routes/web.php');
         $this->same(true,str_contains($controller,'OfficerWorkflowService')&&str_contains($controller,'returnForCorrection'),'Officer controller uses scoped workflow service for writes');
         $this->same(true,str_contains($view,'Officer Workflow')&&str_contains($view,'Add Officer'),'existing Officer module contains maker and checker UI');
         $this->same(true,str_contains($routes,"/hr/officers/{id}/return"),'Officer return route is registered');
         $this->same(true,in_array("o.approval_status='APPROVED'",DataTableRegistry::definition('officers')['baseWhere'],true),'normal Officer directory explicitly requires approval');
+        $this->same(true,str_contains($form,'JPG/PNG, max 5 MB (Optional)')&&!preg_match('/name="photograph"[^>]*\brequired\b/',$form),'Officer create form marks photograph optional');
+        $this->same(false,str_contains($controller,'Officer photograph is required.'),'Officer creation has no mandatory-photograph validation');
+        $this->same(true,str_contains($controller,"UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_NO_FILE")&&str_contains($controller,"'image/jpeg'=>'jpg'")&&str_contains($controller,"'image/png'=>'png'")&&str_contains($controller,'move_uploaded_file'),'optional valid JPG/PNG upload retains secure storage path');
+        $this->same(true,str_contains($controller,'Photograph must be JPG/JPEG or PNG.'),'invalid photograph types remain rejected');
+        $this->same(true,str_contains($controller,'Photograph must be 5 MB or smaller.'),'photographs larger than 5 MB remain rejected');
+        $this->same(true,str_contains($edit,'Optional. Upload only to replace current photograph.')&&!preg_match('/name="photograph"[^>]*\brequired\b/',$edit),'edit keeps an existing photograph when no replacement is uploaded');
     }
 
     private function actor(string $roleCode,?string $locationId):array

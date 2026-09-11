@@ -580,10 +580,13 @@ final class OfficerController extends Controller
         $n=$pdo->prepare('SELECT class_required FROM appointment_nature WHERE id=? AND active=1');$n->execute([$natureId]);$classRequired=(bool)$n->fetchColumn();
         if($classRequired && !$classId){$this->flash('danger','Class is required for the selected Appointment Nature.');redirect('/hr/officers/create');}
         if($classId){$cnt=$pdo->prepare('SELECT COUNT(*) FROM designation_allowed_class WHERE designation_id=? AND active=1');$cnt->execute([$_POST['primary_designation_id']]);if((int)$cnt->fetchColumn()>0){$ok=$pdo->prepare("SELECT COUNT(*) FROM designation_allowed_class WHERE designation_id=? AND class_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE())");$ok->execute([$_POST['primary_designation_id'],$classId]);if((int)$ok->fetchColumn()===0){$this->flash('danger','Selected Class is not permitted for this Designation.');redirect('/hr/officers/create');}}}
-        $photo=$_FILES['photograph']??null;if(!$photo||($photo['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK){$this->flash('danger','Officer photograph is required.');redirect('/hr/officers/create');}
-        if((int)$photo['size']>5*1024*1024){$this->flash('danger','Photograph must be 5 MB or smaller.');redirect('/hr/officers/create');}
-        $mime=(new \finfo(FILEINFO_MIME_TYPE))->file($photo['tmp_name']);$ext=['image/jpeg'=>'jpg','image/png'=>'png'][$mime]??null;if(!$ext){$this->flash('danger','Photograph must be JPG/JPEG or PNG.');redirect('/hr/officers/create');}
-        $photoName=bin2hex(random_bytes(18)).'.'.$ext;$photoDir=BASE_PATH.'/storage/officer_photos';if(!is_dir($photoDir))mkdir($photoDir,0770,true);if(!move_uploaded_file($photo['tmp_name'],$photoDir.'/'.$photoName))throw new \RuntimeException('Could not store photograph.');
+        $photo=$_FILES['photograph']??null;$photoName=null;
+        if($photo&&($photo['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_NO_FILE){
+            if(($photo['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK){$this->flash('danger','Could not upload the photograph.');redirect('/hr/officers/create');}
+            if((int)$photo['size']>5*1024*1024){$this->flash('danger','Photograph must be 5 MB or smaller.');redirect('/hr/officers/create');}
+            $mime=(new \finfo(FILEINFO_MIME_TYPE))->file($photo['tmp_name']);$ext=['image/jpeg'=>'jpg','image/png'=>'png'][$mime]??null;if(!$ext){$this->flash('danger','Photograph must be JPG/JPEG or PNG.');redirect('/hr/officers/create');}
+            $photoName=bin2hex(random_bytes(18)).'.'.$ext;$photoDir=BASE_PATH.'/storage/officer_photos';if(!is_dir($photoDir))mkdir($photoDir,0770,true);if(!move_uploaded_file($photo['tmp_name'],$photoDir.'/'.$photoName))throw new \RuntimeException('Could not store photograph.');
+        }
         $dob=(string)($_POST['date_of_birth']??''); $ret=$dob?(new \DateTimeImmutable($dob))->modify('+60 years')->format('Y-m-d'):null;
         $dad=NumberService::next('OFFICER');
         $officerId=(string)$pdo->query('SELECT UUID()')->fetchColumn();
