@@ -2,8 +2,8 @@
 declare(strict_types=1);
 namespace App\Controllers;
 
-use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,WorkflowService,DataTableRegistry,NicNormalizer,ScopeService};
-use App\Services\{OfficerOfficeAssignmentService,OfficerProfileService};
+use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,DataTableRegistry,NicNormalizer,ScopeService};
+use App\Services\{OfficerOfficeAssignmentService,OfficerProfileService,OfficerWorkflowService};
 
 final class OfficerController extends Controller
 {
@@ -22,15 +22,16 @@ final class OfficerController extends Controller
             $rows=$pdo->query($sql)->fetchAll(); $options[$key]=array_column($rows,'name_en','id');
         }
         $scoped=ScopeService::requiresGeographicRestriction((string)Auth::user()['id']);$dataTable=DataTableRegistry::viewModel('officers',[],$options);
-        $this->render('officers/index',compact('dataTable','scoped'));
+        $workflowDataTable=(Auth::can('officer.create')||Auth::can('officer.approve'))?DataTableRegistry::viewModel('officer-workflow'):null;
+        $this->render('officers/index',compact('dataTable','workflowDataTable','scoped'));
     }
 
     public function show(string $id):void
     {
-        Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];
-        if(!ScopeService::canAccessOfficer($userId,$id)){http_response_code(404);$this->render('partials/not-found');return;}
+        Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$workflowService=new OfficerWorkflowService(Database::pdo());
+        if(!$workflowService->canAccess($id,$userId)){http_response_code(404);$this->render('partials/not-found');return;}
         $restricted=ScopeService::requiresGeographicRestriction($userId);$offices=ScopeService::scopedOffices($userId);$ascIds=$restricted?array_column(ScopeService::scopedLocations($userId,'ASC'),'id'):null;
-        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds);$this->render('officers/show',$profile+compact('offices'));
+        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds);$officerWorkflow=$workflowService->actions($id,$userId);$this->render('officers/show',$profile+compact('offices','officerWorkflow'));
     }
 
     public function search():void
@@ -41,7 +42,7 @@ final class OfficerController extends Controller
     {
         Auth::requirePermission('officer.view');Csrf::validate();$query=trim((string)($_POST['nic']??''));$message=null;$results=[];$normalized=NicNormalizer::normalize($query);
         if(!NicNormalizer::isValid($normalized))$message='Enter a valid Sri Lankan NIC.';else{
-            $userId=(string)Auth::user()['id'];$access=ScopeService::currentOfficerAccess($userId,'o.id');$params=$access['params'];$where=$access['where'];$where[]='(o.nic_normalized=? OR o.nic_match_key=?)';$params[]=$normalized;$params[]=NicNormalizer::matchKey($normalized);
+            $userId=(string)Auth::user()['id'];$access=ScopeService::currentOfficerAccess($userId,'o.id');$params=$access['params'];$where=$access['where'];$where[]="o.approval_status='APPROVED'";$where[]='(o.nic_normalized=? OR o.nic_match_key=?)';$params[]=$normalized;$params[]=NicNormalizer::matchKey($normalized);
             $sql=$access['with']." SELECT o.id,o.dad_number,o.name_with_initials,o.nic,d.name_en designation_name,c.name_en class_name,ofc.name_en primary_office_name FROM officer o LEFT JOIN designation d ON d.id=o.primary_designation_id LEFT JOIN officer_class c ON c.id=o.class_id LEFT JOIN office ofc ON ofc.id=o.primary_office_id WHERE ".implode(' AND ',$where).' ORDER BY o.dad_number LIMIT 25';
             $s=Database::pdo()->prepare($sql);$s->execute($params);$results=$s->fetchAll();if(count($results)===1)redirect('/hr/officers/'.$results[0]['id']);$message=$results===[]?'Officer not found.':'More than one Officer matches this NIC. Select the correct scoped Officer below.';
         }
@@ -51,7 +52,7 @@ final class OfficerController extends Controller
     public function options():void
     {
         Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$access=ScopeService::currentOfficerAccess($userId,'o.id');$term=trim((string)($_GET['q']??''));
-        $where=$access['where'];$params=$access['params'];if($term!==''){$where[]="CONCAT_WS(' ',o.dad_number,o.name_with_initials,o.nic) LIKE ?";$params[]='%'.str_replace(['\\','%','_'],['\\\\','\\%','\\_'],$term).'%';}
+        $where=$access['where'];$where[]="o.approval_status='APPROVED'";$params=$access['params'];if($term!==''){$where[]="CONCAT_WS(' ',o.dad_number,o.name_with_initials,o.nic) LIKE ?";$params[]='%'.str_replace(['\\','%','_'],['\\\\','\\%','\\_'],$term).'%';}
         $sql=$access['with']." SELECT o.id,o.dad_number,o.name_with_initials FROM officer o WHERE ".($where?implode(' AND ',$where):'1=1')." ORDER BY o.name_with_initials LIMIT 25";$s=Database::pdo()->prepare($sql);$s->execute($params);
         header('Content-Type: application/json; charset=utf-8');echo json_encode(['results'=>$s->fetchAll()],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE);exit;
     }
@@ -62,11 +63,13 @@ final class OfficerController extends Controller
 
         $userId=(string)Auth::user()['id'];
 
-        if(!ScopeService::canAccessOfficer($userId,$id)){
+        $workflowService=new OfficerWorkflowService(Database::pdo());
+        if(!$workflowService->canAccess($id,$userId)){
             http_response_code(404);
             $this->render('partials/not-found');
             return;
         }
+        try{$workflowService->assertEditable($id,$userId);}catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'officer.edit within the active workflow context']);return;}
 
         $pdo=Database::pdo();
 
@@ -134,7 +137,8 @@ final class OfficerController extends Controller
 
         $userId=(string)Auth::user()['id'];
 
-        if(!ScopeService::canAccessOfficer($userId,$id)){
+        $workflowService=new OfficerWorkflowService(Database::pdo());
+        if(!$workflowService->canAccess($id,$userId)){
             http_response_code(404);
             $this->render('partials/not-found');
             return;
@@ -153,6 +157,8 @@ final class OfficerController extends Controller
             $this->render('partials/not-found');
             return;
         }
+
+        try{$workflowService->assertEditable($id,$userId);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id);}
 
         $fail=function(string $message) use($id): void {
             $this->flash('danger',$message);
@@ -540,6 +546,7 @@ final class OfficerController extends Controller
     public function create(): void
     {
         Auth::requirePermission('officer.create'); $pdo=Database::pdo();
+        try{(new OfficerWorkflowService($pdo))->creationContext((string)Auth::user()['id']);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers');}
         $data=[
             'titles'=>$pdo->query("SELECT * FROM hr_title WHERE active=1 ORDER BY display_order")->fetchAll(),
             'appointmentNatures'=>$pdo->query("SELECT * FROM appointment_nature WHERE active=1 ORDER BY display_order")->fetchAll(),
@@ -554,10 +561,11 @@ final class OfficerController extends Controller
     public function store(): void
     {
         Auth::requirePermission('officer.create'); Csrf::validate();
+        $actor=(string)Auth::user()['id'];$pdo=Database::pdo();
+        try{$workflowContext=(new OfficerWorkflowService($pdo))->creationContext($actor);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/create');}
         $nic=NicNormalizer::normalize((string)($_POST['nic']??'')); $name=trim((string)($_POST['name_with_initials']??''));
         if($nic===null||$name===''){ $this->flash('danger','NIC and Name with Initials are required.'); redirect('/hr/officers/create'); }
         if(!NicNormalizer::isValid($nic)){ $this->flash('danger','NIC format is invalid.'); redirect('/hr/officers/create'); }
-        $pdo=Database::pdo();
         $nicMatchKey=NicNormalizer::matchKey($nic);
         $chk=$pdo->prepare('SELECT COUNT(*) FROM officer WHERE nic_normalized=? OR (nic_match_key IS NOT NULL AND nic_match_key=?)');$chk->execute([$nic,$nicMatchKey]);if((int)$chk->fetchColumn()>0){$this->flash('danger','NIC already exists.');redirect('/hr/officers/create');}
         $employee=trim((string)($_POST['employee_number']??''))?:null;
@@ -578,26 +586,28 @@ final class OfficerController extends Controller
         $photoName=bin2hex(random_bytes(18)).'.'.$ext;$photoDir=BASE_PATH.'/storage/officer_photos';if(!is_dir($photoDir))mkdir($photoDir,0770,true);if(!move_uploaded_file($photo['tmp_name'],$photoDir.'/'.$photoName))throw new \RuntimeException('Could not store photograph.');
         $dob=(string)($_POST['date_of_birth']??''); $ret=$dob?(new \DateTimeImmutable($dob))->modify('+60 years')->format('Y-m-d'):null;
         $dad=NumberService::next('OFFICER');
-        $sql="INSERT INTO officer (id,dad_number,nic,nic_normalized,nic_match_key,employee_number,title_id,name_with_initials,full_name_en,full_name_si,full_name_ta,date_of_birth,expected_retirement_date,gender,civil_status_id,permanent_address,temporary_address,primary_mobile,alternative_mobile,personal_email,official_email,photograph_path,initial_appointment_date,appointment_nature_id,primary_designation_id,class_id,officer_status_id,primary_office_id,effective_from,operational_status,approval_status,created_by,created_at,submitted_by,submitted_at) VALUES(UUID(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'INACTIVE','SUBMITTED',?,NOW(),?,NOW())";
-        $actor=(string)Auth::user()['id'];
-        $vals=[$dad,$nic,$nic,$nicMatchKey,$employee,$_POST['title_id']?:null,$name,trim((string)($_POST['full_name_en']??'')),trim((string)($_POST['full_name_si']??'')),trim((string)($_POST['full_name_ta']??'')),$dob?:null,$ret,$_POST['gender']??null,($_POST['civil_status_id']??'')?:null,trim((string)($_POST['permanent_address']??'')),trim((string)($_POST['temporary_address']??'')),$primaryMobile,$alternativeMobile,$personalEmail,$officialEmail,$photoName,$_POST['initial_appointment_date']?:null,$natureId,$_POST['primary_designation_id']?:null,$classId,$_POST['officer_status_id']?:null,null,$_POST['effective_from']?:date('Y-m-d'),$actor,$actor];
+        $officerId=(string)$pdo->query('SELECT UUID()')->fetchColumn();
+        $officerValues=implode(',',array_fill(0,29,'?'));
+        $sql="INSERT INTO officer (id,dad_number,nic,nic_normalized,nic_match_key,employee_number,title_id,name_with_initials,full_name_en,full_name_si,full_name_ta,date_of_birth,expected_retirement_date,gender,civil_status_id,permanent_address,temporary_address,primary_mobile,alternative_mobile,personal_email,official_email,photograph_path,initial_appointment_date,appointment_nature_id,primary_designation_id,class_id,officer_status_id,primary_office_id,effective_from,operational_status,approval_status,created_by,created_at,submitted_by,submitted_at,workflow_origin_role_code,workflow_scope_location_id) VALUES({$officerValues},'INACTIVE','SUBMITTED',?,NOW(),?,NOW(),?,?)";
+        $vals=[$officerId,$dad,$nic,$nic,$nicMatchKey,$employee,$_POST['title_id']?:null,$name,trim((string)($_POST['full_name_en']??'')),trim((string)($_POST['full_name_si']??'')),trim((string)($_POST['full_name_ta']??'')),$dob?:null,$ret,$_POST['gender']??null,($_POST['civil_status_id']??'')?:null,trim((string)($_POST['permanent_address']??'')),trim((string)($_POST['temporary_address']??'')),$primaryMobile,$alternativeMobile,$personalEmail,$officialEmail,$photoName,$_POST['initial_appointment_date']?:null,$natureId,$_POST['primary_designation_id']?:null,$classId,$_POST['officer_status_id']?:null,null,$_POST['effective_from']?:date('Y-m-d'),$actor,$actor,$workflowContext['role_code'],$workflowContext['scope_location_id']];
         $pdo->prepare($sql)->execute($vals);
-        Audit::record('officer.create','OFFICER',null,['dad_number'=>$dad,'nic'=>$nic]);
-        Audit::record('workflow.submit','OFFICER',null,['dad_number'=>$dad]);
+        Audit::record('officer.create','OFFICER',$officerId,['dad_number'=>$dad,'working_context'=>$workflowContext]);
+        Audit::record('workflow.submit','OFFICER',$officerId,['from_status'=>'CREATED','to_status'=>'SUBMITTED','working_context'=>$workflowContext]);
         $this->flash('success','Officer submitted: '.$dad); redirect('/hr/officers');
     }
 
     public function photo(string $id): void
     {
         Auth::requirePermission('officer.view-photo');
-        if(!ScopeService::canAccessOfficer((string)Auth::user()['id'],$id)){http_response_code(404);exit;}
+        if(!(new OfficerWorkflowService(Database::pdo()))->canAccess($id,(string)Auth::user()['id'])){http_response_code(404);exit;}
         $stmt=Database::pdo()->prepare('SELECT photograph_path FROM officer WHERE id=?');$stmt->execute([$id]);$file=$stmt->fetchColumn();
         if(!$file){http_response_code(404);exit;}$path=BASE_PATH.'/storage/officer_photos/'.basename((string)$file);if(!is_file($path)){http_response_code(404);exit;}
         $mime=(new \finfo(FILEINFO_MIME_TYPE))->file($path);header('Content-Type: '.$mime);header('X-Content-Type-Options: nosniff');header('Cache-Control: private, max-age=300');readfile($path);exit;
     }
 
-    public function submit(string $id): void { Auth::requirePermission('officer.submit'); Csrf::validate(); WorkflowService::submit('officer',$id); $this->flash('success','Officer submitted.'); redirect('/hr/officers'); }
-    public function approve(string $id): void { Auth::requirePermission('officer.approve'); Csrf::validate(); try{WorkflowService::approve('officer',$id);$this->flash('success','Officer approved.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());} redirect('/hr/officers'); }
+    public function submit(string $id): void { Auth::requirePermission('officer.submit'); Csrf::validate(); try{(new OfficerWorkflowService(Database::pdo()))->submit($id,(string)Auth::user()['id']);$this->flash('success','Officer submitted.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());} redirect('/hr/officers'); }
+    public function approve(string $id): void { Auth::requirePermission('officer.approve'); Csrf::validate(); try{(new OfficerWorkflowService(Database::pdo()))->approve($id,(string)Auth::user()['id']);$this->flash('success','Officer approved.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());} redirect('/hr/officers'); }
+    public function returnForCorrection(string $id):void{Auth::requirePermission('officer.return');Csrf::validate();try{(new OfficerWorkflowService(Database::pdo()))->returnForCorrection($id,(string)($_POST['reason']??''),(string)Auth::user()['id']);$this->flash('success','Officer returned for correction.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());}redirect('/hr/officers/'.$id);}
 
     public function assignOffice(string $id):void
     {

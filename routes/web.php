@@ -52,6 +52,7 @@ $router->post('/hr/officers/{id}/offices/{assignmentId}/primary', [OfficerContro
 $router->get('/hr/officers/{id}/photo', [OfficerController::class, 'photo']);
 $router->post('/hr/officers/{id}/submit', [OfficerController::class, 'submit']);
 $router->post('/hr/officers/{id}/approve', [OfficerController::class, 'approve']);
+$router->post('/hr/officers/{id}/return', [OfficerController::class, 'returnForCorrection']);
 $router->get('/hr/arpa-appointments', [ArpaAppointmentController::class, 'dashboard']);
 $router->get('/hr/arpa-appointments/new', [ArpaAppointmentController::class, 'createDivision']);
 $router->get('/hr/arpa-appointments/new/options', [ArpaAppointmentController::class, 'divisionOptions']);

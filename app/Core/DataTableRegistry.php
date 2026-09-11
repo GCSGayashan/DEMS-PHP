@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,LocationDirectEditPolicy,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -30,6 +30,7 @@ final class DataTableRegistry
             'location-hierarchy' => self::locationHierarchy(),
             'offices' => self::offices(),
             'officers' => self::officers(),
+            'officer-workflow' => self::officerWorkflow(),
             'hr-masters' => self::hrMasters($input),
             'users' => self::users(),
             'historical-users' => self::historicalUsers(),
@@ -422,7 +423,7 @@ final class DataTableRegistry
             'with' => $access['with'],
             'from' => 'officer o LEFT JOIN designation d ON d.id=o.primary_designation_id LEFT JOIN officer_class c ON c.id=o.class_id LEFT JOIN officer_status os ON os.id=o.officer_status_id LEFT JOIN office ofc ON ofc.id=o.primary_office_id',
             'select' => ['o.id', 'o.dad_number', 'o.nic', 'o.name_with_initials', 'o.full_name_en', 'o.full_name_si', 'o.full_name_ta', 'o.primary_mobile', 'o.alternative_mobile', 'o.personal_email', 'o.official_email', 'o.gender', 'o.primary_designation_id', 'o.class_id', 'o.officer_status_id', 'o.primary_office_id', 'd.name_en AS designation_name', 'c.name_en AS class_name', 'os.name_en AS officer_status_name', 'ofc.name_en AS office_name', 'o.arpa_service_permanency','o.initial_appointment_date', 'o.operational_status', 'o.approval_status', 'o.photograph_path', 'o.created_by', 'o.created_at',"{$officeRelationships} current_offices","TRIM(BOTH '; ' FROM CONCAT_WS('; ',{$divisionAssignments},{$subjectAssignments})) current_assignments"],
-            'count' => 'o.id', 'baseWhere'=>$access['where'], 'baseParams' => $access['params'],
+            'count' => 'o.id', 'baseWhere'=>array_merge($access['where'],["o.approval_status='APPROVED'"]), 'baseParams' => $access['params'],
             'searchable' => ['o.dad_number', 'o.nic', 'o.name_with_initials', 'o.full_name_en', 'o.full_name_si', 'o.full_name_ta', 'o.primary_mobile', 'o.alternative_mobile', 'o.personal_email', 'o.official_email', 'd.name_en', 'c.name_en', 'os.name_en', 'ofc.name_en'],
             'filters' => [
                 'dad_number'=>['column'=>'o.dad_number','operator'=>'LIKE','ui'=>['label'=>'DAD Officer Number','type'=>'text','placeholder'=>'Search DAD number']],
@@ -451,6 +452,31 @@ final class DataTableRegistry
             ],
             'defaultOrder' => [0, 'ASC'],
             'emptyMessage'=>$access['with']!==''?(ScopeService::scopeProfile((string)$user['id'])['level']==='ASC'?'No officers currently have an approved assignment to this Agrarian Service Center.':'No officers are available for your current access.'):'No records found for the selected filters.',
+        ];
+    }
+
+    private static function officerWorkflow():array
+    {
+        $user=Auth::user();$access=$user?(new OfficerWorkflowService(Database::pdo()))->queueAccess((string)$user['id'],'o'):['where'=>['1=0'],'params'=>[]];
+        return [
+            'permission'=>'officer.view','export'=>false,'filename'=>'officer-workflow',
+            'from'=>'officer o LEFT JOIN designation d ON d.id=o.primary_designation_id LEFT JOIN officer_status os ON os.id=o.officer_status_id LEFT JOIN location wl ON wl.id=o.workflow_scope_location_id LEFT JOIN system_user maker ON maker.id=o.created_by',
+            'select'=>['o.id','o.dad_number','o.nic','o.name_with_initials','d.name_en designation_name','os.name_en officer_status_name','o.approval_status','o.created_by','o.submitted_by','o.created_at','o.workflow_origin_role_code','o.workflow_scope_location_id','wl.name_en workflow_scope_name','maker.display_name maker_name','o.photograph_path'],
+            'count'=>'o.id','baseWhere'=>$access['where'],'baseParams'=>$access['params'],
+            'searchable'=>['o.dad_number','o.nic','o.name_with_initials','d.name_en','wl.name_en','maker.display_name'],
+            'filters'=>['approval_status'=>['column'=>'o.approval_status','allowed'=>['DRAFT','SUBMITTED','APPROVED'],'ui'=>['label'=>'Workflow Status','options'=>['DRAFT'=>'Returned / Draft','SUBMITTED'=>'Submitted','APPROVED'=>'Approved — Office Pending']]]],
+            'columns'=>[
+                self::col('DAD Officer Number','dad_number','o.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'])),
+                self::col('Officer','name_with_initials','o.name_with_initials',fn($r)=>DataTableFormat::text($r['name_with_initials'])),
+                self::col('NIC','nic','o.nic',fn($r)=>DataTableFormat::text($r['nic'])),
+                self::col('Designation','designation_name','d.name_en',fn($r)=>DataTableFormat::text($r['designation_name'])),
+                self::col('Maker','maker_name','maker.display_name',fn($r)=>DataTableFormat::text($r['maker_name'])),
+                self::col('Workflow Scope','workflow_scope_name','wl.name_en',fn($r)=>DataTableFormat::text($r['workflow_scope_name'],$r['workflow_origin_role_code']==='NATIONAL_SUBJECT_OFFICER'?'National':'—')),
+                self::col('Submitted','created_at','o.created_at',fn($r)=>DataTableFormat::dateTime($r['created_at'])),
+                self::col('Status','approval_status','o.approval_status',fn($r)=>DataTableFormat::badge($r['approval_status'])),
+                self::actionColumn(fn($r)=>self::officerWorkflowActions($r)),
+            ],
+            'defaultOrder'=>[6,'DESC'],'emptyMessage'=>'No Officer records are waiting for review, correction, or an initial Office assignment in your current workflow context.',
         ];
     }
 
@@ -1879,6 +1905,16 @@ final class DataTableRegistry
         } elseif ($row['approval_status'] === 'SUBMITTED' && Auth::can('officer.approve') && !self::isMaker($row['created_by'])) {
             $actions .= DataTableFormat::actionForm('hr/officers/' . $row['id'] . '/approve', 'Approve', 'btn-success');
         }
+        return $actions;
+    }
+
+    private static function officerWorkflowActions(array $row):string
+    {
+        $actions='<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('hr/officers/'.$row['id'])).'">Review</a>';
+        $isMaker=(string)($row['created_by']??'')===(string)(Auth::user()['id']??'');
+        if($row['approval_status']==='DRAFT'&&$isMaker&&Auth::can('officer.edit'))$actions.='<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('hr/officers/'.$row['id'].'/edit')).'">Correct</a>';
+        if($row['approval_status']==='DRAFT'&&$isMaker&&Auth::can('officer.submit'))$actions.=DataTableFormat::actionForm('hr/officers/'.$row['id'].'/submit','Resubmit','btn-primary');
+        if($row['approval_status']==='SUBMITTED'&&!$isMaker&&Auth::can('officer.approve'))$actions.=DataTableFormat::actionForm('hr/officers/'.$row['id'].'/approve','Approve','btn-success');
         return $actions;
     }
 
