@@ -3,7 +3,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,DataTableRegistry,NicNormalizer,ScopeService};
-use App\Services\{OfficerOfficeAssignmentService,OfficerProfileService,OfficerWorkflowService};
+use App\Services\{OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
 
 final class OfficerController extends Controller
 {
@@ -31,7 +31,7 @@ final class OfficerController extends Controller
         Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$workflowService=new OfficerWorkflowService(Database::pdo());
         if(!$workflowService->canAccess($id,$userId)){http_response_code(404);$this->render('partials/not-found');return;}
         $restricted=ScopeService::requiresGeographicRestriction($userId);$offices=ScopeService::scopedOffices($userId);$ascIds=$restricted?array_column(ScopeService::scopedLocations($userId,'ASC'),'id'):null;
-        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds);$officerWorkflow=$workflowService->actions($id,$userId);$this->render('officers/show',$profile+compact('offices','officerWorkflow'));
+        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=(new OfficerOfficeAssignmentService(Database::pdo()))->initialForOfficer($id);$this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment'));
     }
 
     public function search():void
@@ -84,7 +84,7 @@ final class OfficerController extends Controller
         }
 
         foreach(['primary_mobile','alternative_mobile'] as $mobileField){
-            $normalized=self::normalizeSriLankanMobile(
+            $normalized=OfficerPersonnelValidator::normalizeSriLankanMobile(
                 (string)($officer[$mobileField]??'')
             );
 
@@ -116,6 +116,10 @@ final class OfficerController extends Controller
             "SELECT * FROM civil_status WHERE active=1 ORDER BY display_order"
         )->fetchAll();
 
+        $availableOffices=ScopeService::scopedOffices($userId);
+        $initialOfficeAssignment=(new OfficerOfficeAssignmentService($pdo))
+            ->initialForOfficer($id);
+
         $this->render(
             'officers/edit',
             compact(
@@ -125,7 +129,9 @@ final class OfficerController extends Controller
                 'designations',
                 'classes',
                 'statuses',
-                'civilStatuses'
+                'civilStatuses',
+                'availableOffices',
+                'initialOfficeAssignment'
             )
         );
     }
@@ -147,7 +153,7 @@ final class OfficerController extends Controller
         $pdo=Database::pdo();
 
         $stmt=$pdo->prepare(
-            'SELECT id,photograph_path FROM officer WHERE id=?'
+            'SELECT id,photograph_path,approval_status FROM officer WHERE id=?'
         );
         $stmt->execute([$id]);
         $current=$stmt->fetch();
@@ -187,8 +193,6 @@ final class OfficerController extends Controller
             'Full Name (English)'=>(string)($_POST['full_name_en']??''),
             'Date of Birth'=>(string)($_POST['date_of_birth']??''),
             'Permanent Address'=>(string)($_POST['permanent_address']??''),
-            'Primary Mobile'=>(string)($_POST['primary_mobile']??''),
-            'Alternative Mobile'=>(string)($_POST['alternative_mobile']??''),
             'Initial Appointment Date'=>(string)($_POST['initial_appointment_date']??''),
             'Appointment Nature'=>(string)($_POST['appointment_nature_id']??''),
             'Primary Designation'=>(string)($_POST['primary_designation_id']??''),
@@ -242,23 +246,16 @@ final class OfficerController extends Controller
             }
         }
 
-        $primaryMobile=self::normalizeSriLankanMobile(
-            (string)($_POST['primary_mobile']??'')
-        );
-
-        $alternativeMobile=self::normalizeSriLankanMobile(
-            (string)($_POST['alternative_mobile']??'')
-        );
-
-        if(
-            $primaryMobile===null
-            ||
-            $alternativeMobile===null
-        ){
-            $fail(
-                'Enter both mobile numbers as 0XXXXXXXXX or +94XXXXXXXXX.'
+        try{
+            $contactNumbers=OfficerPersonnelValidator::contactNumbers(
+                $_POST['primary_mobile']??null,
+                $_POST['alternative_mobile']??null
             );
+        }catch(\DomainException $e){
+            $fail($e->getMessage());
         }
+        $primaryMobile=$contactNumbers['primary_mobile'];
+        $alternativeMobile=$contactNumbers['alternative_mobile'];
 
         $personalEmail=strtolower(
             trim((string)($_POST['personal_email']??''))
@@ -306,6 +303,16 @@ final class OfficerController extends Controller
 
         $natureId=(string)($_POST['appointment_nature_id']??'');
         $classId=($_POST['class_id']??'') ?: null;
+        try{
+            $serviceFields=OfficerPersonnelValidator::servicePermanency(
+                $_POST['arpa_service_permanency']??null,
+                $_POST['service_permanented_date']??null
+            );
+        }catch(\DomainException $e){
+            $fail($e->getMessage());
+        }
+        $servicePermanency=$serviceFields['arpa_service_permanency'];
+        $permanentedDate=$serviceFields['service_permanented_date'];
 
         $nature=$pdo->prepare(
             'SELECT class_required
@@ -467,6 +474,8 @@ final class OfficerController extends Controller
             'primary_designation_id'=>
                 (string)$_POST['primary_designation_id'],
             'class_id'=>$classId,
+            'arpa_service_permanency'=>$servicePermanency,
+            'service_permanented_date'=>$permanentedDate,
             'officer_status_id'=>
                 (string)$_POST['officer_status_id'],
             'effective_from'=>
@@ -486,6 +495,8 @@ final class OfficerController extends Controller
         $params=array_values($data);
         $params[]=$id;
 
+        $ownTransaction=!$pdo->inTransaction();
+        if($ownTransaction)$pdo->beginTransaction();
         try{
             $update=$pdo->prepare(
                 'UPDATE officer SET '.
@@ -494,7 +505,26 @@ final class OfficerController extends Controller
             );
 
             $update->execute($params);
+            if((string)$current['approval_status']==='DRAFT'){
+                (new OfficerOfficeAssignmentService($pdo))->saveInitialForOfficer(
+                    $id,
+                    ($_POST['initial_office_id']??'') ?: null,
+                    ($_POST['office_effective_from']??'') ?: (string)$_POST['effective_from'],
+                    $userId
+                );
+            }
+            Audit::record(
+                'officer.edit',
+                'OFFICER',
+                $id,
+                [
+                    'scope_checked'=>true,
+                    'edited_fields'=>array_keys($data)
+                ]
+            );
+            if($ownTransaction)$pdo->commit();
         }catch(\Throwable $e){
+            if($ownTransaction&&$pdo->inTransaction())$pdo->rollBack();
             if($newPhotoName!==null){
                 $newPath=
                     BASE_PATH.
@@ -505,7 +535,7 @@ final class OfficerController extends Controller
                     @unlink($newPath);
                 }
             }
-
+            if($e instanceof \DomainException){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id.'/edit');}
             throw $e;
         }
 
@@ -526,16 +556,6 @@ final class OfficerController extends Controller
             }
         }
 
-        Audit::record(
-            'officer.edit',
-            'OFFICER',
-            $id,
-            [
-                'scope_checked'=>true,
-                'edited_fields'=>array_keys($data)
-            ]
-        );
-
         $this->flash(
             'success',
             'Officer details updated successfully.'
@@ -546,7 +566,8 @@ final class OfficerController extends Controller
     public function create(): void
     {
         Auth::requirePermission('officer.create'); $pdo=Database::pdo();
-        try{(new OfficerWorkflowService($pdo))->creationContext((string)Auth::user()['id']);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers');}
+        $actor=(string)Auth::user()['id'];
+        try{(new OfficerWorkflowService($pdo))->creationContext($actor);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers');}
         $data=[
             'titles'=>$pdo->query("SELECT * FROM hr_title WHERE active=1 ORDER BY display_order")->fetchAll(),
             'appointmentNatures'=>$pdo->query("SELECT * FROM appointment_nature WHERE active=1 ORDER BY display_order")->fetchAll(),
@@ -554,6 +575,7 @@ final class OfficerController extends Controller
             'classes'=>$pdo->query("SELECT * FROM officer_class WHERE active=1 ORDER BY display_order")->fetchAll(),
             'statuses'=>$pdo->query("SELECT * FROM officer_status WHERE active=1 ORDER BY display_order")->fetchAll(),
             'civilStatuses'=>$pdo->query("SELECT * FROM civil_status WHERE active=1 ORDER BY display_order")->fetchAll(),
+            'availableOffices'=>ScopeService::scopedOffices($actor),
         ];
         $this->render('officers/form',$data);
     }
@@ -570,13 +592,30 @@ final class OfficerController extends Controller
         $chk=$pdo->prepare('SELECT COUNT(*) FROM officer WHERE nic_normalized=? OR (nic_match_key IS NOT NULL AND nic_match_key=?)');$chk->execute([$nic,$nicMatchKey]);if((int)$chk->fetchColumn()>0){$this->flash('danger','NIC already exists.');redirect('/hr/officers/create');}
         $employee=trim((string)($_POST['employee_number']??''))?:null;
         if($employee){$chk=$pdo->prepare('SELECT COUNT(*) FROM officer WHERE employee_number=?');$chk->execute([$employee]);if((int)$chk->fetchColumn()>0){$this->flash('danger','Employee number already exists.');redirect('/hr/officers/create');}}
-        $primaryMobile=self::normalizeSriLankanMobile((string)($_POST['primary_mobile']??''));
-        $alternativeMobile=self::normalizeSriLankanMobile((string)($_POST['alternative_mobile']??''));
-        if($primaryMobile===null||$alternativeMobile===null){$this->flash('danger','Enter both mobile numbers as 0XXXXXXXXX or +94XXXXXXXXX.');redirect('/hr/officers/create');}
+        try{
+            $contactNumbers=OfficerPersonnelValidator::contactNumbers(
+                $_POST['primary_mobile']??null,
+                $_POST['alternative_mobile']??null
+            );
+        }catch(\DomainException $e){
+            $this->flash('danger',$e->getMessage());redirect('/hr/officers/create');
+        }
+        $primaryMobile=$contactNumbers['primary_mobile'];
+        $alternativeMobile=$contactNumbers['alternative_mobile'];
         $personalEmail=strtolower(trim((string)($_POST['personal_email']??'')))?:null;$officialEmail=strtolower(trim((string)($_POST['official_email']??'')))?:null;
         foreach(array_filter([$personalEmail,$officialEmail]) as $mail){$chk=$pdo->prepare('SELECT COUNT(*) FROM officer WHERE LOWER(personal_email)=? OR LOWER(official_email)=?');$chk->execute([$mail,$mail]);if((int)$chk->fetchColumn()>0){$this->flash('danger','Email address already belongs to another officer.');redirect('/hr/officers/create');}}
         if($personalEmail && $officialEmail && $personalEmail===$officialEmail){$this->flash('danger','Personal and official email must be different when both are provided.');redirect('/hr/officers/create');}
         $natureId=(string)($_POST['appointment_nature_id']??'');$classId=($_POST['class_id']??'')?:null;
+        try{
+            $serviceFields=OfficerPersonnelValidator::servicePermanency(
+                $_POST['arpa_service_permanency']??null,
+                $_POST['service_permanented_date']??null
+            );
+        }catch(\DomainException $e){
+            $this->flash('danger',$e->getMessage());redirect('/hr/officers/create');
+        }
+        $servicePermanency=$serviceFields['arpa_service_permanency'];
+        $permanentedDate=$serviceFields['service_permanented_date'];
         $n=$pdo->prepare('SELECT class_required FROM appointment_nature WHERE id=? AND active=1');$n->execute([$natureId]);$classRequired=(bool)$n->fetchColumn();
         if($classRequired && !$classId){$this->flash('danger','Class is required for the selected Appointment Nature.');redirect('/hr/officers/create');}
         if($classId){$cnt=$pdo->prepare('SELECT COUNT(*) FROM designation_allowed_class WHERE designation_id=? AND active=1');$cnt->execute([$_POST['primary_designation_id']]);if((int)$cnt->fetchColumn()>0){$ok=$pdo->prepare("SELECT COUNT(*) FROM designation_allowed_class WHERE designation_id=? AND class_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE())");$ok->execute([$_POST['primary_designation_id'],$classId]);if((int)$ok->fetchColumn()===0){$this->flash('danger','Selected Class is not permitted for this Designation.');redirect('/hr/officers/create');}}}
@@ -588,14 +627,24 @@ final class OfficerController extends Controller
             $photoName=bin2hex(random_bytes(18)).'.'.$ext;$photoDir=BASE_PATH.'/storage/officer_photos';if(!is_dir($photoDir))mkdir($photoDir,0770,true);if(!move_uploaded_file($photo['tmp_name'],$photoDir.'/'.$photoName))throw new \RuntimeException('Could not store photograph.');
         }
         $dob=(string)($_POST['date_of_birth']??''); $ret=$dob?(new \DateTimeImmutable($dob))->modify('+60 years')->format('Y-m-d'):null;
-        $dad=NumberService::next('OFFICER');
-        $officerId=(string)$pdo->query('SELECT UUID()')->fetchColumn();
-        $officerValues=implode(',',array_fill(0,29,'?'));
-        $sql="INSERT INTO officer (id,dad_number,nic,nic_normalized,nic_match_key,employee_number,title_id,name_with_initials,full_name_en,full_name_si,full_name_ta,date_of_birth,expected_retirement_date,gender,civil_status_id,permanent_address,temporary_address,primary_mobile,alternative_mobile,personal_email,official_email,photograph_path,initial_appointment_date,appointment_nature_id,primary_designation_id,class_id,officer_status_id,primary_office_id,effective_from,operational_status,approval_status,created_by,created_at,submitted_by,submitted_at,workflow_origin_role_code,workflow_scope_location_id) VALUES({$officerValues},'INACTIVE','SUBMITTED',?,NOW(),?,NOW(),?,?)";
-        $vals=[$officerId,$dad,$nic,$nic,$nicMatchKey,$employee,$_POST['title_id']?:null,$name,trim((string)($_POST['full_name_en']??'')),trim((string)($_POST['full_name_si']??'')),trim((string)($_POST['full_name_ta']??'')),$dob?:null,$ret,$_POST['gender']??null,($_POST['civil_status_id']??'')?:null,trim((string)($_POST['permanent_address']??'')),trim((string)($_POST['temporary_address']??'')),$primaryMobile,$alternativeMobile,$personalEmail,$officialEmail,$photoName,$_POST['initial_appointment_date']?:null,$natureId,$_POST['primary_designation_id']?:null,$classId,$_POST['officer_status_id']?:null,null,$_POST['effective_from']?:date('Y-m-d'),$actor,$actor,$workflowContext['role_code'],$workflowContext['scope_location_id']];
-        $pdo->prepare($sql)->execute($vals);
-        Audit::record('officer.create','OFFICER',$officerId,['dad_number'=>$dad,'working_context'=>$workflowContext]);
-        Audit::record('workflow.submit','OFFICER',$officerId,['from_status'=>'CREATED','to_status'=>'SUBMITTED','working_context'=>$workflowContext]);
+        $ownTransaction=!$pdo->inTransaction();if($ownTransaction)$pdo->beginTransaction();
+        try{
+            $dad=NumberService::nextUsing($pdo,'OFFICER');
+            $officerId=(string)$pdo->query('SELECT UUID()')->fetchColumn();
+            $officerValues=implode(',',array_fill(0,31,'?'));
+            $sql="INSERT INTO officer (id,dad_number,nic,nic_normalized,nic_match_key,employee_number,title_id,name_with_initials,full_name_en,full_name_si,full_name_ta,date_of_birth,expected_retirement_date,gender,civil_status_id,permanent_address,temporary_address,primary_mobile,alternative_mobile,personal_email,official_email,photograph_path,initial_appointment_date,appointment_nature_id,primary_designation_id,class_id,arpa_service_permanency,service_permanented_date,officer_status_id,primary_office_id,effective_from,operational_status,approval_status,created_by,created_at,submitted_by,submitted_at,workflow_origin_role_code,workflow_scope_location_id) VALUES({$officerValues},'INACTIVE','SUBMITTED',?,NOW(),?,NOW(),?,?)";
+            $vals=[$officerId,$dad,$nic,$nic,$nicMatchKey,$employee,$_POST['title_id']?:null,$name,trim((string)($_POST['full_name_en']??'')),trim((string)($_POST['full_name_si']??'')),trim((string)($_POST['full_name_ta']??'')),$dob?:null,$ret,$_POST['gender']??null,($_POST['civil_status_id']??'')?:null,trim((string)($_POST['permanent_address']??'')),trim((string)($_POST['temporary_address']??'')),$primaryMobile,$alternativeMobile,$personalEmail,$officialEmail,$photoName,$_POST['initial_appointment_date']?:null,$natureId,$_POST['primary_designation_id']?:null,$classId,$servicePermanency,$permanentedDate,$_POST['officer_status_id']?:null,null,$_POST['effective_from']?:date('Y-m-d'),$actor,$actor,$workflowContext['role_code'],$workflowContext['scope_location_id']];
+            $pdo->prepare($sql)->execute($vals);
+            $initialOfficeAssignmentId=(new OfficerOfficeAssignmentService($pdo))->saveInitialForOfficer($officerId,($_POST['initial_office_id']??'')?:null,($_POST['office_effective_from']??'')?:($_POST['effective_from']??date('Y-m-d')),$actor);
+            Audit::record('officer.create','OFFICER',$officerId,['dad_number'=>$dad,'working_context'=>$workflowContext,'initial_office_assignment_id'=>$initialOfficeAssignmentId]);
+            Audit::record('workflow.submit','OFFICER',$officerId,['from_status'=>'CREATED','to_status'=>'SUBMITTED','working_context'=>$workflowContext]);
+            if($ownTransaction)$pdo->commit();
+        }catch(\Throwable $e){
+            if($ownTransaction&&$pdo->inTransaction())$pdo->rollBack();
+            if($photoName!==null){$path=BASE_PATH.'/storage/officer_photos/'.$photoName;if(is_file($path))@unlink($path);}
+            if($e instanceof \DomainException){$this->flash('danger',$e->getMessage());redirect('/hr/officers/create');}
+            throw $e;
+        }
         $this->flash('success','Officer submitted: '.$dad); redirect('/hr/officers');
     }
 
@@ -622,33 +671,5 @@ final class OfficerController extends Controller
     public function approveOfficeAssignment(string $id,string $assignmentId):void{Auth::requirePermission('officer.office-assignment.approve');Csrf::validate();$this->assignmentAction(fn($s,$u)=>$s->approve($assignmentId,$u),$id,'Office assignment approved.');}
     public function endOfficeAssignment(string $id,string $assignmentId):void{Auth::requirePermission('officer.office-assignment.end');Csrf::validate();$this->assignmentAction(fn($s,$u)=>$s->end($assignmentId,(string)($_POST['effective_to']??''),(string)($_POST['reason']??''),$u),$id,'Office assignment ended.');}
     public function setPrimaryOffice(string $id,string $assignmentId):void{Auth::requirePermission('officer.office-assignment.set-primary');Csrf::validate();$this->assignmentAction(fn($s,$u)=>$s->setPrimary($assignmentId,$u),$id,'Primary Office updated.');}
-    private static function normalizeSriLankanMobile(string $value): ?string
-    {
-        $value=trim($value);
-
-        if($value===''){
-            return null;
-        }
-
-        $value=preg_replace('/[\s().-]+/','',$value) ?? $value;
-
-        if(preg_match('/^0(\d{9})$/',$value,$m)===1){
-            return '+94'.$m[1];
-        }
-
-        if(preg_match('/^94\d{9}$/',$value)===1){
-            return '+'.$value;
-        }
-
-        if(preg_match('/^0094(\d{9})$/',$value,$m)===1){
-            return '+94'.$m[1];
-        }
-
-        if(preg_match('/^\+94\d{9}$/',$value)===1){
-            return $value;
-        }
-
-        return null;
-    }
     private function assignmentAction(callable $callback,string $officerId,string $message):never{try{$callback(new OfficerOfficeAssignmentService(Database::pdo()),(string)Auth::user()['id']);$this->flash('success',$message);}catch(\Throwable $e){$this->flash('danger',$e->getMessage());}redirect('/hr/officers/'.$officerId);}
 }

@@ -65,6 +65,9 @@ final class OfficerWorkflowService
             $row=$this->lockedRow($officerId);$context=$this->context($actorId);
             if($row['approval_status']!=='DRAFT')throw new DomainException('Only a returned Officer draft can be resubmitted.');
             if((string)$row['created_by']!==$actorId||!$this->makerContextMatches($row,$context))throw new DomainException('Only the maker may resubmit this Officer in the original working context.');
+            OfficerPersonnelValidator::servicePermanency($row['arpa_service_permanency']??null,$row['service_permanented_date']??null);
+            OfficerPersonnelValidator::contactNumbers($row['primary_mobile']??null,$row['alternative_mobile']??null);
+            (new OfficerOfficeAssignmentService($this->pdo))->submitInitialForOfficer($officerId,$actorId);
             $stmt=$this->pdo->prepare("UPDATE officer SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW(),updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?");
             $stmt->execute([$actorId,$actorId,$officerId,$row['version']]);if($stmt->rowCount()!==1)throw new DomainException('The Officer changed while it was being submitted.');
             Audit::record('workflow.submit','OFFICER',$officerId,['from_status'=>'DRAFT','to_status'=>'SUBMITTED','working_context'=>$this->auditContext($context)]);
@@ -78,8 +81,11 @@ final class OfficerWorkflowService
             if($row['approval_status']!=='SUBMITTED')throw new DomainException('Only a submitted Officer can be approved.');
             if((string)$row['created_by']===$actorId||(string)$row['submitted_by']===$actorId)throw new DomainException('Maker cannot approve their own Officer record.');
             $this->assertChecker($row,$context);
+            OfficerPersonnelValidator::servicePermanency($row['arpa_service_permanency']??null,$row['service_permanented_date']??null);
+            OfficerPersonnelValidator::contactNumbers($row['primary_mobile']??null,$row['alternative_mobile']??null);
             $stmt=$this->pdo->prepare("UPDATE officer SET approval_status='APPROVED',operational_status=CASE WHEN effective_from<=CURRENT_DATE() THEN 'ACTIVE' ELSE 'INACTIVE' END,approved_by=?,approved_at=NOW(),updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?");
             $stmt->execute([$actorId,$actorId,$officerId,$row['version']]);if($stmt->rowCount()!==1)throw new DomainException('The Officer changed while it was being approved.');
+            (new OfficerOfficeAssignmentService($this->pdo))->approveInitialForOfficer($officerId,$actorId);
             Audit::record('workflow.approve','OFFICER',$officerId,['from_status'=>'SUBMITTED','to_status'=>'APPROVED','working_context'=>$this->auditContext($context)]);
         });
     }
@@ -92,6 +98,7 @@ final class OfficerWorkflowService
             if($row['approval_status']!=='SUBMITTED')throw new DomainException('Only a submitted Officer can be returned.');
             if((string)$row['created_by']===$actorId||(string)$row['submitted_by']===$actorId)throw new DomainException('Maker cannot check their own Officer record.');
             $this->assertChecker($row,$context);
+            (new OfficerOfficeAssignmentService($this->pdo))->returnInitialForCorrection($officerId,$reason,$actorId);
             $stmt=$this->pdo->prepare("UPDATE officer SET approval_status='DRAFT',returned_by=?,returned_at=NOW(),action_reason=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?");
             $stmt->execute([$actorId,$reason,$actorId,$officerId,$row['version']]);if($stmt->rowCount()!==1)throw new DomainException('The Officer changed while it was being returned.');
             Audit::record('workflow.return','OFFICER',$officerId,['from_status'=>'SUBMITTED','to_status'=>'DRAFT','reason'=>$reason,'working_context'=>$this->auditContext($context)]);
