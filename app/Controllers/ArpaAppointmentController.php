@@ -9,6 +9,8 @@ use App\Services\ArpaAppointmentCandidateService;
 use App\Services\ArpaAppointmentFormOptionsService;
 use App\Services\ArpaAppointmentReadService;
 use App\Services\ArpaAppointmentDataIssueCorrectionService;
+use App\Services\ArpaDivisionTimelineService;
+use App\Services\ArpaOfficerTimelineService;
 use App\Services\ArpaWorkflowQueuePolicy;
 use DomainException;
 use Throwable;
@@ -161,6 +163,92 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission('arpa.appointment.view');
         $this->appointmentList('Vacant ARPA Divisions','arpa-vacant-divisions',null,null,'Approved active ARPA Divisions with no open or scheduled operational appointment.');
+    }
+
+    public function appointmentTimeline():void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $userId=(string)Auth::user()['id'];$profile=ScopeService::scopeProfile($userId);$level=(string)($profile['level']??'');
+        if($level==='ASC'){
+            $ascId=(string)($profile['primary']['location_id']??'');$asc=$this->scopedLocationById($userId,'ASC',$ascId);
+            if($asc===null){$this->timelineForbidden('an active ASC working context');return;}
+            $this->renderTimelineDivisions($asc,null,null);
+            return;
+        }
+        if($level==='DISTRICT'){
+            $districtId=(string)($profile['primary']['location_id']??'');$district=$this->scopedLocationById($userId,'DISTRICT',$districtId);
+            if($district===null){$this->timelineForbidden('an active District working context');return;}
+            $this->renderTimelineAscSummary($district);
+            return;
+        }
+        if(in_array($level,['NATIONAL','SYSTEM'],true)){
+            $dataTable=DataTableRegistry::viewModel('arpa-division-timeline-district-summary');
+            $this->render('arpa_appointments/timeline/district_summary',compact('dataTable'));
+            return;
+        }
+        $this->timelineForbidden('an ASC, District, National, or System working context');
+    }
+
+    public function appointmentTimelineDistrict(string $districtId):void
+    {
+        Auth::requirePermission('arpa.appointment.view');$userId=(string)Auth::user()['id'];$level=(string)(ScopeService::scopeProfile($userId)['level']??'');
+        if(!in_array($level,['NATIONAL','SYSTEM'],true)){$this->timelineForbidden('National or System access to the selected District');return;}
+        $district=$this->scopedLocationById($userId,'DISTRICT',$districtId);
+        if($district===null){$this->timelineForbidden('access to the selected District');return;}
+        $this->renderTimelineAscSummary($district,'hr/arpa-appointments/timeline',true);
+    }
+
+    public function appointmentTimelineAsc(string $ascId):void
+    {
+        Auth::requirePermission('arpa.appointment.view');$userId=(string)Auth::user()['id'];$profile=ScopeService::scopeProfile($userId);$level=(string)($profile['level']??'');
+        if(!in_array($level,['ASC','DISTRICT'],true)){$this->timelineForbidden('ASC or District access to the selected Agrarian Service Center');return;}
+        $asc=$this->scopedLocationById($userId,'ASC',$ascId);
+        if($asc===null){$this->timelineForbidden('access to the selected Agrarian Service Center');return;}
+        if($level==='ASC'&&(string)($profile['primary']['location_id']??'')!==$ascId){$this->timelineForbidden('your active Agrarian Service Center');return;}
+        $district=$level==='DISTRICT'?$this->scopedLocationById($userId,'DISTRICT',(string)($profile['primary']['location_id']??'')):null;
+        $this->renderTimelineDivisions($asc,$district,$level==='DISTRICT'?'hr/arpa-appointments/timeline':null);
+    }
+
+    public function appointmentTimelineDistrictAsc(string $districtId,string $ascId):void
+    {
+        Auth::requirePermission('arpa.appointment.view');$userId=(string)Auth::user()['id'];$level=(string)(ScopeService::scopeProfile($userId)['level']??'');
+        if(!in_array($level,['NATIONAL','SYSTEM'],true)){$this->timelineForbidden('National or System access to the selected District');return;}
+        $district=$this->scopedLocationById($userId,'DISTRICT',$districtId);$asc=$this->scopedLocationById($userId,'ASC',$ascId);
+        if($district===null||$asc===null||!$this->districtContainsAsc($districtId,$ascId)){$this->timelineForbidden('access to the selected ASC within the selected District');return;}
+        $this->renderTimelineDivisions($asc,$district,'hr/arpa-appointments/timeline/district/'.$districtId.'/ascs');
+    }
+
+    public function appointmentTimelineDetail(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        try{
+            $data=(new ArpaDivisionTimelineService(Database::pdo()))->timeline($id,(string)Auth::user()['id']);
+            $this->render('arpa_appointments/timeline/detail',$data);
+        }catch(DomainException $e){
+            error_log('ARPA Division timeline access failed: '.$e->getMessage());
+            http_response_code(403);
+            $this->render('partials/forbidden',['permission'=>'the ARPA Division in your current Active Working Context']);
+        }
+    }
+
+    public function officerTimeline():void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $dataTable=DataTableRegistry::viewModel('arpa-officer-timelines');
+        $this->render('arpa_appointments/timeline/officers',compact('dataTable'));
+    }
+
+    public function officerTimelineDetail(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        try{
+            $data=(new ArpaOfficerTimelineService(Database::pdo()))->timeline($id,(string)Auth::user()['id']);
+            $this->render('arpa_appointments/timeline/officer_detail',$data);
+        }catch(DomainException $e){
+            error_log('ARPA Officer timeline access failed: '.$e->getMessage());
+            http_response_code(403);
+            $this->render('partials/forbidden',['permission'=>'an Officer with ARPA appointments in your current Active Working Context']);
+        }
     }
 
     public function dataIssues():void
@@ -565,8 +653,10 @@ final class ArpaAppointmentController extends Controller
     {
         Auth::requirePermission($entity==='subject'?'arpa.subject.create':'arpa.appointment.edit');
         $table=$entity==='subject'?'arpa_subject_assignment_request':'arpa_division_appointment_request';$s=Database::pdo()->prepare("SELECT * FROM {$table} WHERE id=?");$s->execute([$id]);$request=$s->fetch();
-        $actor=(string)Auth::user()['id'];$editable=$request&&in_array($request['workflow_status'],['CREATED','RETURNED'],true)&&(
+        $actor=(string)Auth::user()['id'];$submittedMaker=$entity==='division'&&($request['workflow_status']??null)==='SUBMITTED'&&(string)($request['created_by']??'')===$actor;
+        $editable=$request&&(in_array($request['workflow_status'],['CREATED','RETURNED'],true)||$submittedMaker)&&(
             ($request['workflow_status']==='CREATED'&&(string)$request['created_by']===$actor)
+            ||$submittedMaker
             ||($request['workflow_status']==='RETURNED'&&(new ArpaWorkflowQueuePolicy(Database::pdo()))->canCorrectReturnedRequest($actor,(string)$request['asc_location_id']))
         );
         if(!$editable){http_response_code(403);$this->render('partials/forbidden',['permission'=>'ASC correction ownership and scope']);return;}
@@ -590,7 +680,7 @@ final class ArpaAppointmentController extends Controller
     public function updateRequest(string $entity,string $id):void
     {
         Auth::requirePermission($entity==='subject'?'arpa.subject.create':'arpa.appointment.edit');Csrf::validate();
-        $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id):void{$asc=(string)($_POST['asc_location_id']??'');if($asc===''){$request=$this->workflowRequest($entity,$id);$asc=(string)$request['asc_location_id'];}$this->assertArpaStageScope('ASC',$asc);$service->updateAndResubmitRequest($entity,$id,$_POST,$actor);$this->flash('success','Assignment corrected and resubmitted successfully.');},'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/edit','/hr/arpa-appointments/submitted');
+        $this->perform(function(ArpaAppointmentService $service,string $actor)use($entity,$id):void{$request=$this->workflowRequest($entity,$id);$storedAsc=(string)$request['asc_location_id'];$this->assertArpaStageScope('ASC',$storedAsc);$asc=(string)($_POST['asc_location_id']??'');if($asc==='')$asc=$storedAsc;if($asc!==$storedAsc)$this->assertArpaStageScope('ASC',$asc);$status=$service->updateAndResubmitRequest($entity,$id,$_POST,$actor);$this->flash('success',$status==='SUBMITTED'?'Submitted appointment updated successfully. It remains submitted and is waiting for verification.':'Assignment corrected and resubmitted successfully.');},'/hr/arpa-appointments/requests/'.$entity.'/'.$id.'/edit','/hr/arpa-appointments/submitted');
     }
 
     public function editStageReview(string $entity,string $id,string $stage):void
@@ -940,6 +1030,24 @@ final class ArpaAppointmentController extends Controller
             'summaryUrl'=>$summaryUrl,
             'dataTable'=>$dataTable,
         ]);
+    }
+
+    private function renderTimelineAscSummary(array $district,?string $backUrl=null,bool $nationalDrill=false):void
+    {
+        $context=['district_id'=>(string)$district['id']];if($nationalDrill)$context['drill_level']='NATIONAL';
+        $dataTable=DataTableRegistry::viewModel('arpa-division-timeline-asc-summary',$context);
+        $this->render('arpa_appointments/timeline/asc_summary',compact('district','backUrl','dataTable'));
+    }
+
+    private function renderTimelineDivisions(array $asc,?array $district,?string $backUrl):void
+    {
+        $dataTable=DataTableRegistry::viewModel('arpa-division-timelines',['asc_id'=>(string)$asc['id']]);
+        $this->render('arpa_appointments/timeline/index',compact('asc','district','backUrl','dataTable'));
+    }
+
+    private function timelineForbidden(string $authority):void
+    {
+        http_response_code(403);$this->render('partials/forbidden',['permission'=>$authority]);
     }
 
     private function scopedLocationById(

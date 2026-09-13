@@ -72,6 +72,13 @@ $router->get('/hr/arpa-appointments/open/asc/{id}', [ArpaAppointmentController::
 $router->get('/hr/arpa-appointments/open/district/{id}', [ArpaAppointmentController::class, 'openAppointmentsDistrict']);
 $router->get('/hr/arpa-appointments/open/district/{districtId}/asc/{ascId}', [ArpaAppointmentController::class, 'openAppointmentsDistrictAsc']);
 $router->get('/hr/arpa-appointments/vacant-divisions', [ArpaAppointmentController::class, 'vacantDivisions']);
+$router->get('/hr/arpa-appointments/timeline', [ArpaAppointmentController::class, 'appointmentTimeline']);
+$router->get('/hr/arpa-appointments/timeline/district/{districtId}/ascs', [ArpaAppointmentController::class, 'appointmentTimelineDistrict']);
+$router->get('/hr/arpa-appointments/timeline/district/{districtId}/asc/{ascId}/divisions', [ArpaAppointmentController::class, 'appointmentTimelineDistrictAsc']);
+$router->get('/hr/arpa-appointments/timeline/asc/{ascId}/divisions', [ArpaAppointmentController::class, 'appointmentTimelineAsc']);
+$router->get('/hr/arpa-appointments/timeline/officers', [ArpaAppointmentController::class, 'officerTimeline']);
+$router->get('/hr/arpa-appointments/timeline/officers/{id}', [ArpaAppointmentController::class, 'officerTimelineDetail']);
+$router->get('/hr/arpa-appointments/timeline/{id}', [ArpaAppointmentController::class, 'appointmentTimelineDetail']);
 $router->get('/hr/arpa-appointments/data-issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues/corrections/{id}', [ArpaAppointmentController::class, 'dataIssueCorrectionDetail']);

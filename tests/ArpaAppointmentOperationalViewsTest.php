@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
-use App\Services\{ArpaAppointmentReadService,ScopedDashboardService,UserContextService};
+use App\Services\{ArpaAppointmentReadService,ArpaAppointmentService,ScopedDashboardService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -244,12 +244,49 @@ final class ArpaAppointmentOperationalViewsTest
             $eligible=array_column($read->eligibleOfficersForAsc($this->actor,$asc,$today),'id');$this->same(true,in_array($ids[0],$eligible,true),'ASC selector includes an assigned eligible ARPA Officer');
             $outsider=(string)$this->pdo->query("SELECT o.id FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER' WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE' AND NOT EXISTS(SELECT 1 FROM officer_office_assignment oa JOIN office f ON f.id=oa.office_id WHERE oa.officer_id=o.id AND f.linked_location_id='{$asc}' AND oa.active=1 AND oa.approval_status='APPROVED') LIMIT 1")->fetchColumn();$this->same(false,in_array($outsider,$eligible,true),'ASC selector excludes Officers assigned only outside the ASC');
             $vacant=array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id');if($vacant===[])throw new RuntimeException('Vacant ARPA Division fixture required.');$division=(string)$vacant[0];$this->same(true,in_array($division,$vacant,true),'vacancy selector and page source begin from an actually vacant Division');
+            $this->same(true,$this->vacantPageSourceContains($division),'shared Vacant-list source starts with the same vacant Division');
+            $reservation=$this->uuid();
+            $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,created_by) VALUES(?,'APPOINTMENT',?,'PERMANENT',?,?,?,'SUBMITTED',?)")
+                ->execute([$reservation,$ids[0],$asc,$division,$future,$this->actor]);
+            foreach(ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES as $status){
+                $this->pdo->prepare('UPDATE arpa_division_appointment_request SET workflow_status=? WHERE id=?')->execute([$status,$reservation]);
+                $this->same(false,$this->vacantPageSourceContains($division),"{$status} New Appointment reserves the Division in the shared Vacant list");
+            }
+            $this->throws(fn()=>$read->assertDivisionVacant($asc,$division,$today,true),'transactional server-side vacancy recheck rejects a concurrent New Appointment reservation');
+            foreach(['RETURNED','REJECTED'] as $releasedStatus){
+                $this->pdo->prepare('UPDATE arpa_division_appointment_request SET workflow_status=? WHERE id=?')->execute([$releasedStatus,$reservation]);
+                $this->same(true,$this->vacantPageSourceContains($division),"{$releasedStatus} New Appointment releases its vacancy reservation");
+            }
+            $this->pdo->prepare('DELETE FROM arpa_division_appointment_request WHERE id=?')->execute([$reservation]);
             $scheduled=$this->appointment((string)$ids[0],$asc,$division,'PERMANENT',$future);
             $this->same(false,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$today),'id'),true),'scheduled future appointment prevents vacancy');
             $this->throws(fn()=>$read->assertDivisionVacant($asc,$division,$today),'forged request for occupied Division is rejected');
-            $this->close($scheduled,$future);
+            $pendingEnd=$this->uuid();$reason=(string)$this->pdo->query("SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1")->fetchColumn();
+            $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,request_type,officer_id,appointment_type,source_appointment_id,asc_location_id,arpa_division_location_id,requested_effective_to,end_reason_id,workflow_status,created_by) VALUES(?,'END',?,'PERMANENT',?,?,?,?,?,'SUBMITTED',?)")
+                ->execute([$pendingEnd,$ids[0],$scheduled,$asc,$division,$today,$reason,$this->actor]);
+            $this->same(false,$this->vacantPageSourceContains($division),'submitted End Appointment does not free its current appointment');
+            $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='ASC_VERIFIED' WHERE id=?")->execute([$pendingEnd]);
+            $this->same(false,$this->vacantPageSourceContains($division),'verified-but-not-approved End Appointment does not free its current appointment');
+            $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='RETURNED' WHERE id=?")->execute([$pendingEnd]);
+            $this->same(false,$this->vacantPageSourceContains($division),'returned End Appointment leaves the canonical appointment occupied');
+            $this->pdo->prepare('DELETE FROM arpa_division_appointment_request WHERE id=?')->execute([$pendingEnd]);
+            $ascApprover=$this->uuid();
+            $this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,account_status,enabled) VALUES(?,'STAFF',?,'ACTIVE',1)")
+                ->execute([$ascApprover,'vacancy-asc-approver-'.substr(str_replace('-','',$ascApprover),0,8)]);
+            $service=new ArpaAppointmentService($this->pdo);
+            $approvedEnd=$service->createEndRequest($scheduled,$future,$reason,'Future vacancy boundary',$this->actor);
+            $service->workflow('division',$approvedEnd,'SUBMIT','CREATOR',null,$this->actor);
+            $service->workflow('division',$approvedEnd,'VERIFY','ASC',null,$this->actor);
+            $this->same('NATIONAL_APPROVED',$service->workflow('division',$approvedEnd,'APPROVE','ASC',null,$ascApprover),'ASC approval terminates an End Appointment without District or National workflow');
+            $this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id='{$scheduled}' AND request_id='{$approvedEnd}'")->fetchColumn(),'ASC approval creates exactly one canonical closure');
+            $this->same(false,$this->vacantPageSourceContains($division),'approved future end keeps the Division non-vacant before the Effective To date');
+            $this->same(true,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$future),'id'),true),'approved end becomes vacant on its Effective To date');
             $afterScheduledEnd=date('Y-m-d',strtotime($future.' +1 day'));
             $this->same(true,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$afterScheduledEnd),'id'),true),'formally ended Division becomes vacant after its inclusive end date');
+
+            $expectedVacant=(int)$this->pdo->query('SELECT COUNT(DISTINCT v.id) FROM '.ArpaAppointmentReadService::vacantDivisionSource().' v')->fetchColumn();
+            $dashboardVacant=(new ScopedDashboardService($this->pdo))->arpaModuleCounts($this->actor)['vacantDivisions'];
+            $this->same($expectedVacant,$dashboardVacant,'dashboard vacancy count uses the exact shared Vacant-list source');
 
             $first=$this->appointment((string)$ids[0],$asc,$division,'PERMANENT',$today);$second=$this->appointment((string)$ids[1],$asc,$division,'ACTING',$today);
             $issues=$this->rawIssues();$this->same(true,in_array('DIVISION_MULTIPLE_OPEN',$issues,true),'same Division with multiple open appointments is detected');$this->same(true,in_array('DEPENDENT_WITHOUT_PERMANENT',$issues,true),'Acting without the same Officer Permanent is detected');
@@ -308,9 +345,10 @@ final class ArpaAppointmentOperationalViewsTest
         $this->pdo->prepare("INSERT INTO arpa_division_appointment(id,request_id,officer_id,appointment_type,service_permanency_snapshot,asc_location_id,arpa_division_location_id,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'{}',?,?,NOW())")->execute([$id,$request,$officer,$type,'PERMANENT_IN_SERVICE',$asc,$division,$l['asc_dad'],$l['asc_name'],$l['arpa_dad'],$l['arpa_name'],$from,$this->actor]);return $id;
     }
 
-    private function close(string $appointment,string $to):void
+    private function vacantPageSourceContains(string $divisionId):bool
     {
-        $a=$this->pdo->query("SELECT * FROM arpa_division_appointment WHERE id='{$appointment}'")->fetch();$request=$this->uuid();$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,request_type,officer_id,appointment_type,source_appointment_id,asc_location_id,arpa_division_location_id,requested_effective_to,workflow_status,created_by,finalized_by,finalized_at) VALUES(?,'END',?,?,?,?,?,?,'NATIONAL_APPROVED',?,?,NOW())")->execute([$request,$a['officer_id'],$a['appointment_type'],$appointment,$a['asc_location_id'],$a['arpa_division_location_id'],$to,$this->actor,$this->actor]);$reason=(string)$this->pdo->query("SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1")->fetchColumn();$this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,appointment_id,request_id,effective_to,end_reason_id,closure_kind,context_snapshot_json,approved_by,approved_at) VALUES(UUID(),?,?,?,?,'DIRECT','{}',?,NOW())")->execute([$appointment,$request,$to,$reason,$this->actor]);
+        $stmt=$this->pdo->prepare('SELECT COUNT(*) FROM '.ArpaAppointmentReadService::vacantDivisionSource().' v WHERE v.id=?');
+        $stmt->execute([$divisionId]);return (int)$stmt->fetchColumn()===1;
     }
 
     private function subject(string $officer,string $asc,string $kind,string $from):string

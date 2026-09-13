@@ -13,6 +13,43 @@ final class ArpaDivisionContinuityService
 
     public function __construct(private readonly PDO $pdo) {}
 
+    /** Set-based summary of the same authoritative periods used by requirements(). */
+    public static function summarySource():string
+    {
+        $baseline=self::BASELINE;
+        $statuses="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
+        $periods="SELECT a.arpa_division_location_id division_id,a.id source_id,a.effective_from,c.effective_to,'OPERATIONAL' source_kind
+                  FROM arpa_division_appointment a
+                  LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                  WHERE (a.legacy_history_only=0 OR c.id IS NOT NULL) AND a.effective_from IS NOT NULL
+                    AND (c.effective_to IS NULL OR c.effective_to>='{$baseline}')
+                  UNION ALL
+                  SELECT r.arpa_division_location_id,r.id,r.requested_effective_from,
+                         CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'RESERVATION'
+                  FROM arpa_division_appointment_request r
+                  WHERE r.record_origin='NATIVE' AND r.legacy_history_only=0
+                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND r.requested_effective_from IS NOT NULL
+                    AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>='{$baseline}')";
+        return "SELECT ordered.division_id,COUNT(*) period_count,
+                       SUM(ordered.effective_to IS NULL) open_count,
+                       SUM(ordered.source_kind='RESERVATION' OR ordered.effective_to IS NULL
+                           OR ordered.effective_to>CURRENT_DATE()) vacancy_occupancy_count,
+                       SUM(ordered.effective_to IS NOT NULL AND ordered.effective_to<ordered.effective_from) invalid_count,
+                       MIN(ordered.effective_from) first_start,
+                       SUM(ordered.prior_end IS NOT NULL AND ordered.effective_from<=ordered.prior_end) overlap_count,
+                       SUM(ordered.prior_end IS NOT NULL AND ordered.prior_end<'9999-12-31'
+                           AND ordered.effective_from>DATE_ADD(ordered.prior_end,INTERVAL 1 DAY)) internal_gap_count
+                FROM (SELECT periods.*,
+                             MAX(COALESCE(periods.effective_to,'9999-12-31')) OVER(
+                               PARTITION BY periods.division_id
+                               ORDER BY periods.effective_from,COALESCE(periods.effective_to,'9999-12-31'),periods.source_id
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                             ) prior_end
+                      FROM ({$periods}) periods) ordered
+                GROUP BY ordered.division_id";
+    }
+
     /** @param list<string> $divisionIds @return array<string,array<string,mixed>> */
     public function requirements(array $divisionIds,string $proposedStart,?string $excludeRequestId=null,?string $excludeAppointmentId=null):array
     {
@@ -240,6 +277,8 @@ final class ArpaDivisionContinuityService
             'timeline_status'=>$statuses[0],
             'timeline_statuses'=>$statuses,
             'coverage_segments'=>$coverage,
+            'overlaps'=>$overlaps,
+            'invalid_periods'=>$invalid,
         ];
     }
 

@@ -1,5 +1,5 @@
-<?php use App\Core\Csrf;$type=$request['request_type'];$division=$entity==='division'; ?>
-<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Edit</div><h1>Edit <?= e(ucwords(strtolower(str_replace('_',' ',$type)))) ?> Request</h1><p>Correct the request and resubmit it for review.</p></div></div>
+<?php use App\Core\Csrf;$type=$request['request_type'];$division=$entity==='division';$submitted=$division&&$request['workflow_status']==='SUBMITTED'; ?>
+<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Edit</div><h1>Edit <?= e(ucwords(strtolower(str_replace('_',' ',$type)))) ?> Request</h1><p><?= $submitted?'Submitted - Editable until verification':'Correct the request and resubmit it for review.' ?></p></div></div>
 <form method="post"><?= Csrf::field() ?><div class="form-section"><div class="row g-3">
 <?php if(($division&&$type==='APPOINTMENT')||(!$division&&$type==='ASSIGN')): ?>
 <div class="col-md-6"><label class="form-label">ARPA Officer *</label><select class="form-select" name="officer_id" data-searchable-select="Search officers" required><?php foreach($officers as $r): ?><option value="<?= e($r['id']) ?>" <?= $request['officer_id']===$r['id']?'selected':'' ?>><?= e($r['dad_number'].' - '.($r['name_with_initials']?:'Unnamed')) ?></option><?php endforeach; ?></select></div>
@@ -13,4 +13,4 @@
 <?php if($type==='END'): ?><div class="col-md-4"><label class="form-label">End Date *</label><input class="form-control" type="date" name="effective_to" value="<?= e($request['requested_effective_to']) ?>" required></div><?php endif; ?>
 <?php if(in_array($type,['END','TRANSFER'],true)||($division&&$type==='APPOINTMENT'&&!empty($request['requested_effective_to']))): ?><div class="col-md-8"><label class="form-label">End Reason *</label><select class="form-select" name="end_reason_id" required><?php foreach($reasons as $r): ?><option value="<?= e($r['id']) ?>" <?= $request['end_reason_id']===$r['id']?'selected':'' ?>><?= e($r['name_en']) ?></option><?php endforeach; ?></select></div><?php endif; ?>
 <div class="col-12"><label class="form-label">Remarks</label><textarea class="form-control" name="remarks" rows="3"><?= e($request['request_remarks']) ?></textarea></div>
-</div></div><button class="btn btn-primary">Resubmit</button> <a class="btn btn-outline-secondary" href="<?= e(url('hr/arpa-appointments/pending')) ?>">Cancel</a></form>
+</div></div><button class="btn btn-primary"><?= $submitted?'Save Changes':'Resubmit' ?></button> <a class="btn btn-outline-secondary" href="<?= e(url('hr/arpa-appointments/submitted')) ?>">Cancel</a></form>

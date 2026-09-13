@@ -84,7 +84,7 @@ final class ArpaAppointmentService
     {
         $this->transaction(function() use($id,$data,$actorId):void {
             $stmt=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=? FOR UPDATE');$stmt->execute([$id]);$request=$stmt->fetch();
-            $this->assertEditableRequest($request,$actorId);
+            $this->assertEditableRequest($request,$actorId,true);$before=$this->editableRequestSnapshot($request);
             if($request['request_type']==='APPOINTMENT'){
                 $officerId=trim((string)($data['officer_id']??''));$type=strtoupper(trim((string)($data['appointment_type']??'')));$ascId=trim((string)($data['asc_location_id']??''));$divisionId=trim((string)($data['arpa_division_location_id']??''));$from=trim((string)($data['effective_from']??''));$to=$this->nullText($data['effective_to']??null);$endReason=$this->nullText($data['end_reason_id']??null);
                 $this->assertDate($from,'Effective from');if($to!==null)$this->assertDate($to,'Effective to');ArpaAppointmentRules::assertNativeEffectiveDate($from);$continuity=new ArpaDivisionContinuityService($this->pdo);$continuity->assertCanFillPeriod($divisionId,$from,$to,$id);if($to!==null&&$endReason===null)throw new DomainException('End Reason is required when filling a bounded historical gap.');if($to===null&&$endReason!==null)throw new DomainException('End Reason cannot be recorded without an End Date.');if($endReason!==null)$this->endReason($endReason);$this->arpaOfficer($officerId,true);$read=new ArpaAppointmentReadService($this->pdo);$read->assertEligibleOfficer($officerId,$ascId,$from);$read->assertAppointmentTypeAvailable($officerId,$type,$divisionId,$from,$to,$id);$read->assertDivisionPeriodAvailable($ascId,$divisionId,$from,$to,true,$id);$snapshot=$this->locationSnapshot($ascId,$divisionId,$from);
@@ -96,7 +96,10 @@ final class ArpaAppointmentService
                 $oldTo=trim((string)($data['old_effective_to']??''));$newFrom=trim((string)($data['new_effective_from']??''));$asc=trim((string)($data['asc_location_id']??''));$division=trim((string)($data['arpa_division_location_id']??''));$reason=trim((string)($data['end_reason_id']??''));$this->assertDate($oldTo,'Old effective to');$this->assertDate($newFrom,'New effective from');ArpaAppointmentRules::assertNativeEffectiveDate($newFrom);if($newFrom<=$oldTo)throw new DomainException('The new Permanent appointment must start after the old appointment ends.');$source=$this->appointment((string)$request['source_appointment_id']);if($oldTo<$source['effective_from'])throw new DomainException('Transfer end date cannot precede the current appointment.');$this->endReason($reason);$snapshot=$this->locationSnapshot($asc,$division,$newFrom);$impact=$this->dependentAppointments($source,$oldTo);
                 $this->pdo->prepare('UPDATE arpa_division_appointment_request SET asc_location_id=?,arpa_division_location_id=?,requested_effective_from=?,requested_effective_to=?,end_reason_id=?,request_remarks=?,impact_snapshot_json=?,location_snapshot_json=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$asc,$division,$newFrom,$oldTo,$reason,$this->nullText($data['remarks']??null),$this->json($impact),$this->json($snapshot),$actorId,$id]);
             }
-            $this->audit($actorId,'arpa.appointment-request.edit','ARPA_APPOINTMENT_REQUEST',$id,['status'=>$request['workflow_status']]);
+            $updated=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=?');$updated->execute([$id]);
+            $this->audit($actorId,'arpa.appointment-request.edit','ARPA_APPOINTMENT_REQUEST',$id,[
+                'status'=>$request['workflow_status'],'previous'=>$before,'new'=>$this->editableRequestSnapshot($updated->fetch()?:[]),
+            ]);
         });
     }
 
@@ -242,17 +245,20 @@ final class ArpaAppointmentService
         });
     }
 
-    public function updateAndResubmitRequest(string $entity, string $id, array $data, string $actorId): void
+    public function updateAndResubmitRequest(string $entity, string $id, array $data, string $actorId): string
     {
-        $this->transaction(function () use ($entity, $id, $data, $actorId): void {
+        return $this->transaction(function () use ($entity, $id, $data, $actorId): string {
+            $table=$entity==='division'?'arpa_division_appointment_request':($entity==='subject'?'arpa_subject_assignment_request':null);
+            if($table===null)throw new DomainException('Unsupported workflow entity.');
+            $locked=$this->pdo->prepare("SELECT workflow_status FROM {$table} WHERE id=? FOR UPDATE");$locked->execute([$id]);$status=$locked->fetchColumn();
+            if($status===false)throw new DomainException('Workflow request was not found.');
             if ($entity === 'division') {
                 $this->updateDivisionRequest($id, $data, $actorId);
             } elseif ($entity === 'subject') {
                 $this->updateSubjectRequest($id, $data, $actorId);
-            } else {
-                throw new DomainException('Unsupported workflow entity.');
             }
-            $this->workflow($entity, $id, 'SUBMIT', 'CREATOR', null, $actorId);
+            if($entity==='division'&&$status==='SUBMITTED')return 'SUBMITTED';
+            return $this->workflow($entity, $id, 'SUBMIT', 'CREATOR', null, $actorId);
         });
     }
 
@@ -274,7 +280,9 @@ final class ArpaAppointmentService
             if (!$request) {
                 throw new DomainException('Workflow request was not found.');
             }
-            $transition = ArpaAppointmentRules::transition((string)$request['workflow_status'], $action, $stage);
+            $transition = $entity==='division'
+                ? ArpaAppointmentRules::divisionRequestTransition((string)$request['request_type'],(string)$request['workflow_status'],$action,$stage)
+                : ArpaAppointmentRules::transition((string)$request['workflow_status'],$action,$stage);
             if($entity==='division'
                 &&in_array((string)$request['request_type'],['APPOINTMENT','TRANSFER'],true)
                 &&in_array(strtoupper($action),['SUBMIT','VERIFY','APPROVE'],true)){
@@ -661,11 +669,25 @@ final class ArpaAppointmentService
         if ($stmt->fetchColumn()) throw new DomainException('This record has already been ended.');
     }
 
-    private function assertEditableRequest(mixed $request,string $actorId):void
+    private function assertEditableRequest(mixed $request,string $actorId,bool $allowSubmittedMaker=false):void
     {
         if(!is_array($request))throw new DomainException('Workflow request was not found.');
-        if(!in_array($request['workflow_status'],['CREATED','RETURNED'],true))throw new DomainException('Submitted requests cannot be edited until returned for correction.');
+        if($allowSubmittedMaker&&$request['workflow_status']==='SUBMITTED'){
+            if((string)$request['created_by']!==$actorId)throw new DomainException('Only the original maker may edit this submitted appointment.');
+            return;
+        }
+        if(!$allowSubmittedMaker&&$request['workflow_status']==='SUBMITTED')throw new DomainException('Submitted requests cannot be edited until returned for correction.');
+        if(!in_array($request['workflow_status'],['CREATED','RETURNED'],true))throw new DomainException('This appointment has already been verified and can no longer be edited.');
         if(!$this->canSubmitRequest($request,$actorId))throw new DomainException('Only the draft creator or an authorized ASC correction officer may edit this request.');
+    }
+
+    /** @param array<string,mixed> $request @return array<string,mixed> */
+    private function editableRequestSnapshot(array $request):array
+    {
+        return array_intersect_key($request,array_flip([
+            'officer_id','appointment_type','asc_location_id','arpa_division_location_id',
+            'requested_effective_from','requested_effective_to','end_reason_id','request_remarks',
+        ]));
     }
 
     private function canSubmitRequest(array $request,string $actorId):bool

@@ -29,6 +29,8 @@ final class ArpaAppointmentReadService
 
     public static function vacantDivisionSource(): string
     {
+        $appointmentOccupancy=self::vacancyAppointmentExistsSql('arpa.id','CURRENT_DATE()');
+        $requestReservation=self::vacancyRequestExistsSql('arpa.id');
         return "(SELECT arpa.id,arpa.dad_number,arpa.name_en,asc_l.id asc_location_id,asc_l.dad_number asc_dad,asc_l.name_en asc_name,
                     district.id district_location_id,district.name_en district_name,province.id province_location_id,province.name_en province_name,
                     last_a.officer_id last_officer_id,last_o.name_with_initials last_officer,last_a.appointment_type last_appointment_type,
@@ -58,9 +60,8 @@ final class ArpaAppointmentReadService
                  LEFT JOIN officer last_o ON last_o.id=last_a.officer_id
                  WHERE arpa.approval_status='APPROVED' AND arpa.operational_status='ACTIVE'
                    AND arpa.effective_from<=CURRENT_DATE() AND (arpa.effective_to IS NULL OR arpa.effective_to>=CURRENT_DATE())
-                   AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment open_a
-                     LEFT JOIN arpa_division_appointment_closure open_c ON open_c.appointment_id=open_a.id
-                     WHERE open_a.arpa_division_location_id=arpa.id AND open_a.legacy_history_only=0 AND open_c.id IS NULL))";
+                   AND NOT {$appointmentOccupancy}
+                   AND NOT {$requestReservation})";
     }
 
     /** @return array<int,array<string,mixed>> */
@@ -88,22 +89,17 @@ final class ArpaAppointmentReadService
     public function vacantDivisionsForAsc(string $userId, string $ascLocationId, string $effectiveDate): array
     {
         if (!ScopeService::canAccessCurrentArpaStage($userId, 'ASC', $ascLocationId)) return [];
-        $statuses=$this->reservingStatusSql();
+        $appointmentOccupancy=self::vacancyAppointmentExistsSql('l.id','?');
+        $requestReservation=self::vacancyRequestExistsSql('l.id');
         $sql="SELECT l.id,l.dad_number,l.name_en FROM location l JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
               JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION'
                 AND lr.active=1 AND lr.approval_status='APPROVED' AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
               WHERE l.approval_status='APPROVED' AND l.operational_status='ACTIVE' AND l.effective_from<=?
                 AND (l.effective_to IS NULL OR l.effective_to>=?)
-                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
-                  WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0
-                    AND (c.effective_to IS NULL OR c.effective_to>=?))
-                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r
-                  WHERE r.arpa_division_location_id=l.id AND r.record_origin='NATIVE' AND r.legacy_history_only=0
-                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
-                    AND r.requested_effective_from IS NOT NULL
-                    AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?))
+                AND NOT {$appointmentOccupancy}
+                AND NOT {$requestReservation}
               ORDER BY l.name_en,l.dad_number";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);return $stmt->fetchAll();
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate,$effectiveDate]);return $stmt->fetchAll();
     }
 
     /**
@@ -152,21 +148,16 @@ final class ArpaAppointmentReadService
     ): void
     {
         if($lock){$lockStmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$lockStmt->execute([$divisionId]);if(!$lockStmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');}
-        $statuses=$this->reservingStatusSql();
+        $appointmentOccupancy=self::vacancyAppointmentExistsSql('l.id','?','?');
+        $requestReservation=self::vacancyRequestExistsSql('l.id','?');
         $sql="SELECT COUNT(*) FROM location l JOIN location_type t ON t.id=l.location_type_id AND t.system_key='ARPA_DIVISION'
               JOIN location_relationship lr ON lr.child_location_id=l.id AND lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION'
                 AND lr.active=1 AND lr.approval_status='APPROVED' AND lr.effective_from<=? AND (lr.effective_to IS NULL OR lr.effective_to>=?)
               WHERE l.id=? AND l.approval_status='APPROVED' AND l.operational_status='ACTIVE'
                 AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)
-                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
-                  WHERE a.arpa_division_location_id=l.id AND a.legacy_history_only=0 AND a.id<>COALESCE(?, '')
-                    AND (c.effective_to IS NULL OR c.effective_to>=?))
-                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r
-                  WHERE r.arpa_division_location_id=l.id AND r.record_origin='NATIVE' AND r.legacy_history_only=0
-                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
-                    AND r.requested_effective_from IS NOT NULL AND r.id<>COALESCE(?, '')
-                    AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?))";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$divisionId,$effectiveDate,$effectiveDate,$excludeAppointmentId,$effectiveDate,$excludeRequestId,$effectiveDate]);
+                AND NOT {$appointmentOccupancy}
+                AND NOT {$requestReservation}";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate,$divisionId,$effectiveDate,$effectiveDate,$excludeAppointmentId,$effectiveDate,$excludeRequestId]);
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Division is outside the ASC, inactive, or already has an open or scheduled appointment.');
     }
 
@@ -330,6 +321,35 @@ final class ArpaAppointmentReadService
     private function reservingStatusSql():string
     {
         return "'".implode("','",self::RESERVING_REQUEST_STATUSES)."'";
+    }
+
+    /** Canonical current/scheduled appointment occupancy used by every vacancy read/check. */
+    private static function vacancyAppointmentExistsSql(
+        string $divisionExpression,
+        string $asOfExpression,
+        string $excludeAppointmentExpression='NULL'
+    ):string {
+        return "EXISTS(SELECT 1 FROM arpa_division_appointment vacancy_a
+                  LEFT JOIN arpa_division_appointment_closure vacancy_c ON vacancy_c.appointment_id=vacancy_a.id
+                  WHERE vacancy_a.arpa_division_location_id={$divisionExpression}
+                    AND vacancy_a.legacy_history_only=0
+                    AND vacancy_a.id<>COALESCE({$excludeAppointmentExpression},'')
+                    AND (vacancy_c.effective_to IS NULL OR vacancy_c.effective_to>{$asOfExpression}))";
+    }
+
+    /** Pending New Appointment/Transfer requests reserve the Division regardless of their proposed date. */
+    private static function vacancyRequestExistsSql(
+        string $divisionExpression,
+        string $excludeRequestExpression='NULL'
+    ):string {
+        $statuses="'".implode("','",self::RESERVING_REQUEST_STATUSES)."'";
+        return "EXISTS(SELECT 1 FROM arpa_division_appointment_request vacancy_r
+                  WHERE vacancy_r.arpa_division_location_id={$divisionExpression}
+                    AND vacancy_r.record_origin='NATIVE' AND vacancy_r.legacy_history_only=0
+                    AND vacancy_r.request_type IN('APPOINTMENT','TRANSFER')
+                    AND vacancy_r.workflow_status IN({$statuses})
+                    AND vacancy_r.requested_effective_from IS NOT NULL
+                    AND vacancy_r.id<>COALESCE({$excludeRequestExpression},''))";
     }
 
     public static function issueSource(string $divisionAppointmentTable = 'arpa_division_appointment'): string

@@ -40,7 +40,18 @@ final class DirectSubmissionWorkflowTest
         $this->contains("workflow('subject', \$id, 'SUBMIT', 'CREATOR'",$arpaService,'subject requests use the existing submit transition');
         $this->contains('createAndSubmitDivisionAppointmentRequest($data,$actor)',$arpaController,'normal ARPA creation submits directly');
         $this->contains("'/hr/arpa-appointments/submitted'",$arpaController,'ARPA submission redirects to Submitted');
-        $this->contains('updateAndResubmitRequest($entity,$id,$_POST,$actor)',$arpaController,'returned ARPA requests resubmit in the correction action');
+        $this->contains('updateAndResubmitRequest($entity,$id,$_POST,$actor)',$arpaController,'ARPA request edits use the existing transactional update path');
+        $this->contains("\$entity==='division'&&\$status==='SUBMITTED'",$arpaService,'only submitted Division appointments retain Submitted status after maker edit');
+        $this->contains("SELECT workflow_status FROM {\$table} WHERE id=? FOR UPDATE",$arpaService,'edit transaction locks and rechecks workflow status before saving');
+        $this->contains("Only the original maker may edit this submitted appointment.",$arpaService,'submitted appointment edit remains original-maker only');
+        $this->contains("This appointment has already been verified and can no longer be edited.",$arpaService,'verified appointment rejects a stale maker edit');
+        $this->contains("'previous'=>\$before,'new'=>",$arpaService,'appointment edit audit records before and after values');
+        $this->contains("\$submittedMaker=\$entity==='division'",$arpaController,'controller exposes submitted editing only for Division appointments');
+        $this->contains("assertArpaStageScope('ASC',\$asc)",$arpaController,'submitted edit continues enforcing the current ASC working context');
+        $this->contains("assertArpaStageScope('ASC',\$storedAsc)",$arpaController,'forged edit must authorize the request stored ASC before accepting changed values');
+        $this->contains('Submitted - Editable until verification',$this->file('app/Views/arpa_appointments/request_edit.php'),'submitted edit form explains the verification lock');
+        $registry=$this->file('app/Core/DataTableRegistry.php');
+        $this->contains("\$ownSubmitted=\$row['entity']==='division'",$registry,'Submitted Data shows Edit only for the original Division-request maker');
         $this->contains("'SUBMITTED',?,NOW(),?,NOW()",$offices,'new Offices store submitted audit fields');
         $this->contains("'INACTIVE','SUBMITTED'",$officers,'new Officers remain inactive while submitted');
         $this->contains("'SUBMITTED',?,NOW(),?,NOW()",$masters,'new HR masters store submitted audit fields');
@@ -79,7 +90,6 @@ final class DirectSubmissionWorkflowTest
         $routes=$this->file('routes/web.php');
         $this->contains("/locations/{id}/submit",$routes,'existing Location drafts retain a submit route');
         $this->contains("/locations/{id}/approve",$routes,'Location approval has a separate POST route');
-        $registry=$this->file('app/Core/DataTableRegistry.php');
         $this->contains("Auth::can('location.approve')",$registry,'Location approval action remains permission-controlled');
 
         $after=[

@@ -27,6 +27,11 @@ final class ArpaAppointmentIssuePresentation
             'explanation' => 'This officer has more than one Attend to the Duty appointment without an end date.',
             'what_to_check' => 'Check which appointment is currently valid.',
         ],
+        'OFFICER_DUPLICATE_DUTY_COVERING' => [
+            'title' => 'Overlapping Duty Covering appointments for the same ARPA Division',
+            'explanation' => 'This officer has overlapping Duty Covering appointments for the same ARPA Division.',
+            'what_to_check' => 'Check the affected Duty Covering periods and retain only evidence-backed canonical history.',
+        ],
         'DEPENDENT_WITHOUT_PERMANENT' => [
             'title' => 'Permanent appointment not found',
             'explanation' => 'This officer has an Acting, Duty Covering, or Attend to the Duty appointment, but DEMS cannot find a valid Permanent appointment for the required period.',

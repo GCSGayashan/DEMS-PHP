@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaWorkflowQueuePolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -58,6 +58,10 @@ final class DataTableRegistry
             'arpa-open-appointments-district-summary' => self::arpaAppointmentDistrictSummary('open'),
             'arpa-historical-appointments-district-summary' => self::arpaAppointmentDistrictSummary('history'),
             'arpa-vacant-divisions' => self::arpaVacantDivisions(),
+            'arpa-division-timelines' => self::arpaDivisionTimelines($input),
+            'arpa-division-timeline-asc-summary' => self::arpaDivisionTimelineAscSummary($input),
+            'arpa-division-timeline-district-summary' => self::arpaDivisionTimelineDistrictSummary(),
+            'arpa-officer-timelines' => self::arpaOfficerTimelines(),
             'arpa-appointment-issues' => self::arpaAppointmentIssues(),
             'arpa-appointment-corrections' => self::arpaAppointmentCorrections(),
             'arpa-subject-assignments' => self::arpaSubjectAssignments(),
@@ -1283,6 +1287,152 @@ final class DataTableRegistry
             'defaultOrder'=>[2,'ASC']];
     }
 
+    private static function arpaDivisionTimelines(array $input=[]):array
+    {
+        $geo=self::geo('d.asc_location_id');
+        $statusLabels=ArpaDivisionTimelineService::STATUS_LABELS;
+        $ascId=trim((string)($input['asc_id']??''));$baseWhere=[];$params=$geo['params'];
+        if($ascId!==''){
+            if(preg_match(self::uuidPattern(),$ascId)!==1)throw new RuntimeException('Invalid ASC context.');
+            $baseWhere[]='d.asc_location_id=?';$params[]=$ascId;
+        }
+        $columns=[
+            self::col('ARPA Division DAD','dad_number','d.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'])),
+            self::col('ARPA Division','name_en','d.name_en',fn($r)=>DataTableFormat::text($r['name_en'])),
+        ];
+        if($ascId===''){
+            $columns[] = self::col('ASC','asc_name','d.asc_name',fn($r)=>'<div class="fw-semibold">'.e($r['asc_name']).'</div><div class="small text-muted">'.e($r['asc_dad_number']).'</div>');
+            $columns[] = self::col('District','district_name','d.district_name',fn($r)=>DataTableFormat::text($r['district_name']));
+        }
+        $columns[] = self::col('Timeline Status','timeline_status','d.timeline_status',fn($r)=>DataTableFormat::badge($statusLabels[$r['timeline_status']]??$r['timeline_status']));
+        $columns[] = self::col('Data Issues','data_issue_count','d.data_issue_count',fn($r)=>DataTableFormat::text((string)$r['data_issue_count']));
+        $columns[] = self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/timeline/'.$r['id'])).'"><i class="bi bi-clock-history"></i> View Timeline</a>');
+        return [
+            'permission'=>'arpa.appointment.view',
+            'export'=>true,
+            'filename'=>'arpa-division-appointment-timelines',
+            'with'=>$geo['with'],
+            'from'=>ArpaDivisionTimelineService::divisionListSource().' d '.$geo['joinExpression'],
+            'select'=>[
+                'd.id','d.dad_number','d.name_en','d.asc_location_id','d.asc_dad_number','d.asc_name',
+                'd.district_location_id','d.district_name','d.appointment_count','d.open_count',
+                'd.data_issue_count','d.timeline_status',
+            ],
+            'count'=>'d.id',
+            'baseWhere'=>$baseWhere,
+            'baseParams'=>$params,
+            'searchable'=>['d.dad_number','d.name_en','d.asc_dad_number','d.asc_name','d.district_name','d.timeline_status'],
+            'filters'=>array_merge($ascId===''?[
+                'district'=>['column'=>'d.district_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'District']],
+                'asc'=>['column'=>'d.asc_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ASC']],
+            ]:[],[
+                'timeline_status'=>['column'=>'d.timeline_status','allowed'=>array_keys($statusLabels),'ui'=>['label'=>'Timeline Status','options'=>$statusLabels]],
+            ]),
+            'columns'=>$columns,
+            'defaultOrder'=>[1,'ASC'],
+            'emptyMessage'=>'No ARPA Divisions are available in your current working context.',
+        ];
+    }
+
+    private static function arpaDivisionTimelineAscSummary(array $input=[]):array
+    {
+        $geo=self::geo('d.asc_location_id');$districtId=trim((string)($input['district_id']??''));$baseWhere=[];$params=$geo['params'];
+        if($districtId!==''){
+            if(preg_match(self::uuidPattern(),$districtId)!==1)throw new RuntimeException('Invalid District context.');
+            $baseWhere[]='d.district_location_id=?';$params[]=$districtId;
+        }
+        $gap="'".implode("','",ArpaDivisionTimelineService::GAP_STATUSES)."'";$nationalDrill=($input['drill_level']??'')==='NATIONAL';
+        $routePrefix=$nationalDrill?'hr/arpa-appointments/timeline/district/'.$districtId.'/asc/':'hr/arpa-appointments/timeline/asc/';
+        return [
+            'permission'=>'arpa.appointment.view','export'=>false,'with'=>$geo['with'],
+            'from'=>ArpaDivisionTimelineService::divisionListSource().' d '.$geo['joinExpression'],
+            'select'=>[
+                'd.asc_location_id asc_id','d.asc_dad_number asc_dad','d.asc_name',
+                'COUNT(DISTINCT d.id) total_divisions',
+                "COUNT(DISTINCT CASE WHEN d.timeline_status='COMPLETE' THEN d.id END) complete_count",
+                "COUNT(DISTINCT CASE WHEN d.timeline_status IN({$gap}) THEN d.id END) gap_count",
+                'SUM(d.data_issue_count) data_issue_count',
+                "COUNT(DISTINCT CASE WHEN d.timeline_status='NO_CURRENT_OFFICER' THEN d.id END) no_current_count",
+            ],
+            'count'=>'d.asc_location_id','groupBy'=>'d.asc_location_id,d.asc_dad_number,d.asc_name',
+            'baseWhere'=>$baseWhere,'baseParams'=>$params,
+            'searchable'=>['d.asc_dad_number','d.asc_name'],
+            'columns'=>[
+                self::col('ASC DAD Number','asc_dad','d.asc_dad_number',fn($r)=>DataTableFormat::text($r['asc_dad'])),
+                self::col('ASC Name','asc_name','d.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),
+                self::col('Total ARPA Divisions','total_divisions','COUNT(DISTINCT d.id)',fn($r)=>DataTableFormat::text((string)$r['total_divisions'])),
+                self::col('Complete Timelines','complete_count',"COUNT(DISTINCT CASE WHEN d.timeline_status='COMPLETE' THEN d.id END)",fn($r)=>DataTableFormat::text((string)$r['complete_count'])),
+                self::col('Missing Period / Gap','gap_count',"COUNT(DISTINCT CASE WHEN d.timeline_status IN({$gap}) THEN d.id END)",fn($r)=>DataTableFormat::text((string)$r['gap_count'])),
+                self::col('Data Issues','data_issue_count','SUM(d.data_issue_count)',fn($r)=>DataTableFormat::text((string)$r['data_issue_count'])),
+                self::col('No Current Officer','no_current_count',"COUNT(DISTINCT CASE WHEN d.timeline_status='NO_CURRENT_OFFICER' THEN d.id END)",fn($r)=>DataTableFormat::text((string)$r['no_current_count'])),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url($routePrefix.$r['asc_id'].'/divisions')).'">View ARPA Divisions</a>'),
+            ],
+            'defaultOrder'=>[1,'ASC'],'emptyMessage'=>'No Agrarian Service Centers are available in this timeline context.',
+        ];
+    }
+
+    private static function arpaDivisionTimelineDistrictSummary():array
+    {
+        $geo=self::geo('d.asc_location_id');$gap="'".implode("','",ArpaDivisionTimelineService::GAP_STATUSES)."'";
+        return [
+            'permission'=>'arpa.appointment.view','export'=>false,'with'=>$geo['with'],
+            'from'=>ArpaDivisionTimelineService::divisionListSource().' d '.$geo['joinExpression'],
+            'select'=>[
+                'd.district_location_id district_id','MAX(d.district_name) district_name','MAX(d.district_dad_number) district_dad',
+                'COUNT(DISTINCT d.asc_location_id) total_ascs','COUNT(DISTINCT d.id) total_divisions',
+                "COUNT(DISTINCT CASE WHEN d.timeline_status='COMPLETE' THEN d.id END) complete_count",
+                "COUNT(DISTINCT CASE WHEN d.timeline_status IN({$gap}) THEN d.id END) gap_count",
+                'SUM(d.data_issue_count) data_issue_count',
+                "COUNT(DISTINCT CASE WHEN d.timeline_status='NO_CURRENT_OFFICER' THEN d.id END) no_current_count",
+            ],
+            'count'=>'d.district_location_id','groupBy'=>'d.district_location_id',
+            'baseWhere'=>['d.district_location_id IS NOT NULL'],'baseParams'=>$geo['params'],
+            'searchable'=>['d.district_dad_number','d.district_name'],
+            'columns'=>[
+                self::col('District DAD Number','district_dad','MAX(d.district_dad_number)',fn($r)=>DataTableFormat::text($r['district_dad'])),
+                self::col('District','district_name','MAX(d.district_name)',fn($r)=>DataTableFormat::text($r['district_name'])),
+                self::col('Total ASCs','total_ascs','COUNT(DISTINCT d.asc_location_id)',fn($r)=>DataTableFormat::text((string)$r['total_ascs'])),
+                self::col('Total ARPA Divisions','total_divisions','COUNT(DISTINCT d.id)',fn($r)=>DataTableFormat::text((string)$r['total_divisions'])),
+                self::col('Complete Timelines','complete_count',"COUNT(DISTINCT CASE WHEN d.timeline_status='COMPLETE' THEN d.id END)",fn($r)=>DataTableFormat::text((string)$r['complete_count'])),
+                self::col('Missing Period / Gap','gap_count',"COUNT(DISTINCT CASE WHEN d.timeline_status IN({$gap}) THEN d.id END)",fn($r)=>DataTableFormat::text((string)$r['gap_count'])),
+                self::col('Data Issues','data_issue_count','SUM(d.data_issue_count)',fn($r)=>DataTableFormat::text((string)$r['data_issue_count'])),
+                self::col('No Current Officer','no_current_count',"COUNT(DISTINCT CASE WHEN d.timeline_status='NO_CURRENT_OFFICER' THEN d.id END)",fn($r)=>DataTableFormat::text((string)$r['no_current_count'])),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/timeline/district/'.$r['district_id'].'/ascs')).'">View ASCs</a>'),
+            ],
+            'defaultOrder'=>[1,'ASC'],'emptyMessage'=>'No District timeline summaries are available.',
+        ];
+    }
+
+    private static function arpaOfficerTimelines():array
+    {
+        $geo=self::geo();$restricted=$geo['with']!=='';$labels=ArpaOfficerTimelineService::STATUS_LABELS;
+        return [
+            'permission'=>'arpa.appointment.view','export'=>true,'filename'=>'arpa-officer-appointment-timelines',
+            'with'=>$geo['with'],'from'=>ArpaOfficerTimelineService::officerListSource($restricted).' t',
+            'select'=>['t.id','t.dad_number','t.name_with_initials','t.nic','t.arpa_service_permanency',
+                't.permanent_appointments','t.additional_appointment_count','t.additional_appointment_types',
+                't.timeline_status','t.data_issue_count'],
+            'count'=>'t.id','baseParams'=>$geo['params'],
+            'searchable'=>['t.dad_number','t.name_with_initials','t.nic','t.arpa_service_permanency','t.permanent_appointments','t.additional_appointment_types','t.timeline_status'],
+            'filters'=>[
+                'service_permanency'=>['column'=>'t.arpa_service_permanency','allowed'=>ArpaAppointmentRules::PERMANENCIES,'ui'=>['label'=>'Service Permanency','options'=>['PERMANENT_IN_SERVICE'=>'Permanent In Service','NOT_PERMANENT_IN_SERVICE'=>'Not Permanent In Service']]],
+                'timeline_status'=>['column'=>'t.timeline_status','allowed'=>array_keys($labels),'ui'=>['label'=>'Timeline Status','options'=>$labels]],
+            ],
+            'columns'=>[
+                self::col('DAD Officer Number','dad_number','t.dad_number',fn($r)=>DataTableFormat::text($r['dad_number'])),
+                self::col('Officer Name','name_with_initials','t.name_with_initials',fn($r)=>DataTableFormat::text($r['name_with_initials'])),
+                self::col('NIC','nic','t.nic',fn($r)=>DataTableFormat::text($r['nic'])),
+                self::col('Service Permanency','arpa_service_permanency','t.arpa_service_permanency',fn($r)=>DataTableFormat::badge(DataTableFormat::enumLabel((string)$r['arpa_service_permanency']))),
+                self::col('Permanent Appointment','permanent_appointments','t.permanent_appointments',fn($r)=>DataTableFormat::text($r['permanent_appointments'],'None')),
+                self::col('Additional Appointments','additional_appointment_count','t.additional_appointment_count',fn($r)=>'<div class="fw-semibold">'.e((string)$r['additional_appointment_count']).'</div><div class="small text-muted">'.e(DataTableFormat::enumText((string)$r['additional_appointment_types'])).'</div>'),
+                self::col('Timeline Status','timeline_status','t.timeline_status',fn($r)=>DataTableFormat::badge($labels[$r['timeline_status']]??$r['timeline_status'])),
+                self::col('Data Issues','data_issue_count','t.data_issue_count',fn($r)=>DataTableFormat::text((string)$r['data_issue_count'])),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/timeline/officers/'.$r['id'])).'"><i class="bi bi-person-lines-fill"></i> View Timeline</a>'),
+            ],
+            'defaultOrder'=>[1,'ASC'],'emptyMessage'=>'No Officers have ARPA appointments in your current working context.',
+        ];
+    }
+
     private static function arpaAppointmentIssues():array
     {
         $geo=self::geo('q.asc_location_id');$current=\App\Services\ArpaAppointmentReadService::currentActionIssuePredicate('q');$reviewed="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status='KEPT_HISTORICAL_EXCEPTION')";
@@ -1943,8 +2093,9 @@ final class DataTableRegistry
     {
         $actions='<a class="btn btn-sm btn-outline-dark me-1" href="'.e(url('hr/arpa-appointments/requests/'.$row['entity'].'/'.$row['id'])).'">Review</a>';
         $ownDraft=$row['workflow_status']==='CREATED'&&(Auth::user()['id']??null)===$row['created_by'];
+        $ownSubmitted=$row['entity']==='division'&&$row['workflow_status']==='SUBMITTED'&&(Auth::user()['id']??null)===$row['created_by'];
         $ascCorrection=$row['workflow_status']==='RETURNED'&&Auth::can('arpa.appointment.asc-verify');
-        if($ownDraft||$ascCorrection){
+        if($ownDraft||$ownSubmitted||$ascCorrection){
             $permission=$row['entity']==='subject'?'arpa.subject.create':'arpa.appointment.edit';
             if(Auth::can($permission))$actions.='<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('hr/arpa-appointments/requests/'.$row['entity'].'/'.$row['id'].'/edit')).'">Edit</a>';
         }
