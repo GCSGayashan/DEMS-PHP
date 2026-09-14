@@ -34,3 +34,5 @@ Thumbs.db
 
 # Generated validation output
 BUILD_VALIDATION.txt
+
+/storage/officer_photos/*
