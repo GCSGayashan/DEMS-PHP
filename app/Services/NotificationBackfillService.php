@@ -20,7 +20,7 @@ final class NotificationBackfillService
                 if(self::isDivisionEndAfterTerminalAscApproval($entity,(string)$r['request_type'],(string)$r['workflow_status'])){$counts['arpa_end_terminal_skipped']++;continue;}
                 if(!$execute)continue;
                 $map=self::arpaActionFor($entity,(string)$r['request_type'],(string)$r['workflow_status']);
-                if($map!==null){$counts['notifications_created']+=$w->actionForPermission($map[0],$r['asc_location_id'],'ARPA_APPOINTMENT','ARPA Workflow Action Required','An ARPA workflow item requires action.',strtoupper('ARPA_'.$entity.'_REQUEST'),$r['id'],$r['workflow_status'],'/hr/arpa-appointments/requests/'.$entity.'/'.$r['id'],$r['updated_by']?:$r['created_by'],$map[1]);}
+                if($map!==null){$counts['notifications_created']+=$w->actionForPermission($map[0],$r['asc_location_id'],'ARPA_APPOINTMENT','ARPA Workflow Action Required','An ARPA workflow item requires action.',strtoupper('ARPA_'.$entity.'_REQUEST'),$r['id'],$r['workflow_status'],'/hr/arpa-appointments/requests/'.$entity.'/'.$r['id'],$r['updated_by']?:$r['created_by'],$map[1],$r['workflow_status']!=='SUBMITTED');}
                 elseif(self::isArpaCorrection((string)$r['workflow_status'])&&!empty($r['created_by'])){$w->actionForUser($r['created_by'],'ARPA_APPOINTMENT','ARPA Request Returned for Correction','Correction is required.',strtoupper('ARPA_'.$entity.'_REQUEST'),$r['id'],'CORRECTION','/hr/arpa-appointments/requests/'.$entity.'/'.$r['id'].'/edit',$r['updated_by']?:$r['created_by']);$counts['notifications_created']++;}
             }
         }

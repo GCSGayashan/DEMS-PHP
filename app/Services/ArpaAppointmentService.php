@@ -365,7 +365,7 @@ final class ArpaAppointmentService
             'DISTRICT_APPROVED'=>['arpa.appointment.national-verify',['NATIONAL_SUBJECT_OFFICER'],'ARPA Appointment Awaiting National Verification'],
             'NATIONAL_VERIFIED'=>['arpa.appointment.national-approve',['NATIONAL_ADMIN'],'ARPA Appointment Awaiting Final Approval'],
             default=>null};
-        if($next!==null){$isEnd=$entity==='division'&&(string)$request['request_type']==='END';if($isEnd&&$newStatus==='ASC_VERIFIED'){$next=['arpa.appointment.asc-approve',['ASC_ADMIN'],'End Appointment Awaiting ASC Approval'];}$notice->actionForPermission($next[0],(string)$request['asc_location_id'],'ARPA_APPOINTMENT',$next[2],'An ARPA workflow item requires action.',$type,$requestId,$newStatus,'/hr/arpa-appointments/requests/'.$entity.'/'.$requestId,$actorId,$next[1]);}
+        if($next!==null){$isEnd=$entity==='division'&&(string)$request['request_type']==='END';if($isEnd&&$newStatus==='ASC_VERIFIED'){$next=['arpa.appointment.asc-approve',['ASC_ADMIN'],'End Appointment Awaiting ASC Approval'];}$notice->actionForPermission($next[0],(string)$request['asc_location_id'],'ARPA_APPOINTMENT',$next[2],'An ARPA workflow item requires action.',$type,$requestId,$newStatus,'/hr/arpa-appointments/requests/'.$entity.'/'.$requestId,$actorId,$next[1],$newStatus!=='SUBMITTED');}
     }
 
     public function saveStageReview(string $entity, string $requestId, string $stage, ?string $information, ?string $remarks, string $actorId): void
