@@ -87,7 +87,10 @@ final class ArpaDivisionContinuityService
         foreach($divisionIds as $divisionId){
             $diagnostic=$this->calculate($byDivision[$divisionId]??[],$proposedStart);
             $diagnostic['unresolved_data_issue_count']=0;
-            $diagnostic['needs_action']=$diagnostic['timeline_status']!=='COMPLETE';
+            $diagnostic['needs_action']=array_intersect(
+                (array)($diagnostic['timeline_statuses']??[]),
+                ['INVALID_PERIOD','MULTIPLE_OPEN_ASSIGNMENTS','OVERLAP']
+            )!==[];
             $result[$divisionId]=$diagnostic;
         }
         return $result;
@@ -115,12 +118,6 @@ final class ArpaDivisionContinuityService
         if(in_array('INVALID_PERIOD',$statuses,true))throw new DomainException('This ARPA Division has an invalid authoritative assignment period. Resolve the Appointment Data Issue before creating a new request.');
         if(in_array('MULTIPLE_OPEN_ASSIGNMENTS',$statuses,true))throw new DomainException('This ARPA Division has multiple Open assignments. Resolve the Appointment Data Issue before creating a new request.');
         if(in_array('OVERLAP',$statuses,true))throw new DomainException('This ARPA Division has overlapping authoritative assignment periods. Resolve the timeline before creating a new request.');
-        if($requirement['relation']==='GAP'){
-            if((int)$requirement['authoritative_period_count']===0){
-                throw new DomainException('This ARPA Division has no assignment history from 01 Jan 2025. Complete the missing period starting 01 Jan 2025 first.');
-            }
-            throw new DomainException('This ARPA Division has an uncovered assignment period. The next assignment must start on '.$this->displayDate((string)$requirement['required_next_start']).'.');
-        }
         if($requirement['relation']==='OVERLAP'){
             throw new DomainException('The proposed start date overlaps an existing authoritative ARPA Division assignment period.');
         }
@@ -128,9 +125,9 @@ final class ArpaDivisionContinuityService
     }
 
     /**
-     * Validate a complete missing period. A bounded historical gap must be
-     * filled through the day immediately before the next authoritative record;
-     * an unbounded final gap must remain open.
+     * Validate that the proposed period lies inside an uncovered interval.
+     * Uncovered periods are informational: callers may fill any sub-period,
+     * while overlap and invalid date ranges remain prohibited.
      *
      * @return array<string,mixed>
      */
@@ -144,15 +141,12 @@ final class ArpaDivisionContinuityService
         bool $lock=true
     ):array {
         $requirement=$this->assertCanStart($divisionId,$proposedStart,$excludeRequestId,$excludeAppointmentId,$checkDataIssues,$lock);
+        if($proposedEnd!==null&&$proposedEnd<$proposedStart){
+            throw new DomainException('Effective to cannot be before Effective from.');
+        }
         $maximumEnd=$requirement['maximum_end_date'];
-        if($maximumEnd!==null&&$proposedEnd===null){
-            throw new DomainException('This historical gap is bounded by a later assignment. The new assignment must end on '.$this->displayDate((string)$maximumEnd).'.');
-        }
-        if($maximumEnd!==null&&$proposedEnd!==$maximumEnd){
-            throw new DomainException('To preserve continuous history, this assignment must end on '.$this->displayDate((string)$maximumEnd).'.');
-        }
-        if($maximumEnd===null&&$proposedEnd!==null){
-            throw new DomainException('This is the final uncovered period. The new assignment must remain open unless it is later ended through the normal workflow.');
+        if($maximumEnd!==null&&($proposedEnd===null||$proposedEnd>$maximumEnd)){
+            throw new DomainException('The proposed assignment period overlaps an authoritative ARPA Division assignment.');
         }
         return $requirement;
     }
@@ -194,14 +188,13 @@ final class ArpaDivisionContinuityService
         $rows=[];
         foreach($this->pdo->query($sql)->fetchAll() as $request){
             $requirement=$this->requirement((string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],(string)$request['id']);
-            if($requirement['relation']!=='GAP')continue;
+            if($requirement['relation']!=='OVERLAP')continue;
             $issue=$this->blockingDataIssue((string)$request['arpa_division_location_id'],$requirement,(string)$request['requested_effective_from']);
-            $reportedGapEnd=(new DateTimeImmutable((string)$request['requested_effective_from']))->modify('-1 day')->format('Y-m-d');
             $rows[]=$request+[
                 'last_covered_through'=>$requirement['last_covered_through'],
                 'required_next_start'=>$requirement['required_next_start'],
                 'gap_start'=>$requirement['required_next_start'],
-                'gap_end'=>$reportedGapEnd,
+                'gap_end'=>null,
                 'unresolved_data_issue'=>$issue!==null,
                 'data_issue_key'=>$issue['row_key']??$issue['reconciliation_item_id']??null,
                 'data_issue_type'=>$issue['issue_type']??null,
@@ -236,15 +229,21 @@ final class ArpaDivisionContinuityService
         }
         if($cursor!=='9999-12-31')$gaps[]=['gap_start'=>$cursor,'gap_end'=>null,'next_existing_start'=>null,'next_existing_end'=>null];
 
-        $required=$gaps[0]['gap_start']??null;$maximumEnd=$gaps[0]['gap_end']??null;
-        if($required===null){
+        $firstGap=$gaps[0]??null;$proposedGap=null;
+        foreach($gaps as $gap){
+            if($proposedStart<$gap['gap_start'])continue;
+            if($gap['gap_end']!==null&&$proposedStart>$gap['gap_end'])continue;
+            $proposedGap=$gap;break;
+        }
+        $required=$firstGap['gap_start']??null;
+        $selectedGapStart=$proposedGap['gap_start']??null;
+        $maximumEnd=$proposedGap['gap_end']??null;
+        if($proposedGap===null){
             $relation='OVERLAP';
-        }elseif($proposedStart===$required){
+        }elseif($proposedStart===$selectedGapStart){
             $relation='EXACT';
-        }elseif($proposedStart>$required&&($maximumEnd===null||$proposedStart<=$maximumEnd)){
-            $relation='GAP';
         }else{
-            $relation='OVERLAP';
+            $relation='GAP';
         }
         $lastCovered=$required===null||$required===self::BASELINE?null:(new DateTimeImmutable($required))->modify('-1 day')->format('Y-m-d');
         $statuses=[];
@@ -264,11 +263,11 @@ final class ArpaDivisionContinuityService
             'last_authoritative_end'=>$valid===[]?null:$valid[array_key_last($valid)]['effective_to'],
             'authoritative_period_count'=>count($valid),
             'relation'=>$relation,
-            'gap_start'=>$gaps[0]['gap_start']??null,
+            'gap_start'=>$selectedGapStart,
             'gap_end'=>$maximumEnd,
             'maximum_end_date'=>$maximumEnd,
-            'next_existing_start'=>$gaps[0]['next_existing_start']??null,
-            'next_existing_end'=>$gaps[0]['next_existing_end']??null,
+            'next_existing_start'=>$proposedGap['next_existing_start']??null,
+            'next_existing_end'=>$proposedGap['next_existing_end']??null,
             'gaps'=>$gaps,
             'gap_count'=>count($gaps),
             'overlap_count'=>count($overlaps),
@@ -321,7 +320,5 @@ final class ArpaDivisionContinuityService
         $stmt=$this->pdo->prepare($sql);$stmt->execute([self::BASELINE,$divisionId]);return $stmt->fetchAll();
     }
 
-    private function overlaps(string $aStart,string $aEnd,string $bStart,string $bEnd):bool{return $aStart<=$bEnd&&$aEnd>=$bStart;}
     private function lockDivision(string $divisionId):void{$stmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$stmt->execute([$divisionId]);if(!$stmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');}
-    private function displayDate(string $date):string{$time=strtotime($date);return $time===false?$date:date('d M Y',$time);}
 }

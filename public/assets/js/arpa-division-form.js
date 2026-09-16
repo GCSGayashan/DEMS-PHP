@@ -57,6 +57,7 @@
                 option.dataset.requiredNextStart=row.required_next_start||'';
                 option.dataset.lastCoveredThrough=row.last_covered_through||'';
                 option.dataset.continuityRelation=row.continuity_relation||'';
+                option.dataset.gapStart=row.gap_start||'';
                 option.dataset.gapEnd=row.gap_end||'';
                 option.dataset.nextExistingStart=row.next_existing_start||'';
                 option.dataset.nextExistingEnd=row.next_existing_end||'';
@@ -73,23 +74,24 @@
     };
     const updateContinuity=()=>{
         const selected=division.options[division.selectedIndex];
-        if(!selected?.value){continuity.hidden=true;if(boundedGapFields)boundedGapFields.hidden=true;if(effectiveTo)effectiveTo.value='';if(endReason)endReason.required=false;if(!refreshing)submit.disabled=false;return;}
+        if(!selected?.value){continuity.hidden=true;if(boundedGapFields)boundedGapFields.hidden=true;if(endReason)endReason.required=false;if(!refreshing)submit.disabled=false;return;}
         continuity.hidden=false;
         const required=selected.dataset.requiredNextStart||'';
         const last=selected.dataset.lastCoveredThrough||'';
         const relation=selected.dataset.continuityRelation||'';
+        const gapStart=selected.dataset.gapStart||'';
         const gapEnd=selected.dataset.gapEnd||'';
         const nextStart=selected.dataset.nextExistingStart||'';
         const nextEnd=selected.dataset.nextExistingEnd||'';
-        if(historicalCoverage)historicalCoverage.textContent=last?`01 Jan 2025 - ${displayDate(last)}`:'No continuous coverage from 01 Jan 2025';
-        lastCovered.textContent=last?displayDate(last):'No covered period from 01 Jan 2025';
-        if(missingPeriod)missingPeriod.textContent=required?`${displayDate(required)} - ${gapEnd?displayDate(gapEnd):'Open'}`:'No uncovered period';
+        if(historicalCoverage)historicalCoverage.textContent=last?`01 Jan 2025 - ${displayDate(last)}`:'No coverage before the first uncovered period';
+        lastCovered.textContent=last?displayDate(last):'—';
+        if(missingPeriod)missingPeriod.textContent=gapStart?`${displayDate(gapStart)} - ${gapEnd?displayDate(gapEnd):'Open'}`:'Selected date is already covered';
         requiredStart.textContent=displayDate(required);
         if(nextExisting)nextExisting.textContent=nextStart?`${displayDate(nextStart)} - ${nextEnd?displayDate(nextEnd):'Open'}`:'None';
-        if(maximumEnd)maximumEnd.textContent=gapEnd?displayDate(gapEnd):'Open';
-        if(boundedGapFields)boundedGapFields.hidden=gapEnd==='';
-        if(effectiveTo)effectiveTo.value=gapEnd;
-        if(endReason){endReason.required=gapEnd!=='';if(gapEnd==='')endReason.value='';}
+        if(maximumEnd)maximumEnd.textContent=gapStart?(gapEnd?displayDate(gapEnd):'Open'):'—';
+        if(boundedGapFields)boundedGapFields.hidden=!['EXACT','GAP'].includes(relation);
+        if(effectiveTo){effectiveTo.min=date.value;effectiveTo.max=gapEnd;}
+        if(endReason)endReason.required=Boolean(effectiveTo?.value);
         issueLink.hidden=true;
         if(blockingIssue?.row_key){
             issueLink.href=issueLink.dataset.issueUrl+encodeURIComponent(blockingIssue.row_key);issueLink.hidden=false;
@@ -100,18 +102,20 @@
         if(blockingIssue?.row_key||blockingIssue?.reconciliation_item_id){
             text='This ARPA Division has unresolved Appointment Data Issues. Review and complete them before creating a new appointment request.';style='alert-danger';
         }else if(relation==='GAP'){
-            text=last
-                ?`This ARPA Division has an uncovered assignment period. The next assignment must start on ${displayDate(required)}.`
-                :'This ARPA Division has no assignment history from 01 Jan 2025. Complete the missing period starting 01 Jan 2025 first.';
-            style='alert-warning';
+            text='The selected date is within an uncovered period. Uncovered dates before or after this appointment may remain.';
+            style='alert-info';
         }else if(relation==='OVERLAP'){
-            text=required
-                ?`The selected date overlaps authoritative assignment history. The required missing period starts on ${displayDate(required)}.`
-                :'This ARPA Division has complete Open coverage from the system baseline. There is no uncovered period for a new assignment.';
+            text='The selected date overlaps authoritative assignment history.';
             style='alert-danger';
-        }else if(relation==='EXACT')text='The selected start date preserves ARPA Division assignment continuity.';
+        }else if(relation==='EXACT'){
+            text='The selected date begins an uncovered period. The full uncovered period does not have to be filled.';
+            style='alert-info';
+        }
+        if(effectiveTo?.value&&gapEnd&&effectiveTo.value>gapEnd){text=`The End Date overlaps the next authoritative assignment. Choose a date on or before ${displayDate(gapEnd)}.`;style='alert-danger';}
+        if(effectiveTo?.value&&effectiveTo.value<date.value){text='The End Date cannot be before the Appointment Start Date.';style='alert-danger';}
         continuityMessage.textContent=text;continuityMessage.className=`alert ${style} mt-3 mb-0`;continuityMessage.hidden=text==='';
-        submit.disabled=refreshing||relation!=='EXACT'||Boolean(blockingIssue?.row_key||blockingIssue?.reconciliation_item_id)||(gapEnd!==''&&Boolean(endReason)&&endReason.value==='');
+        const invalidEnd=Boolean(effectiveTo?.value)&&(effectiveTo.value<date.value||Boolean(gapEnd&&effectiveTo.value>gapEnd));
+        submit.disabled=refreshing||relation==='OVERLAP'||Boolean(blockingIssue?.row_key||blockingIssue?.reconciliation_item_id)||invalidEnd||(Boolean(effectiveTo?.value)&&Boolean(endReason)&&endReason.value==='');
         renderIssues();
     };
     const renderIssues=()=>{
@@ -164,6 +168,7 @@
         }
     };
     officer.addEventListener('change',()=>applyAppointmentTypes(''));
+    if(effectiveTo)effectiveTo.addEventListener('change',updateContinuity);
     if(endReason)endReason.addEventListener('change',updateContinuity);
     // Re-run the secured server-side option calculation when the Division
     // changes so its continuity period and any open Data Issue are evaluated

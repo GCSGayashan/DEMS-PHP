@@ -19,6 +19,8 @@ final class ArpaOfficerAppointmentTimelineTest
 
         $acting=$this->period('acting','ACTING','division-b','2025-04-01','2025-06-30');
         $this->same([],array_column($service->derivedConflicts([$permanent,$acting],'PERMANENT_IN_SERVICE'),'issue_type'),'Permanent plus Acting is not treated as a generic overlap');
+        $laterActing=$this->period('later-acting','ACTING','division-b','2026-04-01','2026-06-30');
+        $this->same([],array_column($service->derivedConflicts([$permanent,$acting,$laterActing],'PERMANENT_IN_SERVICE'),'issue_type'),'an Officer timeline gap between non-overlapping appointments is allowed');
 
         $secondPermanent=$this->period('permanent-2','PERMANENT','division-c','2025-05-01',null);
         $this->contains('OFFICER_MULTIPLE_PERMANENT',array_column($service->derivedConflicts([$permanent,$secondPermanent],'PERMANENT_IN_SERVICE'),'issue_type'),'overlapping Permanent appointments are flagged');

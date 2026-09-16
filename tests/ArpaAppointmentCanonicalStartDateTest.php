@@ -24,6 +24,7 @@ final class ArpaAppointmentCanonicalStartDateTest
         $activeAsc=['location_name'=>'Kurunegala','location_dad_number'=>'70004-0000389'];
         $selectedAsc='asc-kurunegala';
         $effectiveDate='2026-08-22';
+        $suggestedEffectiveTo='';
         $ascs=[['id'=>'forged-asc','dad_number'=>'70004-9999999','name_en'=>'Other ASC']];
         $officers=[['id'=>'officer-1','dad_number'=>'80000-0000001','name_with_initials'=>'A. Officer','arpa_service_permanency'=>'PERMANENT_IN_SERVICE','allowed_appointment_types'=>['PERMANENT']]];
         $arpaDivisions=[['id'=>'division-1','dad_number'=>'70007-0007026','name_en'=>'Wewagedara']];
@@ -72,17 +73,19 @@ final class ArpaAppointmentCanonicalStartDateTest
         $this->contains('assertEligibleOfficer($officerId,$ascId,$effectiveFrom)',$service,'Officer eligibility uses the canonical date');
         $this->contains('assertDivisionPeriodAvailable($ascId,$divisionId,$effectiveFrom,$effectiveTo,true)',$service,'Division period validation uses the canonical business range');
         $this->contains('ArpaDivisionContinuityService',$optionsService,'form options include the canonical Division continuity calculation');
-        $this->contains('Required Start Date',$view,'form displays the required next valid Division start date');
-        $this->contains('assertCanFillPeriod($divisionId,$effectiveFrom,$effectiveTo',$service,'submission enforces complete-period Division continuity server-side');
+        $this->contains('First Uncovered Date',$view,'form displays the first uncovered Division date for information');
+        $this->contains('assertCanFillPeriod($divisionId,$effectiveFrom,$effectiveTo',$service,'submission enforces period overlap and Data Issue validation server-side');
         $this->same(false,str_contains($rendered,'name="asc_location_id"'),'ASC-context form renders no editable ASC field');
         $this->same(1,substr_count($rendered,'name="effective_from"'),'ASC-context form renders one Appointment Start Date');
         $this->contains('Agrarian Service Center:</strong> Kurunegala',$rendered,'ASC-context form displays its server-provided ASC');
         $this->contains('80000-0000001 - A. Officer',$rendered,'eligible Officer options render without another request');
         $this->contains('70007-0007026 - Wewagedara',$rendered,'vacant Division options render without another request');
         $this->contains('value="officer-1" data-allowed-types="PERMANENT" selected',$rendered,'a still-eligible Officer remains selected');
-        $this->contains('value="division-1" data-required-next-start="" data-last-covered-through="" data-continuity-relation="" data-gap-end=""',$rendered,'a Division remains selected with full timeline metadata');
-        $this->contains('ARPA Division / Period to Fill *',$view,'form no longer describes the timeline selector as current vacancy only');
-        $this->contains('Maximum End Date',$view,'bounded historical gaps expose their maximum end date');
+        $this->contains('value="division-1" data-required-next-start="" data-last-covered-through="" data-continuity-relation="" data-gap-start="" data-gap-end=""',$rendered,'a Division remains selected with full timeline metadata');
+        $this->contains('ARPA Division *',$view,'form selects a Division without requiring a complete gap fill');
+        $this->contains('Selected Period May End By',$view,'bounded uncovered periods expose their overlap boundary');
+        $this->same(false,str_contains($view,'type="date" readonly'),'historical End Date is editable');
+        $this->contains("relation==='OVERLAP'",$formJs,'only an overlapping selected start blocks submission based on timeline coverage');
 
         echo "ArpaAppointmentCanonicalStartDateTest: {$this->assertions} assertions passed.\n";
         return 0;

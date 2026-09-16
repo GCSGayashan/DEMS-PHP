@@ -12,9 +12,9 @@ final class ArpaDivisionTimelineService
     public const GAP_STATUSES=['MISSING_BASELINE_PERIOD','HISTORICAL_GAP','CURRENT_WITH_HISTORICAL_GAP'];
     public const STATUS_LABELS=[
         'COMPLETE'=>'Complete',
-        'MISSING_BASELINE_PERIOD'=>'Missing Baseline Period',
-        'HISTORICAL_GAP'=>'Historical Gap',
-        'CURRENT_WITH_HISTORICAL_GAP'=>'Current With Historical Gap',
+        'MISSING_BASELINE_PERIOD'=>'Uncovered Baseline Period',
+        'HISTORICAL_GAP'=>'Uncovered Period',
+        'CURRENT_WITH_HISTORICAL_GAP'=>'Current - Has Uncovered Period',
         'NO_CURRENT_OFFICER'=>'No Current Officer',
         'DATA_ISSUE'=>'Data Issue',
         'MULTIPLE_OPEN_ASSIGNMENTS'=>'Multiple Open Assignments',

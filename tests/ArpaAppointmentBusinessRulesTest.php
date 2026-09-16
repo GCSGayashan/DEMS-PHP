@@ -38,9 +38,8 @@ final class ArpaAppointmentBusinessRulesTest
         $this->pdo->prepare("UPDATE officer SET arpa_service_permanency='PERMANENT_IN_SERVICE' WHERE id=?")->execute([$coverageOfficer]);
         foreach($officers as $officer)$this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,approval_status,active,reason,created_by,submitted_by,submitted_at,approved_by,approved_at) VALUES(UUID(),?,?,?,'APPROVED',1,'ARPA business-rule test',?,?,NOW(),?,NOW())")->execute([$officer,$office,$pastStart,$actor,$actor,$actor]);
 
-        // These tests exercise Officer/type rules at today's date. Give each
-        // synthetic Division continuous authoritative coverage through yesterday
-        // so the independent Division-continuity rule is also satisfied.
+        // These tests exercise Officer/type rules at today's date. Seed a prior
+        // period so they also exercise canonical period overlap checks.
         $yesterday=date('Y-m-d',strtotime($today.' -1 day'));
         foreach($divisions as $division){
             $coverage=$this->createApprovedAppointment($coverageOfficer,'DUTY_COVERING',$asc,$division,'2025-01-01',$actor);
@@ -48,6 +47,15 @@ final class ArpaAppointmentBusinessRulesTest
         }
 
         $service=new ArpaAppointmentService($this->pdo);$read=new ArpaAppointmentReadService($this->pdo);
+        $partialStart=date('Y-m-d',strtotime($today.' +10 days'));
+        $partialEnd=date('Y-m-d',strtotime($today.' +15 days'));
+        $endReason=(string)$this->value('SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1');
+        $partialGapRequest=$service->createAndSubmitDivisionAppointmentRequest(
+            $this->request($coverageOfficer,'PERMANENT',$asc,$divisions[0],$partialStart)+['effective_to'=>$partialEnd,'end_reason_id'=>$endReason],
+            $actor
+        );
+        $this->same('SUBMITTED',$this->value('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$partialGapRequest]),'submission may start after an uncovered period begins and end before that uncovered period ends');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='REJECTED' WHERE id=?")->execute([$partialGapRequest]);
         $this->same(['PERMANENT'],$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],'Permanent-in-Service officer without a foundation may only receive Permanent');
         $permanentRequest=$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'PERMANENT',$asc,$divisions[0],$today),$actor);
         $this->same('SUBMITTED',$this->value('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$permanentRequest]),'first Permanent assignment is submitted');
@@ -84,7 +92,7 @@ final class ArpaAppointmentBusinessRulesTest
         $this->same($divisions[3],$this->value('SELECT arpa_division_location_id FROM arpa_division_appointment_request WHERE id=?',[$secondDuty]),'failed submitted edit leaves the existing reservation unchanged');
         $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[2],$today),$actor),'The proposed start date overlaps an existing authoritative ARPA Division assignment period.','duplicate submitted Duty Covering is blocked by the authoritative Division reservation');
         $this->createApprovedAppointment($permanentOfficer,'DUTY_COVERING',$asc,$divisions[4],$future,$actor);
-        $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[4],$today),$actor),'This historical gap is bounded by a later assignment. The new assignment must end on '.date('d M Y',strtotime($future.' -1 day')).'.','future scheduled Duty Covering cannot be bypassed by creating an unbounded earlier assignment');
+        $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'DUTY_COVERING',$asc,$divisions[4],$today),$actor),'The proposed assignment period overlaps an authoritative ARPA Division assignment.','future scheduled Duty Covering cannot be bypassed by creating an unbounded earlier assignment');
 
         foreach(['ACTING','ATTEND_TO_DUTY','DUTY_COVERING'] as $dependent)$this->throwsMessage(
             fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($nonPermanentOfficer,$dependent,$asc,$divisions[5],$today),$actor),

@@ -34,7 +34,7 @@ final class ArpaDivisionContinuityTest
         $noHistory=$this->continuity->requirement($empty,'2026-01-01');
         $this->same('2025-01-01',$noHistory['required_next_start'],'no history starts at the system baseline');
         $this->same('GAP',$noHistory['relation'],'no history plus a later proposed date is a gap');
-        $this->throwsContains(fn()=>$this->continuity->assertCanStart($empty,'2026-01-01'),'no assignment history from 01 Jan 2025','no-history gap is blocked');
+        $this->same('GAP',$this->continuity->assertCanStart($empty,'2026-01-01')['relation'],'no-history uncovered period is allowed');
         $this->same('EXACT',$this->continuity->assertCanStart($empty,'2025-01-01')['relation'],'first assignment exactly at baseline passes');
 
         $august=$this->division('August Gap');
@@ -42,14 +42,14 @@ final class ArpaDivisionContinuityTest
         $augustGap=$this->continuity->requirement($august,'2026-01-01');
         $this->same('2025-09-01',$augustGap['required_next_start'],'required date is previous end plus one day');
         $this->same(null,$augustGap['gap_end'],'the final uncovered period is open rather than derived from the proposed date');
-        $this->throwsContains(fn()=>$this->continuity->assertCanStart($august,'2026-01-01'),'01 Sep 2025','later proposal reports the exact required date');
+        $this->same('GAP',$this->continuity->assertCanStart($august,'2026-01-01')['relation'],'a later start inside the final uncovered period is allowed');
 
         $kalahogedara=$this->division('Kalahogedara Regression');
         $prior=$this->appointment($kalahogedara,'2025-01-01','2025-12-31');
         $januaryGap=$this->continuity->requirement($kalahogedara,'2026-01-22');
         $this->same('2026-01-01',$januaryGap['required_next_start'],'Kalahogedara required next date is 01 January 2026');
         $this->same(null,$januaryGap['gap_end'],'Kalahogedara final missing period is not fabricated from the invalid proposal');
-        $this->throwsContains(fn()=>$this->continuity->assertCanStart($kalahogedara,'2026-01-22'),'01 Jan 2026','Kalahogedara 22 January regression is blocked');
+        $this->same('GAP',$this->continuity->assertCanStart($kalahogedara,'2026-01-22')['relation'],'Kalahogedara 22 January is allowed as an uncovered-period start');
         $this->same('EXACT',$this->continuity->assertCanStart($kalahogedara,'2026-01-01')['relation'],'day immediately after prior end passes continuity');
         $this->throwsContains(fn()=>$this->continuity->assertCanStart($kalahogedara,'2025-12-31'),'overlaps an existing authoritative','start before required date is rejected as overlap');
         $this->same($this->officer,(string)$this->value('SELECT officer_id FROM arpa_division_appointment WHERE id=?',[$prior]),'prior period belongs to a specific Officer');
@@ -67,9 +67,15 @@ final class ArpaDivisionContinuityTest
         $this->same('2025-12-31',$this->continuity->assertCanFillPeriod($bounded,'2025-05-01','2025-12-31',null,null,false)['maximum_end_date'],'the complete bounded gap can be filled');
         (new ArpaAppointmentReadService($this->pdo))->assertDivisionPeriodAvailable($this->asc,$bounded,'2025-05-01','2025-12-31');$this->assertions++;
         $this->throwsContains(fn()=>(new ArpaAppointmentReadService($this->pdo))->assertDivisionPeriodAvailable($this->asc,$bounded,'2025-05-01',null),'proposed assignment period overlaps','an unbounded period cannot overlap the later current assignment');
-        $this->throwsContains(fn()=>$this->continuity->assertCanStart($bounded,'2025-08-01',null,null,false),'01 May 2025','starting in the middle of a bounded gap is rejected');
+        $this->same('GAP',$this->continuity->assertCanStart($bounded,'2025-08-01',null,null,false)['relation'],'starting in the middle of a bounded uncovered period is allowed');
         $this->throwsContains(fn()=>$this->continuity->assertCanStart($bounded,'2026-02-01',null,null,false),'overlaps an existing authoritative','a date covered by the later Open assignment is rejected');
-        $this->throwsContains(fn()=>$this->continuity->assertCanFillPeriod($bounded,'2025-05-01',null,null,null,false),'must end on 31 Dec 2025','bounded historical gap cannot be converted into an Open assignment');
+        $this->throwsContains(fn()=>$this->continuity->assertCanFillPeriod($bounded,'2025-05-01',null,null,null,false),'overlaps an authoritative','an Open assignment cannot overlap the later current assignment');
+        $this->same('GAP',$this->continuity->assertCanFillPeriod($bounded,'2025-05-15','2025-06-10',null,null,false)['relation'],'a bounded uncovered sub-period is valid without filling the whole gap');
+        $this->appointment($bounded,'2025-05-15','2025-06-10');
+        $remaining=$this->continuity->requirement($bounded,'2025-05-01');
+        $this->same(2,$remaining['gap_count'],'uncovered dates before and after a partial fill remain visible');
+        $gapIssueTypes=array_column($this->continuity->unresolvedDataIssues($bounded),'issue_type');
+        $this->same(false,(bool)array_filter($gapIssueTypes,static fn(string $type):bool=>str_contains($type,'GAP')||str_contains($type,'MISSING_PERIOD')),'ordinary uncovered periods do not become Appointment Data Issues');
         $options=(new ArpaAppointmentFormOptionsService($this->pdo))->load($this->actor,$this->asc,'2025-05-01',['arpa_division_location_id'=>$bounded]);
         $this->same(true,in_array($bounded,array_column($options['arpaDivisions'],'id'),true),'Division remains visible even though it has a later current appointment');
         $this->same($bounded,$options['selectedDivision'],'historical-gap Division remains selectable');
@@ -126,7 +132,7 @@ final class ArpaDivisionContinuityTest
         $invalidRequest=$this->request($reservation,'2026-01-22','CREATED');
         $invalid=$this->continuity->requirement($reservation,'2026-01-22',$invalidRequest);
         $this->same('GAP',$invalid['relation'],'Submitted request is evaluated against earlier canonical coverage');
-        $this->throwsContains(fn()=>$this->workflow($invalidRequest),'01 Jan 2026','server-side SUBMIT revalidation blocks a forged gap request');
+        $this->same('GAP',$this->continuity->assertCanFillPeriod($reservation,'2026-01-22',null,$invalidRequest,null,false,false)['relation'],'server-side write-stage validation permits an uncovered-period start');
 
         $validReservation=$this->request($reservation,'2026-01-01','SUBMITTED');
         $this->same('OVERLAP',$this->continuity->requirement($reservation,'2026-01-02')['relation'],'a valid Submitted reservation remains authoritative for later overlap checks');
@@ -134,15 +140,15 @@ final class ArpaDivisionContinuityTest
         $this->same('GAP',$this->continuity->requirement($reservation,'2026-01-02')['relation'],'Rejected request is not authoritative coverage');
 
         $returned=$this->request($reservation,'2026-01-22','RETURNED');
-        $this->throwsContains(fn()=>$this->workflow($returned),'01 Jan 2026','returned request is revalidated when resubmitted');
+        $this->same('GAP',$this->continuity->assertCanFillPeriod($reservation,'2026-01-22',null,$returned,null,false,false)['relation'],'returned request revalidation does not reintroduce the removed gap blocker');
 
         $productionInvalid=array_column($this->continuity->invalidPendingAssignments(),'id');
-        $this->same(true,in_array('ca8868e8-46fd-43b7-944d-a7ff6aa4ae49',$productionInvalid,true),'read-only diagnostic identifies the existing Kalahogedara pending request');
+        $this->same(false,in_array('ca8868e8-46fd-43b7-944d-a7ff6aa4ae49',$productionInvalid,true),'a pending request that only leaves an uncovered period is no longer reported as invalid');
 
         $service=(string)file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentService.php');
-        $this->same(true,substr_count($service,'assertCanFillPeriod(')>=4,'complete-period continuity is enforced on create, edit/resubmit, workflow stages, and final materialization');
-        $this->same(true,str_contains($service,"['SUBMIT','VERIFY','APPROVE']"),'every authoritative workflow stage revalidates continuity');
-        $this->same('2025-01-01',ArpaDivisionContinuityService::BASELINE,'continuity baseline remains canonical');
+        $this->same(true,substr_count($service,'assertCanFillPeriod(')>=4,'period overlap and Data Issue validation runs on create, edit/resubmit, workflow stages, and final materialization');
+        $this->same(true,str_contains($service,"['SUBMIT','VERIFY','APPROVE']"),'every authoritative workflow stage revalidates the proposed period');
+        $this->same('2025-01-01',ArpaDivisionContinuityService::BASELINE,'timeline reporting baseline remains canonical');
     }
 
     private function division(string $name):string

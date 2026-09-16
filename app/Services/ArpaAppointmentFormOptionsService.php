@@ -94,7 +94,7 @@ final class ArpaAppointmentFormOptionsService
 
         $selectedDivision=$requestedDivision!==''&&isset($divisionIds[$requestedDivision])?$requestedDivision:'';
         if($requestedDivision!==''&&$selectedDivision===''){
-            $messages[]='The previously selected ARPA Division has no uncovered period available on the selected start date or is outside the selected ASC.';
+            $messages[]='The previously selected ARPA Division is outside the selected ASC or is not effective on the selected start date.';
         }
 
         $allowedTypes=$selectedOfficer===''?[]:(array)($officerById[$selectedOfficer]['allowed_appointment_types']??[]);
@@ -124,12 +124,11 @@ final class ArpaAppointmentFormOptionsService
         if($status==='OVERLAP')return 'Overlapping Assignment History';
         $start=$diagnostic['gap_start']??null;$end=$diagnostic['gap_end']??null;
         if($start!==null){
-            if($start===ArpaDivisionContinuityService::BASELINE&&$end===null)return 'No History From 01 Jan 2025';
-            if($start===ArpaDivisionContinuityService::BASELINE)return 'Missing: 01 Jan 2025 - '.$this->displayDate((string)$end);
-            return 'Missing: '.$this->displayDate((string)$start).' - '.($end===null?'Open':$this->displayDate((string)$end));
+            if($start===ArpaDivisionContinuityService::BASELINE&&$end===null)return 'Uncovered From 01 Jan 2025';
+            return 'Uncovered: '.$this->displayDate((string)$start).' - '.($end===null?'Open':$this->displayDate((string)$end));
         }
         return match($status){
-            'COMPLETE'=>'Complete Timeline - No Missing Period',
+            'COMPLETE'=>'No Uncovered Period on Selected Date',
             default=>'Available Period',
         };
     }

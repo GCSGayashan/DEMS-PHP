@@ -505,6 +505,7 @@ final class ArpaAppointmentController extends Controller
         }
         $selectedAsc=$ascContext===null?trim((string)($_GET['asc_location_id']??'')):(string)$ascContext['location_id'];
         $effectiveDate=trim((string)($_GET['effective_from']??date('Y-m-d')));
+        $suggestedEffectiveTo=trim((string)($_GET['effective_to']??''));
         try {
             \App\Services\ArpaAppointmentRules::assertNativeEffectiveDate($effectiveDate);
             if($selectedAsc!=='')$this->assertArpaStageScope('ASC',$selectedAsc);
@@ -519,6 +520,7 @@ final class ArpaAppointmentController extends Controller
         $this->render('arpa_appointments/division_form',$options+[
             'selectedAsc'=>$selectedAsc,
             'effectiveDate'=>$effectiveDate,
+            'suggestedEffectiveTo'=>$suggestedEffectiveTo,
             'ascDerivedFromContext'=>$ascContext!==null,
             'activeAsc'=>$ascContext,
         ]);
@@ -552,6 +554,7 @@ final class ArpaAppointmentController extends Controller
                     'required_next_start'=>$row['required_next_start']??null,
                     'last_covered_through'=>$row['last_covered_through']??null,
                     'continuity_relation'=>$row['relation']??null,
+                    'gap_start'=>$row['gap_start']??null,
                     'gap_end'=>$row['gap_end']??null,
                     'maximum_end_date'=>$row['maximum_end_date']??null,
                     'next_existing_start'=>$row['next_existing_start']??null,

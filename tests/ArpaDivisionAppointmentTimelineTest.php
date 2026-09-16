@@ -60,7 +60,7 @@ final class ArpaDivisionAppointmentTimelineTest
         $definition['baseWhere'][]='d.id=?';$definition['baseParams'][]=$gap;
         $page=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['draw'=>8,'length'=>10])))->response();
         $this->same(1,$page['recordsFiltered'],'ASC-scoped list returns its Division without an N+1 query');
-        $this->same('Current With Historical Gap',strip_tags((string)$page['data'][0]['timeline_status']),'list identifies the current timeline with a historical gap');
+        $this->same('Current - Has Uncovered Period',strip_tags((string)$page['data'][0]['timeline_status']),'list identifies the current timeline with an informational uncovered period');
 
         $_SERVER['REQUEST_URI']='/hr/arpa-appointments/timeline';$ascLanding=$this->render(fn()=>(new ArpaAppointmentController())->appointmentTimeline());
         $this->same(true,str_contains($ascLanding,'ARPA Division Timelines'),'ASC context opens the Division list directly');
@@ -68,7 +68,7 @@ final class ArpaDivisionAppointmentTimelineTest
 
         $timeline=(new ArpaDivisionTimelineService($this->pdo))->timeline($gap,$this->actor);
         $this->same(2,$timeline['summary']['total_appointments'],'canonical appointments are not duplicated');
-        $this->same(1,$timeline['summary']['missing_periods'],'bounded missing period is shown');
+        $this->same(1,$timeline['summary']['missing_periods'],'bounded uncovered period is shown');
         $missing=array_values(array_filter($timeline['entries'],fn($row)=>$row['entry_kind']==='MISSING_PERIOD'));
         $this->same('2025-05-01',$missing[0]['effective_from'],'gap starts after the prior assignment');
         $this->same('2025-06-30',$missing[0]['effective_to'],'gap ends before the next assignment');
@@ -93,6 +93,8 @@ final class ArpaDivisionAppointmentTimelineTest
         $this->same(true,str_contains($html,'Add Historical Appointment'),'authorized timeline exposes the existing historical appointment entry point');
         $this->same(true,str_contains($html,'effective_from=2025-05-01'),'historical action pre-fills the exact missing-period start');
         $this->same(true,str_contains($html,'effective_to=2025-06-30'),'historical action pre-fills the bounded missing-period end');
+        $this->same(true,str_contains($html,'Uncovered Period'),'timeline labels a normal gap as informational uncovered history');
+        $this->same(true,str_contains($html,'do not need to be filled completely'),'timeline explains that complete gap filling is not required');
         $this->same(true,str_contains($html,'arpa_division_location_id='),'historical action retains the selected Division');
         $this->same(true,str_contains($html,'Current'),'open effective appointment is labelled Current');
         $this->same(true,str_contains($html,'Historical / Ended'),'closed appointment is labelled Historical / Ended');

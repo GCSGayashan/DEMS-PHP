@@ -7,6 +7,7 @@ $dash='—';
 $date=static fn(?string $value,string $fallback='Open'):string=>DataTableFormat::date($value,$fallback);
 $typeLabel=static fn(?string $value):string=>DataTableFormat::enumLabel((string)$value);
 $statuses=array_map(static fn($value):string=>$typeLabel((string)$value),(array)($diagnostic['timeline_statuses']??[]));
+$hasTimelineConflict=array_intersect((array)($diagnostic['timeline_statuses']??[]),['INVALID_PERIOD','MULTIPLE_OPEN_ASSIGNMENTS','OVERLAP'])!==[]||$summary['data_issues']>0;
 ?>
 <div class="page-heading">
   <div>
@@ -22,15 +23,17 @@ $statuses=array_map(static fn($value):string=>$typeLabel((string)$value),(array)
     'Canonical Appointments'=>$summary['total_appointments'],
     'Current / Open'=>$summary['current_open_appointments'],
     'Historical / Ended'=>$summary['historical_appointments'],
-    'Missing Periods'=>$summary['missing_periods'],
+    'Uncovered Periods'=>$summary['missing_periods'],
     'Unresolved Data Issues'=>$summary['data_issues'],
   ] as $label=>$value): ?>
   <div class="col-6 col-lg"><div class="card h-100"><div class="card-body"><div class="text-muted small"><?= e($label) ?></div><div class="display-6"><?= e((string)$value) ?></div></div></div></div>
   <?php endforeach; ?>
 </div>
 
-<?php if($statuses!==['Complete']): ?>
-<div class="alert alert-warning"><strong>Timeline needs attention:</strong> <?= e(implode(', ',$statuses)) ?>. Missing and conflicting periods are shown below; existing records have not been changed.</div>
+<?php if($hasTimelineConflict): ?>
+<div class="alert alert-warning"><strong>Timeline needs attention:</strong> <?= e(implode(', ',$statuses)) ?>. Conflicting periods and Data Issues are shown below; existing records have not been changed.</div>
+<?php elseif($statuses!==['Complete']): ?>
+<div class="alert alert-info"><strong>Timeline contains uncovered periods:</strong> <?= e(implode(', ',$statuses)) ?>. Uncovered periods are informational and do not need to be filled completely.</div>
 <?php else: ?>
 <div class="alert alert-success"><strong>Timeline complete.</strong> Canonical assignment periods cover the timeline without a detected gap or overlap.</div>
 <?php endif; ?>
@@ -45,8 +48,8 @@ $statuses=array_map(static fn($value):string=>$typeLabel((string)$value),(array)
       <?php if($entry['entry_kind']==='MISSING_PERIOD'): ?>
         <tr class="table-warning">
           <td><strong><?= $date($entry['effective_from'],$dash) ?></strong> to <strong><?= $date($entry['effective_to'],'Open') ?></strong></td>
-          <td><span class="badge text-bg-warning">Missing Period</span><div class="small mt-1">No canonical ARPA appointment covers this period.</div></td>
-          <td>History incomplete from the 2025-01-01 baseline</td>
+          <td><span class="badge text-bg-warning">Uncovered Period</span><div class="small mt-1">No canonical ARPA appointment covers this period.</div></td>
+          <td>Informational uncovered period from the 2025-01-01 reporting baseline</td>
           <td>Resolve any Data Issues first, then add only evidence-backed history.</td>
           <td><?php if($can_add_historical): ?><a class="btn btn-sm btn-warning" href="<?= e(url('hr/arpa-appointments/new?'.http_build_query(['asc_location_id'=>$division['asc_location_id'],'arpa_division_location_id'=>$division['id'],'effective_from'=>$entry['effective_from'],'effective_to'=>$entry['effective_to']]))) ?>">Add Historical Appointment</a><?php else: ?><span class="text-muted">View only</span><?php endif; ?></td>
         </tr>
@@ -77,4 +80,4 @@ $statuses=array_map(static fn($value):string=>$typeLabel((string)$value),(array)
   </table></div>
 </div></div>
 
-<div class="alert alert-secondary mb-0"><strong>Canonical timeline rule:</strong> coverage starts at 01 Jan 2025. Appointment Data Issues must be completed before a normal New Assignment can be submitted. This page is read-only and uses the existing correction workflow.</div>
+<div class="alert alert-secondary mb-0"><strong>Canonical timeline:</strong> uncovered periods are reported from 01 Jan 2025 but are allowed. Appointment Data Issues must still be completed before a normal New Assignment can be submitted. This page is read-only and uses the existing correction workflow.</div>
