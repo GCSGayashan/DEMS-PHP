@@ -48,6 +48,7 @@ final class OfficeController extends Controller
         $stmt->execute([$dad,$type,$name,trim((string)($_POST['name_si']??''))?:null,trim((string)($_POST['name_ta']??''))?:null,trim((string)($_POST['short_name']??''))?:null,$location,trim((string)($_POST['address']??''))?:null,trim((string)($_POST['telephone']??''))?:null,trim((string)($_POST['email']??''))?:null,(string)($_POST['effective_from']??date('Y-m-d')),$actor,$actor]);$pdo->commit();}catch(\Throwable $e){if($pdo->inTransaction())$pdo->rollBack();error_log('Office create failed: '.$e->getMessage());$this->flash('danger','Office could not be created. Please review the selected type and location.');redirect('/offices/create');}
         Audit::record('office.create','OFFICE',null,['dad_number'=>$dad]);
         Audit::record('workflow.submit','OFFICE',null,['dad_number'=>$dad]);
+        $created=$pdo->prepare('SELECT id,linked_location_id FROM office WHERE dad_number=?');$created->execute([$dad]);$createdOffice=$created->fetch();if($createdOffice)(new \App\Services\WorkflowNotificationService($pdo))->actionForPermission('office.approve',$createdOffice['linked_location_id']?:null,'ORGANIZATION','Office Awaiting Approval','A submitted Office is ready for review.','OFFICE',(string)$createdOffice['id'],'APPROVAL','/offices/'.$createdOffice['id'],$actor);
         $this->flash('success','Office submitted: '.$dad); redirect('/offices');
     }
 

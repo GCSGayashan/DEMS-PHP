@@ -345,8 +345,27 @@ final class ArpaAppointmentService
             $auditDetails=['previous'=>$request['workflow_status'],'new'=>$transition['status'],'stage'=>strtoupper($stage)];
             if(in_array(strtoupper($action),['RETURN_FOR_CORRECTION','REJECT'],true))$auditDetails['reason']=$this->nullText($comments);
             $this->audit($actorId,"arpa.{$entity}-workflow.".strtolower($action),strtoupper("ARPA_{$entity}_REQUEST"),$requestId,$auditDetails);
+            $this->notifyWorkflowTransition($entity,$request,$requestId,$transition['status'],strtoupper($action),strtoupper($stage),$comments,$actorId);
             return $transition['status'];
         });
+    }
+
+    private function notifyWorkflowTransition(string $entity,array $request,string $requestId,string $newStatus,string $action,string $stage,?string $comments,string $actorId):void
+    {
+        $type=strtoupper('ARPA_'.$entity.'_REQUEST');$notice=new WorkflowNotificationService($this->pdo);$old=(string)$request['workflow_status'];
+        $notice->completeStage($type,$requestId,$old==='RETURNED'?'CORRECTION':$old,$actorId,'ARPA workflow advanced');
+        if($action==='REJECT'){$notice->resolveAll($type,$requestId,$actorId,'ARPA request rejected','CANCELLED');if(!empty($request['created_by']))$notice->information((string)$request['created_by'],'ARPA_APPOINTMENT','ARPA Request Rejected','Your ARPA request was rejected.',''.$type,$requestId,'/hr/arpa-appointments/requests/'.$entity.'/'.$requestId,$actorId);return;}
+        if($newStatus==='RETURNED'){$notice->resolveAll($type,$requestId,$actorId,'ARPA request returned');if(!empty($request['created_by']))$notice->actionForUser((string)$request['created_by'],'ARPA_APPOINTMENT','ARPA Request Returned for Correction','Correction is required'.($comments?': '.$comments:'.'),$type,$requestId,'CORRECTION','/hr/arpa-appointments/requests/'.$entity.'/'.$requestId.'/edit',$actorId);return;}
+        if($newStatus==='NATIONAL_APPROVED'){$notice->resolveAll($type,$requestId,$actorId,'ARPA request fully approved');if(!empty($request['created_by']))$notice->information((string)$request['created_by'],'ARPA_APPOINTMENT','ARPA Request Approved','Your ARPA request has completed approval.',$type,$requestId,'/hr/arpa-appointments/requests/'.$entity.'/'.$requestId,$actorId);return;}
+        $next=match($newStatus){
+            'SUBMITTED'=>['arpa.appointment.asc-verify',['ASC_SUBJECT_OFFICER'],'ARPA Appointment Awaiting ASC Verification'],
+            'ASC_VERIFIED'=>['arpa.appointment.asc-approve',['ASC_ADMIN'],'ARPA Appointment Awaiting ASC Approval'],
+            'ASC_APPROVED'=>['arpa.appointment.district-verify',['DISTRICT_SUBJECT_OFFICER'],'ARPA Appointment Awaiting District Verification'],
+            'DISTRICT_VERIFIED'=>['arpa.appointment.district-approve',['DISTRICT_ADMIN'],'ARPA Appointment Awaiting District Approval'],
+            'DISTRICT_APPROVED'=>['arpa.appointment.national-verify',['NATIONAL_SUBJECT_OFFICER'],'ARPA Appointment Awaiting National Verification'],
+            'NATIONAL_VERIFIED'=>['arpa.appointment.national-approve',['NATIONAL_ADMIN'],'ARPA Appointment Awaiting Final Approval'],
+            default=>null};
+        if($next!==null){$isEnd=$entity==='division'&&(string)$request['request_type']==='END';if($isEnd&&$newStatus==='ASC_VERIFIED'){$next=['arpa.appointment.asc-approve',['ASC_ADMIN'],'End Appointment Awaiting ASC Approval'];}$notice->actionForPermission($next[0],(string)$request['asc_location_id'],'ARPA_APPOINTMENT',$next[2],'An ARPA workflow item requires action.',$type,$requestId,$newStatus,'/hr/arpa-appointments/requests/'.$entity.'/'.$requestId,$actorId,$next[1]);}
     }
 
     public function saveStageReview(string $entity, string $requestId, string $stage, ?string $information, ?string $remarks, string $actorId): void

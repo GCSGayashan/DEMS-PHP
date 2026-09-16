@@ -60,6 +60,8 @@ foreach($availableContexts as $context){
     $availableContextGroups[$key]['contexts'][]=$context;
 }
 $organizationScope=$user?App\Core\ScopeService::scopeProfile((string)$user['id']):['enterprise'=>false,'level'=>'RESTRICTED'];
+$notificationCount=0;$recentNotifications=[];
+if($user){$notificationService=new App\Services\NotificationService(App\Core\Database::pdo());$notificationCount=$notificationService->pendingCount((string)$user['id']);$recentNotifications=$notificationService->recent((string)$user['id']);}
 function activePath(string $needle,string $path):string{return str_contains($path,$needle)?'active':'';}
 ?>
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -107,6 +109,18 @@ function activePath(string $needle,string $path):string{return str_contains($pat
   </div>
 </div>
 <?php endif; ?>
+<div class="dropdown">
+  <button class="btn btn-link text-white position-relative p-1" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Notifications">
+    <i class="bi bi-bell-fill fs-5"></i><?php if($notificationCount>0): ?><span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"><?= e((string)min(99,$notificationCount)) ?><?= $notificationCount>99?'+':'' ?></span><?php endif; ?>
+  </button>
+  <div class="dropdown-menu dropdown-menu-end p-0" style="width:min(92vw,390px)">
+    <div class="px-3 py-2 border-bottom fw-semibold">Notifications<?php if($notificationCount): ?><span class="badge bg-danger float-end"><?= e((string)$notificationCount) ?> action required</span><?php endif; ?></div>
+    <?php if($recentNotifications===[]): ?><div class="px-3 py-4 text-center text-muted">No actionable or unread notifications.</div><?php else: foreach($recentNotifications as $notice): ?>
+      <a class="dropdown-item py-2 border-bottom text-wrap" href="<?= e(url('notifications/'.$notice['id'].'/open')) ?>"><div class="d-flex justify-content-between gap-2"><strong class="small"><?= e($notice['title']) ?></strong><span class="badge <?= $notice['notification_type']==='ACTION_REQUIRED'?'bg-warning text-dark':'bg-info text-dark' ?>"><?= e(str_replace('_',' ',$notice['notification_type'])) ?></span></div><div class="small text-muted text-truncate"><?= e($notice['message']) ?></div><div class="small text-muted"><?= e(substr((string)$notice['created_at'],0,16)) ?><?php if($notice['priority']!=='NORMAL'): ?> · <?= e($notice['priority']) ?><?php endif; ?></div></a>
+    <?php endforeach; endif; ?>
+    <a class="dropdown-item text-center py-2 fw-semibold" href="<?= e(url('notifications')) ?>">View All Notifications</a>
+  </div>
+</div>
 <span class="d-none d-xl-inline"><i class="bi bi-globe2"></i> English</span><div class="dropdown"><button class="btn btn-link text-white text-decoration-none dropdown-toggle p-0" type="button" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-person-fill"></i> <span class="topbar-user-label"><?= e($user['username']??'User') ?></span></button><ul class="dropdown-menu dropdown-menu-end"><li><a class="dropdown-item" href="<?= e(url('account/change-password')) ?>"><i class="bi bi-key me-2"></i>Change Password</a></li><li><a class="dropdown-item" href="<?= e(url('select-context')) ?>"><i class="bi bi-person-badge me-2"></i>Change Role or Office</a></li><li><hr class="dropdown-divider"></li><li><form method="post" action="<?= e(url('logout')) ?>" class="m-0"><?= Csrf::field() ?><button class="dropdown-item" type="submit"><i class="bi bi-box-arrow-right me-2"></i>Sign out</button></form></li></ul></div></div></header>
 <div class="app-shell"><aside class="sidebar" id="sidebar"><nav class="nav flex-column py-2">
 <a class="nav-link <?= activePath('/dashboard',$path) ?>" href="<?= e(url('dashboard')) ?>"><i class="bi bi-grid-fill"></i> Dashboard</a>
@@ -127,6 +141,7 @@ function activePath(string $needle,string $path):string{return str_contains($pat
 <?php if(Auth::can('office.view')): ?><a class="nav-link <?= activePath('/offices',$path) ?>" href="<?= e(url('offices')) ?>"><i class="bi bi-building"></i> Offices</a><?php endif; ?>
 <div class="nav-section">HUMAN RESOURCE MANAGEMENT</div>
 <?php if(Auth::can('officer.view')): ?><a class="nav-link <?= activePath('/hr/officers',$path) ?>" href="<?= e(url('hr/officers')) ?>"><i class="bi bi-people-fill"></i> Officers</a><?php endif; ?>
+<?php if(Auth::can('officer.office-assignment.approve')): ?><a class="nav-link ps-4 <?= activePath('/hr/officers/office-assignments/pending',$path) ?>" href="<?= e(url('hr/officers/office-assignments/pending')) ?>"><i class="bi bi-building-check"></i> Pending Office Assignments</a><?php endif; ?>
 <?php if(Auth::can('arpa.appointment.view')): ?><a class="nav-link <?= activePath('/hr/arpa-appointments',$path) ?>" href="<?= e(url('hr/arpa-appointments')) ?>"><i class="bi bi-person-workspace"></i> ARPA Officer Assignments</a><?php if(Auth::can('arpa.appointment.create')): ?><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/new')) ?>">New Assignments</a><?php endif; ?><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/submitted')) ?>">Submitted</a><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/approval')) ?>">Review &amp; Approve</a><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/open')) ?>">Current Assignments</a><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/history')) ?>">Assignment History</a><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/timeline')) ?>">Appointment Timeline</a><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/vacant-divisions')) ?>">Vacant ARPA Divisions</a><a class="nav-link ps-4" href="<?= e(url('hr/arpa-appointments/issues')) ?>">Appointment Data Issues</a><?php endif; ?>
 <?php if(Auth::can('arpa.legacy-preview.view')): ?><a class="nav-link ps-4 <?= activePath('/hr/arpa-appointments/legacy-preview',$path) ?>" href="<?= e(url('hr/arpa-appointments/legacy-preview')) ?>"><i class="bi bi-eye"></i> Legacy Appointment Preview</a><?php endif; ?>
 <?php if(Auth::can('arpa.legacy-reconciliation.view')): ?><a class="nav-link ps-4 <?= activePath('/hr/arpa-appointments/legacy-review',$path) ?>" href="<?= e(url('hr/arpa-appointments/legacy-review')) ?>"><i class="bi bi-clipboard-check"></i> Legacy Migration Review</a><?php endif; ?>

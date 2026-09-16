@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-use App\Core\{Database,NumberService,ScopeService};
-use App\Services\{OfficeStructureService,OfficerOfficeAssignmentService};
+use App\Core\{Auth,Database,NumberService,ScopeService};
+use App\Services\{OfficeStructureService,OfficerOfficeAssignmentService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -11,7 +11,7 @@ final class OfficerOfficeAssignmentTest
     private PDO $pdo;private int $assertions=0;
     public function run():int
     {
-        $this->pdo=Database::pdo();$this->testStructure();$this->testAssignments();$this->testSafety();echo "OfficerOfficeAssignmentTest: {$this->assertions} assertions passed.\n";return 0;
+        $this->pdo=Database::pdo();$this->testStructure();$this->testAssignments();$this->testSafety();$_SESSION=[];Auth::forgetRequestCache();echo "OfficerOfficeAssignmentTest: {$this->assertions} assertions passed.\n";return 0;
     }
     private function testStructure():void
     {
@@ -22,18 +22,20 @@ final class OfficerOfficeAssignmentTest
     private function testAssignments():void
     {
         $this->pdo->beginTransaction();try{
-            $actor=(string)$this->pdo->query("SELECT su.id FROM system_user su JOIN user_account_role ur ON ur.user_id=su.id JOIN application_role r ON r.id=ur.role_id WHERE r.role_code='SYSTEM_ADMIN' AND ur.active=1 LIMIT 1")->fetchColumn();
-            $checker=$this->uuid();$this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,account_status,enabled) VALUES(?,'STAFF',?,'ACTIVE',1)")->execute([$checker,'office-checker-test']);$systemRole=(string)$this->pdo->query("SELECT id FROM application_role WHERE role_code='SYSTEM_ADMIN'")->fetchColumn();$this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason) VALUES(UUID(),?,?,CURRENT_DATE(),'APPROVED',1,'Office assignment test checker')")->execute([$checker,$systemRole]);
+            $actorRow=$this->pdo->query("SELECT su.id user_id,ur.id role_assignment_id FROM system_user su JOIN user_account_role ur ON ur.user_id=su.id JOIN application_role r ON r.id=ur.role_id WHERE r.role_code='SYSTEM_ADMIN' AND ur.active=1 LIMIT 1")->fetch();$actor=(string)$actorRow['user_id'];
+            $checker=$this->uuid();$this->pdo->prepare("INSERT INTO system_user(id,identity_type,username,account_status,enabled) VALUES(?,'STAFF',?,'ACTIVE',1)")->execute([$checker,'office-checker-test']);$systemRole=(string)$this->pdo->query("SELECT id FROM application_role WHERE role_code='SYSTEM_ADMIN'")->fetchColumn();$checkerRole=$this->uuid();$this->pdo->prepare("INSERT INTO user_account_role(id,user_id,role_id,effective_from,approval_status,active,reason) VALUES(?,?,?,CURRENT_DATE(),'APPROVED',1,'Office assignment test checker')")->execute([$checkerRole,$checker,$systemRole]);
             $officer=(string)$this->pdo->query("SELECT id FROM officer ORDER BY dad_number LIMIT 1")->fetchColumn();$existing=(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id='{$officer}' AND approval_status='APPROVED'")->fetchColumn();$offices=$this->pdo->query("SELECT o.id FROM office o JOIN office_type ot ON ot.id=o.office_type_id WHERE ot.system_key='ASC_OFFICE' ORDER BY o.dad_number LIMIT 2")->fetchAll(PDO::FETCH_COLUMN);$service=new OfficerOfficeAssignmentService($this->pdo);$today=date('Y-m-d');
-            $first=$service->create(['officer_id'=>$officer,'office_id'=>$offices[0],'effective_from'=>$today,'is_primary'=>1,'reason'=>'Test assignment'],$actor);$this->same('SUBMITTED',(string)$this->value("SELECT approval_status FROM officer_office_assignment WHERE id='{$first}'"),'new Office assignment is submitted directly');$this->same($actor,(string)$this->value("SELECT submitted_by FROM officer_office_assignment WHERE id='{$first}'"),'direct submission records the submitter');$this->throws(fn()=>$service->approve($first,$actor),'maker cannot approve');$service->approve($first,$checker);
+            $this->useContext($actor,(string)$actorRow['role_assignment_id']);
+            $first=$service->create(['officer_id'=>$officer,'office_id'=>$offices[0],'effective_from'=>$today,'is_primary'=>1,'reason'=>'Test assignment'],$actor);$this->same('SUBMITTED',(string)$this->value("SELECT approval_status FROM officer_office_assignment WHERE id='{$first}'"),'new Office assignment is submitted directly');$this->same($actor,(string)$this->value("SELECT submitted_by FROM officer_office_assignment WHERE id='{$first}'"),'direct submission records the submitter');$this->throws(fn()=>$service->approve($first,$actor),'maker cannot approve');$this->useContext($checker,$checkerRole);$service->approve($first,$checker);
             $this->same(true,$service->hasCurrentAscOfficeAssignment($officer,(string)$this->value("SELECT linked_location_id FROM office WHERE id='{$offices[0]}'"),$today),'approved ASC assignment is current');
-            $second=$service->create(['officer_id'=>$officer,'office_id'=>$offices[1],'effective_from'=>$today,'reason'=>'Concurrent Office'],$actor);$service->approve($second,$checker);$this->same($existing+2,(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id='{$officer}' AND approval_status='APPROVED'")->fetchColumn(),'one Officer may have multiple Offices');
+            $this->useContext($actor,(string)$actorRow['role_assignment_id']);$second=$service->create(['officer_id'=>$officer,'office_id'=>$offices[1],'effective_from'=>$today,'reason'=>'Concurrent Office'],$actor);$this->useContext($checker,$checkerRole);$service->approve($second,$checker);$this->same($existing+2,(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id='{$officer}' AND approval_status='APPROVED'")->fetchColumn(),'one Officer may have multiple Offices');
             $service->setPrimary($second,$checker);$this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id='{$officer}' AND is_primary=1 AND approval_status='APPROVED'")->fetchColumn(),'only one current primary Office');
             $service->end($first,$today,'Test end',$checker);$this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment WHERE id='{$first}' AND effective_to='{$today}'")->fetchColumn(),'ending retains assignment history');$this->same(true,(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment_audit WHERE assignment_id='{$first}'")->fetchColumn()>=3,'assignment changes have append-only audit');
-            $draft=$this->uuid();$this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,approval_status,reason,created_by) VALUES(?,?,?,?,'DRAFT','Existing draft compatibility',?)")->execute([$draft,$officer,$offices[0],$today,$actor]);$service->submit($draft,$actor);$this->same('SUBMITTED',(string)$this->value("SELECT approval_status FROM officer_office_assignment WHERE id='{$draft}'"),'existing drafts can still be submitted');
+            $draft=$this->uuid();$this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,approval_status,reason,created_by) VALUES(?,?,?,?,'DRAFT','Existing draft compatibility',?)")->execute([$draft,$officer,$offices[0],$today,$actor]);$this->useContext($actor,(string)$actorRow['role_assignment_id']);$service->submit($draft,$actor);$this->same('SUBMITTED',(string)$this->value("SELECT approval_status FROM officer_office_assignment WHERE id='{$draft}'"),'existing drafts can still be submitted');
         }finally{$this->pdo->rollBack();}
     }
     private function testSafety():void{$this->same(5192,(int)$this->pdo->query("SELECT COUNT(*) FROM officer_office_assignment WHERE record_origin='LEGACY_CURRENT_STATE_BACKFILL'")->fetchColumn(),'approved current-state backfill assignments are retained');$this->same(0,(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment WHERE record_origin='NATIVE'")->fetchColumn(),'legacy import creates no native appointments');}
+    private function useContext(string $userId,string $roleAssignmentId):void{$_SESSION=['user_id'=>$userId,'authenticated_at'=>time(),'last_activity_at'=>time()];Auth::forgetRequestCache();(new UserContextService($this->pdo))->select($userId,$roleAssignmentId,null);Auth::forgetRequestCache();}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}private function value(string $sql):mixed{return $this->pdo->query($sql)->fetchColumn();}
     private function same(mixed $e,mixed $a,string $m):void{$this->assertions++;if($e!==$a)throw new RuntimeException("{$m}: expected ".var_export($e,true).', got '.var_export($a,true));}private function throws(callable $fn,string $m):void{$this->assertions++;try{$fn();}catch(Throwable){return;}throw new RuntimeException($m);}
 }

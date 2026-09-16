@@ -1,5 +1,5 @@
 <?php
-use App\Controllers\{AuthController,DashboardController,LocationController,OfficeController,HrMasterController,OfficerController,ArpaAppointmentController,LegacyArpaReconciliationController,LegacyArpaAppointmentPreviewController,SubjectController,UserManagementController,UserContextController,ModuleController,DataTableController};
+use App\Controllers\{AuthController,DashboardController,LocationController,OfficeController,HrMasterController,OfficerController,ArpaAppointmentController,LegacyArpaReconciliationController,LegacyArpaAppointmentPreviewController,SubjectController,UserManagementController,UserContextController,ModuleController,DataTableController,NotificationController};
 use App\Core\Auth;
 
 $router->get('/', [DashboardController::class, 'index']);
@@ -11,6 +11,9 @@ $router->post('/select-context', [UserContextController::class, 'activate']);
 $router->get('/account/change-password', [AuthController::class, 'changePassword']);
 $router->post('/account/change-password', [AuthController::class, 'updatePassword']);
 $router->get('/dashboard', [DashboardController::class, 'index']);
+$router->get('/notifications', [NotificationController::class, 'index']);
+$router->get('/notifications/{id}/open', [NotificationController::class, 'open']);
+$router->post('/notifications/{id}/read', [NotificationController::class, 'markRead']);
 $router->get('/api/datatables/{key}', [DataTableController::class, 'data']);
 $router->get('/exports/{key}', [DataTableController::class, 'export']);
 
@@ -40,6 +43,9 @@ $router->post('/hr/officers/search', [OfficerController::class, 'searchSubmit'])
 $router->get('/api/officers/options', [OfficerController::class, 'options']);
 $router->get('/hr/officers/create', [OfficerController::class, 'create']);
 $router->post('/hr/officers', [OfficerController::class, 'store']);
+$router->get('/hr/officers/office-assignments/pending', [OfficerController::class, 'pendingOfficeAssignments']);
+$router->get('/hr/officers/office-assignments/{assignmentId}/review', [OfficerController::class, 'reviewOfficeAssignment']);
+$router->post('/hr/officers/office-assignments/{assignmentId}/approve', [OfficerController::class, 'approvePendingOfficeAssignment']);
 $router->get('/hr/officers/{id}/edit', [OfficerController::class, 'edit']);
 $router->post('/hr/officers/{id}/edit', [OfficerController::class, 'update']);
 $router->get('/hr/officers/{id}', [OfficerController::class, 'show']);

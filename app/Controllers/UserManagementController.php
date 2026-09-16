@@ -128,7 +128,8 @@ final class UserManagementController extends Controller
     public function submitAccount(string $id): void
     {
         Auth::requirePermission('user.submit'); Csrf::validate();
-        Database::pdo()->prepare("UPDATE `system_user` SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND approval_status='DRAFT'")->execute([Auth::user()['id'],$id]);
+        $pdo=Database::pdo();$actor=(string)Auth::user()['id'];$pdo->prepare("UPDATE `system_user` SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND approval_status='DRAFT'")->execute([$actor,$id]);
+        (new \App\Services\WorkflowNotificationService($pdo))->actionForPermission('user.approve',null,'ACCESS_MANAGEMENT','User Account Awaiting Approval','A submitted user account request is ready for review.','SYSTEM_USER',$id,'APPROVAL','/access-management/account-requests',$actor);
         Audit::record('user.submit','SYSTEM_USER',$id); redirect('/access-management/account-requests');
     }
 
@@ -363,6 +364,8 @@ final class UserManagementController extends Controller
         $stmt->execute([$assignment['user_id'],$_POST['role_assignment_id'],$type,$mode,$location,$from,$to?:null,$actor,$actor]);
         Audit::record('user.scope.create','USER_SCOPE',null,['user_id'=>$assignment['user_id'],'scope_type'=>$type,'location_id'=>$location]);
         Audit::record('user.scope.submit','USER_SCOPE',null,['user_id'=>$assignment['user_id'],'scope_type'=>$type,'location_id'=>$location]);
+        $scopeId=(string)$pdo->lastInsertId();$scopeQuery=$pdo->prepare('SELECT id FROM user_account_scope WHERE user_id=? AND role_assignment_id=? AND created_by=? ORDER BY created_at DESC,id DESC LIMIT 1');$scopeQuery->execute([$assignment['user_id'],$_POST['role_assignment_id'],$actor]);$scopeId=(string)$scopeQuery->fetchColumn();
+        if($scopeId!=='')(new \App\Services\WorkflowNotificationService($pdo))->actionForPermission('user.assign-scope',$location,'ACCESS_MANAGEMENT','User Scope Assignment Awaiting Approval','A submitted user scope assignment is ready for review.','USER_SCOPE',$scopeId,'APPROVAL','/access-management/scope-assignments',$actor,['SYSTEM_ADMIN','USER_ADMIN','NATIONAL_ADMIN','DISTRICT_ADMIN','ASC_ADMIN']);
         $this->flash('success','Assigned location submitted.'); redirect('/access-management/scope-assignments');
     }
 
@@ -370,7 +373,7 @@ final class UserManagementController extends Controller
     {
         Auth::requirePermission('user.assign-scope'); Csrf::validate();
         $this->authorize(fn()=>$this->managementPolicy()->assertCanManageScopeAssignment((string)Auth::user()['id'],$id));
-        Database::pdo()->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND created_by=? AND approval_status='DRAFT'")->execute([Auth::user()['id'],$id,Auth::user()['id']]);
+        $pdo=Database::pdo();$pdo->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND created_by=? AND approval_status='DRAFT'")->execute([Auth::user()['id'],$id,Auth::user()['id']]);$q=$pdo->prepare('SELECT location_id FROM user_account_scope WHERE id=?');$q->execute([$id]);(new \App\Services\WorkflowNotificationService($pdo))->actionForPermission('user.assign-scope',$q->fetchColumn()?:null,'ACCESS_MANAGEMENT','User Scope Assignment Awaiting Approval','A submitted user scope assignment is ready for review.','USER_SCOPE',$id,'APPROVAL','/access-management/scope-assignments',(string)Auth::user()['id'],['SYSTEM_ADMIN','USER_ADMIN','NATIONAL_ADMIN','DISTRICT_ADMIN','ASC_ADMIN']);
         Audit::record('user.scope.submit','USER_SCOPE',$id);redirect('/access-management/scope-assignments');
     }
 
@@ -380,6 +383,7 @@ final class UserManagementController extends Controller
         if(!$row||$row['approval_status']!=='SUBMITTED'){$this->flash('danger','Only submitted assigned locations can be approved.');redirect('/access-management/scope-assignments');}
         if((string)$row['created_by']===(string)Auth::user()['id']){$this->flash('danger','You cannot approve an assigned location you created.');redirect('/access-management/scope-assignments');}
         $pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
+        (new \App\Services\WorkflowNotificationService($pdo))->completeStage('USER_SCOPE',$id,'APPROVAL',(string)Auth::user()['id'],'Scope assignment approved');
         Audit::record('user.scope.approve','USER_SCOPE',$id);$this->flash('success','Assigned location approved.');redirect('/access-management/scope-assignments');
     }
 

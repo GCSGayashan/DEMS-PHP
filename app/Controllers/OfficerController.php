@@ -57,6 +57,29 @@ final class OfficerController extends Controller
         header('Content-Type: application/json; charset=utf-8');echo json_encode(['results'=>$s->fetchAll()],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE);exit;
     }
 
+    public function pendingOfficeAssignments():void
+    {
+        Auth::requirePermission('officer.office-assignment.approve');
+        $dataTable=DataTableRegistry::viewModel('pending-officer-office-assignments');
+        $this->render('officers/office_assignments/pending',compact('dataTable'));
+    }
+
+    public function reviewOfficeAssignment(string $assignmentId):void
+    {
+        Auth::requirePermission('officer.office-assignment.approve');
+        try{$assignment=(new OfficerOfficeAssignmentService(Database::pdo()))->reviewForApproval($assignmentId,(string)Auth::user()['id']);}
+        catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'approval of an Office assignment within the target Office scope']);return;}
+        $this->render('officers/office_assignments/review',compact('assignment'));
+    }
+
+    public function approvePendingOfficeAssignment(string $assignmentId):void
+    {
+        Auth::requirePermission('officer.office-assignment.approve');Csrf::validate();
+        try{(new OfficerOfficeAssignmentService(Database::pdo()))->approve($assignmentId,(string)Auth::user()['id']);$this->flash('success','Office assignment approved.');}
+        catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/hr/officers/office-assignments/pending');
+    }
+
     public function edit(string $id): void
     {
         Auth::requirePermission('officer.edit');
@@ -638,6 +661,7 @@ final class OfficerController extends Controller
             $initialOfficeAssignmentId=(new OfficerOfficeAssignmentService($pdo))->saveInitialForOfficer($officerId,($_POST['initial_office_id']??'')?:null,($_POST['office_effective_from']??'')?:($_POST['effective_from']??date('Y-m-d')),$actor);
             Audit::record('officer.create','OFFICER',$officerId,['dad_number'=>$dad,'working_context'=>$workflowContext,'initial_office_assignment_id'=>$initialOfficeAssignmentId]);
             Audit::record('workflow.submit','OFFICER',$officerId,['from_status'=>'CREATED','to_status'=>'SUBMITTED','working_context'=>$workflowContext]);
+            (new OfficerWorkflowService($pdo))->notifyExistingSubmission($officerId,$actor);
             if($ownTransaction)$pdo->commit();
         }catch(\Throwable $e){
             if($ownTransaction&&$pdo->inTransaction())$pdo->rollBack();

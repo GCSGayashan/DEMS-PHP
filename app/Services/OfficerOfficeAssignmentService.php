@@ -2,7 +2,7 @@
 declare(strict_types=1);
 namespace App\Services;
 
-use App\Core\ScopeService;
+use App\Core\{Auth,ScopeService};
 use DomainException;
 use PDO;
 use Throwable;
@@ -25,18 +25,18 @@ final class OfficerOfficeAssignmentService
             if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$effectiveFrom))throw new DomainException('Select a valid Office Assignment Effective From date.');
             if(!ScopeService::canAccessOffice($actorId,$officeId))throw new DomainException('You cannot select this Office.');
             $this->assertActiveOffice($officeId);
-            $existingId=(string)($existing['id']??'');$dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND active=1 AND approval_status IN('DRAFT','SUBMITTED','APPROVED','RETURNED') AND (effective_to IS NULL OR effective_to>=?)");$dup->execute([$existingId,$officerId,$officeId,$effectiveFrom]);
+            $existingId=(string)($existing['id']??'');$dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND (effective_to IS NULL OR effective_to>=?)");$dup->execute([$existingId,$officerId,$officeId,$effectiveFrom]);
             if((int)$dup->fetchColumn()>0)throw new DomainException('An overlapping Office assignment already exists for this Officer and Office.');
             $primary=$effectiveFrom<=date('Y-m-d')?1:0;
             if($existing){
                 if(!in_array((string)$existing['approval_status'],['DRAFT','RETURNED'],true))throw new DomainException('The submitted initial Office assignment must be returned before it can be changed.');
-                $before=$existing;$this->pdo->prepare('UPDATE officer_office_assignment SET office_id=?,effective_from=?,is_primary=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$officeId,$effectiveFrom,$primary,$actorId,$existing['id']]);
+                $before=$existing;$this->pdo->prepare('UPDATE officer_office_assignment SET office_id=?,effective_from=?,is_primary=?,active=0,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$officeId,$effectiveFrom,$primary,$actorId,$existing['id']]);
                 $this->event((string)$existing['id'],'UPDATED',$before,$this->row((string)$existing['id']),'Initial Office corrected with the returned Officer.',$actorId);return (string)$existing['id'];
             }
             $id=$this->uuid();$status=(string)$officerRow['approval_status'];$submitted=$status==='SUBMITTED';
-            $this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,is_primary,reason,remarks,approval_status,created_by,submitted_by,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,IF(?,NOW(),NULL))")
+            $this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,is_primary,active,reason,remarks,approval_status,created_by,submitted_by,submitted_at) VALUES(?,?,?,?,?,0,?,?,?,?,?,IF(?,NOW(),NULL))")
                 ->execute([$id,$officerId,$officeId,$effectiveFrom,$primary,self::INITIAL_OFFICER_REASON,'Created with the Officer submission.',$status,$actorId,$submitted?$actorId:null,$submitted?1:0]);
-            $this->event($id,$status,null,$this->row($id),self::INITIAL_OFFICER_REASON,$actorId);return $id;
+            $this->event($id,$status,null,$this->row($id),self::INITIAL_OFFICER_REASON,$actorId);if($submitted)$this->notifySubmitted($this->row($id),$actorId);return $id;
         });
     }
 
@@ -50,7 +50,7 @@ final class OfficerOfficeAssignmentService
         $assignment=$this->initialForOfficer($officerId);if(!$assignment)return;
         $this->transaction(function()use($assignment,$reason,$actorId):void{
             $row=$this->locked((string)$assignment['id']);if($row['approval_status']!=='SUBMITTED')throw new DomainException('The initial Office assignment is not awaiting approval.');if($row['created_by']===$actorId||$row['submitted_by']===$actorId)throw new DomainException('Maker-checker policy prevents self-review.');$this->assertScope($row,$actorId);$before=$row;
-            $this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='RETURNED',updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?")->execute([$actorId,$row['id']]);$this->event((string)$row['id'],'RETURNED',$before,$this->row((string)$row['id']),$reason,$actorId);
+            $this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='RETURNED',active=0,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?")->execute([$actorId,$row['id']]);$this->event((string)$row['id'],'RETURNED',$before,$this->row((string)$row['id']),$reason,$actorId);
         });
     }
 
@@ -72,29 +72,42 @@ final class OfficerOfficeAssignmentService
         if(!ScopeService::canAccessOffice($actorId,$office))throw new DomainException('You cannot select this Office.');
         $this->assertEntity('officer',$officer);$this->assertActiveOffice($office);
         return $this->transaction(function()use($data,$actorId,$officer,$office,$from,$reason):string{
-            $dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=? AND office_id=? AND active=1 AND approval_status IN('DRAFT','SUBMITTED','APPROVED') AND effective_from=?");$dup->execute([$officer,$office,$from]);
+            $dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND effective_from=?");$dup->execute([$officer,$office,$from]);
             if((int)$dup->fetchColumn()>0)throw new DomainException('An Office assignment already exists for this Officer, Office and effective date.');
             $id=$this->uuid();$primary=!empty($data['is_primary'])?1:0;
             if($primary===1&&$from>date('Y-m-d'))throw new DomainException('A future Office assignment can be set as Primary when it becomes effective.');
-            $this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,is_primary,reason,official_reference,remarks,approval_status,created_by,submitted_by,submitted_at) VALUES(?,?,?,?,?,?,?,?,'SUBMITTED',?,?,NOW())")
+            $this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,is_primary,active,reason,official_reference,remarks,approval_status,created_by,submitted_by,submitted_at) VALUES(?,?,?,?,?,0,?,?,?,'SUBMITTED',?,?,NOW())")
                 ->execute([$id,$officer,$office,$from,$primary,$reason,$this->null($data['official_reference']??null),$this->null($data['remarks']??null),$actorId,$actorId]);
-            $this->event($id,'SUBMITTED',null,$this->row($id),$reason,$actorId);return $id;
+            $this->event($id,'SUBMITTED',null,$this->row($id),$reason,$actorId);$this->notifySubmitted($this->row($id),$actorId);return $id;
         });
     }
 
     public function submit(string $id,string $actorId):void
     {
-        $this->transaction(function()use($id,$actorId):void{$r=$this->locked($id);if($r['approval_status']!=='DRAFT'&&$r['approval_status']!=='RETURNED')throw new DomainException('Only a draft or returned Office assignment may be submitted.');if($r['created_by']!==$actorId)throw new DomainException('Only the creator may submit this Office assignment.');$this->assertScope($r,$actorId);$before=$r;$this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW(),updated_by=?,version=version+1 WHERE id=?")->execute([$actorId,$actorId,$id]);$this->event($id,'SUBMITTED',$before,$this->row($id),null,$actorId);});
+        $this->transaction(function()use($id,$actorId):void{$r=$this->locked($id);if($r['approval_status']!=='DRAFT'&&$r['approval_status']!=='RETURNED')throw new DomainException('Only a draft or returned Office assignment may be submitted.');if($r['created_by']!==$actorId)throw new DomainException('Only the creator may submit this Office assignment.');$this->assertScope($r,$actorId);$before=$r;$this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='SUBMITTED',active=0,submitted_by=?,submitted_at=NOW(),updated_by=?,version=version+1 WHERE id=?")->execute([$actorId,$actorId,$id]);$this->event($id,'SUBMITTED',$before,$this->row($id),null,$actorId);$this->notifySubmitted($this->row($id),$actorId);});
     }
 
     public function approve(string $id,string $actorId):void
     {
-        $this->transaction(function()use($id,$actorId):void{$r=$this->locked($id);if($r['approval_status']!=='SUBMITTED')throw new DomainException('Only a submitted Office assignment may be approved.');if($r['created_by']===$actorId||$r['submitted_by']===$actorId)throw new DomainException('Maker-checker policy prevents self-approval.');$this->assertScope($r,$actorId);$lock=$this->pdo->prepare('SELECT id FROM officer WHERE id=? FOR UPDATE');$lock->execute([$r['officer_id']]);$lock=$this->pdo->prepare('SELECT id FROM office WHERE id=? FOR UPDATE');$lock->execute([$r['office_id']]);$this->assertNoOverlap($r);$before=$r;
-            if((int)$r['is_primary']===1)$this->clearCurrentPrimary((string)$r['officer_id'],$id,$actorId);
-            $this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='APPROVED',approved_by=?,approved_at=NOW(),updated_by=?,version=version+1 WHERE id=?")->execute([$actorId,$actorId,$id]);
-            if((int)$r['is_primary']===1 && $r['effective_from']<=date('Y-m-d'))$this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$r['office_id'],$actorId,$r['officer_id']]);
+        $this->transaction(function()use($id,$actorId):void{$r=$this->locked($id);if($r['approval_status']!=='SUBMITTED')throw new DomainException('Only a submitted Office assignment may be approved.');$this->assertApprovalPermission($actorId);if($r['created_by']===$actorId||$r['submitted_by']===$actorId)throw new DomainException('Maker-checker policy prevents self-approval.');$this->assertScope($r,$actorId);$lock=$this->pdo->prepare('SELECT id FROM officer WHERE id=? FOR UPDATE');$lock->execute([$r['officer_id']]);$lock=$this->pdo->prepare('SELECT id FROM office WHERE id=? FOR UPDATE');$lock->execute([$r['office_id']]);$this->assertNoOverlap($r);$before=$r;
+            $today=date('Y-m-d');$isCurrent=$r['effective_from']<=$today&&($r['effective_to']===null||$r['effective_to']>=$today);$makePrimary=$isCurrent&&((int)$r['is_primary']===1||!$this->hasCurrentPrimary((string)$r['officer_id'],$id));
+            if($makePrimary)$this->clearCurrentPrimary((string)$r['officer_id'],$id,$actorId);
+            $this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='APPROVED',active=1,is_primary=?,approved_by=?,approved_at=NOW(),updated_by=?,version=version+1 WHERE id=?")->execute([$makePrimary?1:0,$actorId,$actorId,$id]);
+            if($makePrimary)$this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$r['office_id'],$actorId,$r['officer_id']]);
             $this->event($id,'APPROVED',$before,$this->row($id),null,$actorId);
+            $notice=new WorkflowNotificationService($this->pdo);$notice->completeStage('OFFICER_OFFICE_ASSIGNMENT',$id,'APPROVAL',$actorId,'Office assignment approved');if(!empty($r['created_by']))$notice->information((string)$r['created_by'],'OFFICER','Office Assignment Approved','Your Officer Office Assignment has been approved.','OFFICER_OFFICE_ASSIGNMENT',$id,'/hr/officers/'.$r['officer_id'],$actorId);
         });
+    }
+
+    /** Limited review model authorized by the proposed target Office, not by current Officer-directory membership. */
+    public function reviewForApproval(string $id,string $actorId):array
+    {
+        $this->assertApprovalPermission($actorId);
+        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,f.nic,d.name_en designation_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.dad_number location_dad,l.name_en location_name,su.display_name submitted_by_name,su.username submitted_by_username FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id LEFT JOIN designation d ON d.id=f.primary_designation_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id LEFT JOIN system_user su ON su.id=a.submitted_by WHERE a.id=? AND a.approval_status='SUBMITTED'");
+        $s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('The submitted Office assignment was not found.');if($row['created_by']===$actorId||$row['submitted_by']===$actorId)throw new DomainException('Maker-checker policy prevents self-approval.');$this->assertScope($row,$actorId);
+        $allowed=array_column(ScopeService::scopedOffices($actorId),'id');$where=$allowed===[]?'1=0':'a.office_id IN ('.implode(',',array_fill(0,count($allowed),'?')).')';
+        $current=$this->pdo->prepare("SELECT o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name,a.effective_from,a.is_primary FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.officer_id=? AND a.approval_status='APPROVED' AND a.active=1 AND a.effective_from<=CURRENT_DATE() AND (a.effective_to IS NULL OR a.effective_to>=CURRENT_DATE()) AND {$where} ORDER BY a.is_primary DESC,o.name_en");
+        $current->execute(array_merge([(string)$row['officer_id']],$allowed));$row['current_offices']=$current->fetchAll();return $row;
     }
 
     public function end(string $id,string $effectiveTo,string $reason,string $actorId):void
@@ -119,10 +132,20 @@ final class OfficerOfficeAssignmentService
     }
 
     private function assertNoOverlap(array $r):void{$s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=COALESCE(?, '9999-12-31') AND (effective_to IS NULL OR effective_to>=?) FOR UPDATE");$s->execute([$r['id'],$r['officer_id'],$r['office_id'],$r['effective_to'],$r['effective_from']]);if((int)$s->fetchColumn()>0)throw new DomainException('This Officer already has an overlapping approved assignment to the selected Office.');}
+    private function hasCurrentPrimary(string $officerId,string $except):bool{$s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) FOR UPDATE");$s->execute([$officerId,$except]);return (int)$s->fetchColumn()>0;}
     private function lockedInitialForOfficer(string $officerId):?array{$rows=$this->initialRows($officerId,true);if(count($rows)>1)throw new DomainException('The Officer has multiple initial Office assignments and requires review.');return $rows[0]??null;}
     private function initialRows(string $officerId,bool $lock):array{$sql="SELECT a.*,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.officer_id=? AND a.reason=? ORDER BY a.created_at,a.id".($lock?' FOR UPDATE':'');$s=$this->pdo->prepare($sql);$s->execute([$officerId,self::INITIAL_OFFICER_REASON]);return $s->fetchAll();}
     private function clearCurrentPrimary(string $officerId,string $except,string $actorId):void{$s=$this->pdo->prepare("SELECT id FROM officer_office_assignment WHERE officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) FOR UPDATE");$s->execute([$officerId,$except]);foreach($s->fetchAll(PDO::FETCH_COLUMN) as $id){$before=$this->row($id);$this->pdo->prepare('UPDATE officer_office_assignment SET is_primary=0,updated_by=?,version=version+1 WHERE id=?')->execute([$actorId,$id]);$this->event($id,'PRIMARY_REPLACED',$before,$this->row($id),null,$actorId);}}
     private function assertScope(array $r,string $actor):void{if(!ScopeService::canAccessOffice($actor,(string)$r['office_id']))throw new DomainException('You cannot manage this Office assignment.');}
+    private function assertApprovalPermission(string $actor):void
+    {
+        if(!Auth::isCurrentUser($actor)||Auth::activeContextForUser($actor)===null||!Auth::can('officer.office-assignment.approve'))throw new DomainException('You are not authorized to approve Office assignments.');
+    }
+    private function notifySubmitted(array $row,string $actorId):void
+    {
+        $s=$this->pdo->prepare('SELECT linked_location_id FROM office WHERE id=?');$s->execute([$row['office_id']]);$location=$s->fetchColumn()?:null;
+        (new WorkflowNotificationService($this->pdo))->actionForPermission('officer.office-assignment.approve',$location,'OFFICER','Office Assignment Awaiting Approval','An Officer Office Assignment is ready for review.','OFFICER_OFFICE_ASSIGNMENT',(string)$row['id'],'APPROVAL','/hr/officers/office-assignments/'.$row['id'].'/review',$actorId);
+    }
     private function assertActiveOffice(string $id):void{$s=$this->pdo->prepare("SELECT COUNT(*) FROM office WHERE id=? AND approval_status='APPROVED' AND operational_status='ACTIVE'");$s->execute([$id]);if((int)$s->fetchColumn()!==1)throw new DomainException('The selected Office is not approved and active.');}
     private function assertEntity(string $table,string $id):void{$s=$this->pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE id=?");$s->execute([$id]);if((int)$s->fetchColumn()!==1)throw new DomainException('Officer was not found.');}
     private function locked(string $id):array{$s=$this->pdo->prepare('SELECT * FROM officer_office_assignment WHERE id=? FOR UPDATE');$s->execute([$id]);$r=$s->fetch();if(!$r)throw new DomainException('Office assignment was not found.');return $r;}

@@ -31,6 +31,7 @@ final class DataTableRegistry
             'offices' => self::offices(),
             'officers' => self::officers(),
             'officer-workflow' => self::officerWorkflow(),
+            'pending-officer-office-assignments' => self::pendingOfficerOfficeAssignments(),
             'hr-masters' => self::hrMasters($input),
             'users' => self::users(),
             'historical-users' => self::historicalUsers(),
@@ -41,6 +42,7 @@ final class DataTableRegistry
             'scope-assignments' => self::scopeAssignments(),
             'provisioning-failures' => self::provisioningFailures(),
             'security-history' => self::securityHistory(),
+            'notifications' => self::notifications($input),
             'arpa-division-appointments' => self::arpaDivisionAppointments(),
             'arpa-new-appointments' => self::applyArpaAscContext(self::arpaNewAppointments(), $input, 'r.asc_location_id'),
             'arpa-submitted-appointments' => self::applyArpaAscContext(self::arpaSubmittedAppointments(), $input, 'r.asc_location_id'),
@@ -481,6 +483,33 @@ final class DataTableRegistry
                 self::actionColumn(fn($r)=>self::officerWorkflowActions($r)),
             ],
             'defaultOrder'=>[6,'DESC'],'emptyMessage'=>'No Officer records are waiting for review, correction, or an initial Office assignment in your current workflow context.',
+        ];
+    }
+
+    private static function pendingOfficerOfficeAssignments():array
+    {
+        $user=Auth::user();$userId=(string)($user['id']??'');$officeIds=$user===null?[]:array_column(ScopeService::scopedOffices($userId),'id');
+        $baseWhere=["a.approval_status='SUBMITTED'",'(a.created_by IS NULL OR a.created_by<>?)','(a.submitted_by IS NULL OR a.submitted_by<>?)'];$params=[$userId,$userId];
+        if($officeIds===[])$baseWhere[]='1=0';else{$baseWhere[]='a.office_id IN ('.implode(',',array_fill(0,count($officeIds),'?')).')';array_push($params,...$officeIds);}
+        return [
+            'permission'=>'officer.office-assignment.approve','export'=>false,'filename'=>'pending-officer-office-assignments',
+            'from'=>'officer_office_assignment a JOIN officer f ON f.id=a.officer_id JOIN office o ON o.id=a.office_id LEFT JOIN location l ON l.id=o.linked_location_id LEFT JOIN system_user su ON su.id=a.submitted_by',
+            'select'=>['a.id','a.officer_id','f.dad_number officer_dad','f.name_with_initials officer_name','f.nic','o.dad_number office_dad','o.name_en office_name','l.dad_number location_dad','l.name_en location_name','a.effective_from','a.submitted_at','a.approval_status','su.display_name submitted_by_name','su.username submitted_by_username'],
+            'count'=>'a.id','baseWhere'=>$baseWhere,'baseParams'=>$params,
+            'searchable'=>['f.dad_number','f.name_with_initials','f.nic','o.dad_number','o.name_en','l.dad_number','l.name_en','su.display_name','su.username'],
+            'columns'=>[
+                self::col('DAD Officer Number','officer_dad','f.dad_number',fn($r)=>DataTableFormat::text($r['officer_dad'])),
+                self::col('Officer','officer_name','f.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_name'])),
+                self::col('NIC','nic','f.nic',fn($r)=>DataTableFormat::text($r['nic'])),
+                self::col('Target Office','office_name','o.name_en',fn($r)=>DataTableFormat::text(trim($r['office_dad'].' - '.$r['office_name']))),
+                self::col('Linked Location','location_name','l.name_en',fn($r)=>DataTableFormat::text(trim(($r['location_dad']??'').' - '.($r['location_name']??'')),'National')),
+                self::col('Effective From','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+                self::col('Submitted By','submitted_by_name','su.display_name',fn($r)=>DataTableFormat::text($r['submitted_by_name']?:$r['submitted_by_username'])),
+                self::col('Submitted At','submitted_at','a.submitted_at',fn($r)=>DataTableFormat::dateTime($r['submitted_at'])),
+                self::col('Status','approval_status','a.approval_status',fn($r)=>DataTableFormat::badge($r['approval_status'])),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/officers/office-assignments/'.$r['id'].'/review')).'">Review / Approve</a>'),
+            ],
+            'defaultOrder'=>[7,'DESC'],'emptyMessage'=>'No submitted Office assignments are awaiting your approval in the current working context.',
         ];
     }
 
@@ -1707,6 +1736,24 @@ final class DataTableRegistry
             ],
             'defaultOrder' => [0, 'ASC'],
         ];
+    }
+
+    private static function notifications(array $input):array
+    {
+        $user=(string)(Auth::user()['id']??'');$view=(string)($input['view']??'action');
+        $condition=match($view){'unread'=>'n.read_at IS NULL','completed'=>"n.action_status IN('COMPLETED','RESOLVED_BY_OTHER','CANCELLED','EXPIRED')",'all'=>'1=1',default=>"n.notification_type='ACTION_REQUIRED' AND n.action_status='PENDING'"};
+        return ['permission'=>'notification.view','authenticatedOnly'=>true,'export'=>false,'filename'=>'notifications','from'=>'system_notification n','select'=>['n.*'],'count'=>'n.id','baseWhere'=>['n.recipient_user_id=?',$condition],'baseParams'=>[$user],'searchable'=>['n.title','n.message','n.module_code','n.entity_type','n.entity_id','n.workflow_stage'],'filters'=>['type'=>['column'=>'n.notification_type','allowed'=>['ACTION_REQUIRED','INFORMATION','WARNING'],'ui'=>['label'=>'Type','options'=>['ACTION_REQUIRED'=>'Action Required','INFORMATION'=>'Information','WARNING'=>'Warning']]],'priority'=>['column'=>'n.priority','allowed'=>['NORMAL','HIGH','URGENT'],'ui'=>['label'=>'Priority','options'=>['NORMAL'=>'Normal','HIGH'=>'High','URGENT'=>'Urgent']]]],'columns'=>[
+            self::col('Type','notification_type','n.notification_type',fn($r)=>DataTableFormat::badge($r['notification_type'])),
+            self::col('Module','module_code','n.module_code',fn($r)=>DataTableFormat::enumText($r['module_code'])),
+            self::col('Notification','title','n.title',fn($r)=>'<strong>'.e($r['title']).'</strong><div class="small text-muted">'.e($r['message']).'</div>'),
+            self::col('Reference / Entity','entity_id','n.entity_id',fn($r)=>DataTableFormat::text(trim((string)$r['entity_type'].' '.(string)$r['entity_id']))),
+            self::col('Workflow Stage','workflow_stage','n.workflow_stage',fn($r)=>DataTableFormat::enumText($r['workflow_stage'])),
+            self::col('Priority','priority','n.priority',fn($r)=>DataTableFormat::badge($r['priority'])),
+            self::col('Created At','created_at','n.created_at',fn($r)=>DataTableFormat::dateTime($r['created_at'])),
+            self::col('Read Status','read_at','n.read_at',fn($r)=>DataTableFormat::badge($r['read_at']?'READ':'UNREAD')),
+            self::col('Action Status','action_status','n.action_status',fn($r)=>DataTableFormat::badge($r['action_status'])),
+            self::actionColumn(function($r){$out='';if(!empty($r['action_url']))$out.='<a class="btn btn-sm btn-primary me-1" href="'.e(url('notifications/'.$r['id'].'/open')).'">'.e($r['action_label']?:'Open').'</a>';if(empty($r['read_at']))$out.=DataTableFormat::actionForm('notifications/'.$r['id'].'/read','Mark Read','btn-outline-secondary');return $out;})
+        ],'defaultOrder'=>[6,'DESC'],'emptyMessage'=>'No notifications were found in this view.'];
     }
 
     private static function historicalUsers(): array

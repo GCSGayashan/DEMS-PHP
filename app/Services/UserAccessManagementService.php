@@ -995,6 +995,8 @@ final class UserAccessManagementService
             $stmt->execute([$actorId,$assignmentId,$actorId]);
             if($stmt->rowCount()!==1)throw new DomainException('Only the person who created this draft can submit it.');
             $this->pdo->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE role_assignment_id=? AND created_by=? AND approval_status='DRAFT'")->execute([$actorId,$assignmentId,$actorId]);
+            $q=$this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? ORDER BY created_at LIMIT 1');$q->execute([$assignmentId]);$location=$q->fetchColumn()?:null;
+            (new WorkflowNotificationService($this->pdo))->actionForPermission('user.assign-role',$location,'ACCESS_MANAGEMENT','User Role Assignment Awaiting Approval','A submitted user role assignment is ready for review.','USER_ROLE',$assignmentId,'APPROVAL','/access-management/role-assignments',$actorId,['SYSTEM_ADMIN','USER_ADMIN','NATIONAL_ADMIN','DISTRICT_ADMIN','ASC_ADMIN']);
         });
     }
 
@@ -1018,6 +1020,7 @@ final class UserAccessManagementService
                 $this->pdo->prepare("UPDATE user_account_role SET effective_to=CASE WHEN effective_to IS NULL OR effective_to>? THEN ? ELSE effective_to END,active=CASE WHEN ?<CURRENT_DATE() THEN 0 ELSE active END,reason=CONCAT_WS(' | ',NULLIF(reason,''),'Replaced by approved assignment') WHERE id=?")->execute([$end,$end,$end,$oldId]);
             }
             $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at) VALUES(?,'user.role.approve','USER_ROLE',?,?,'INFO',NOW())")->execute([$actorId,$assignmentId,json_encode(['replaces_assignment_id'=>$row['replaces_assignment_id']],JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
+            $notice=new WorkflowNotificationService($this->pdo);$notice->completeStage('USER_ROLE',$assignmentId,'APPROVAL',$actorId,'Role assignment approved');if(!empty($row['created_by']))$notice->information((string)$row['created_by'],'ACCESS_MANAGEMENT','Role Assignment Approved','Your user role assignment has been approved.','USER_ROLE',$assignmentId,'/access-management/role-assignments',$actorId);
         });
     }
 

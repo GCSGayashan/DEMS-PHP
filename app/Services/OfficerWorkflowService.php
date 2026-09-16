@@ -71,6 +71,9 @@ final class OfficerWorkflowService
             $stmt=$this->pdo->prepare("UPDATE officer SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW(),updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?");
             $stmt->execute([$actorId,$actorId,$officerId,$row['version']]);if($stmt->rowCount()!==1)throw new DomainException('The Officer changed while it was being submitted.');
             Audit::record('workflow.submit','OFFICER',$officerId,['from_status'=>'DRAFT','to_status'=>'SUBMITTED','working_context'=>$this->auditContext($context)]);
+            $notice=new WorkflowNotificationService($this->pdo);$notice->completeStage('OFFICER',$officerId,'CORRECTION',$actorId,'Officer resubmitted');
+            $target=$row['workflow_scope_location_id']?:null;$roles=$row['workflow_origin_role_code']==='DISTRICT_SUBJECT_OFFICER'?['DISTRICT_ADMIN']:($row['workflow_origin_role_code']==='NATIONAL_SUBJECT_OFFICER'?['NATIONAL_ADMIN']:[]);
+            $notice->actionForPermission('officer.approve',$target,'OFFICER','New Officer Awaiting Approval','A submitted Officer record is ready for review.','OFFICER',$officerId,'APPROVAL','/hr/officers/'.$officerId,$actorId,$roles);
         });
     }
 
@@ -87,6 +90,8 @@ final class OfficerWorkflowService
             $stmt->execute([$actorId,$actorId,$officerId,$row['version']]);if($stmt->rowCount()!==1)throw new DomainException('The Officer changed while it was being approved.');
             (new OfficerOfficeAssignmentService($this->pdo))->approveInitialForOfficer($officerId,$actorId);
             Audit::record('workflow.approve','OFFICER',$officerId,['from_status'=>'SUBMITTED','to_status'=>'APPROVED','working_context'=>$this->auditContext($context)]);
+            $notice=new WorkflowNotificationService($this->pdo);$notice->completeStage('OFFICER',$officerId,'APPROVAL',$actorId,'Officer approved');
+            if(!empty($row['created_by']))$notice->information((string)$row['created_by'],'OFFICER','Officer Request Approved','Your Officer request has been approved.','OFFICER',$officerId,'/hr/officers/'.$officerId,$actorId);
         });
     }
 
@@ -102,6 +107,8 @@ final class OfficerWorkflowService
             $stmt=$this->pdo->prepare("UPDATE officer SET approval_status='DRAFT',returned_by=?,returned_at=NOW(),action_reason=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?");
             $stmt->execute([$actorId,$reason,$actorId,$officerId,$row['version']]);if($stmt->rowCount()!==1)throw new DomainException('The Officer changed while it was being returned.');
             Audit::record('workflow.return','OFFICER',$officerId,['from_status'=>'SUBMITTED','to_status'=>'DRAFT','reason'=>$reason,'working_context'=>$this->auditContext($context)]);
+            $notice=new WorkflowNotificationService($this->pdo);$notice->resolveAll('OFFICER',$officerId,$actorId,'Officer returned for correction');
+            $notice->actionForUser((string)$row['created_by'],'OFFICER','Officer Returned for Correction','Correction is required: '.$reason,'OFFICER',$officerId,'CORRECTION','/hr/officers/'.$officerId.'/edit',$actorId);
         });
     }
 
@@ -129,6 +136,12 @@ final class OfficerWorkflowService
         $checker=$context!==null&&($this->checkerContextMatches($row,$context)||($row['workflow_origin_role_code']===null&&Auth::can('officer.approve')))&&(string)$row['created_by']!==$actorId&&(string)$row['submitted_by']!==$actorId;
         $approvedEdit=$row['approval_status']==='APPROVED'&&$context!==null&&$context['role_code']!=='NATIONAL_SUBJECT_OFFICER'&&ScopeService::canAccessOfficer($actorId,$officerId);
         return ['can_edit'=>Auth::can('officer.edit')&&(($row['approval_status']==='DRAFT'&&$maker)||$approvedEdit),'can_submit'=>$row['approval_status']==='DRAFT'&&$maker&&Auth::can('officer.submit'),'can_approve'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.approve'),'can_return'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.return')];
+    }
+
+    public function notifyExistingSubmission(string $officerId,string $actorId):void
+    {
+        $row=$this->requiredRow($officerId);if((string)$row['approval_status']!=='SUBMITTED')return;$target=$row['workflow_scope_location_id']?:null;$roles=$row['workflow_origin_role_code']==='DISTRICT_SUBJECT_OFFICER'?['DISTRICT_ADMIN']:($row['workflow_origin_role_code']==='NATIONAL_SUBJECT_OFFICER'?['NATIONAL_ADMIN']:[]);
+        (new WorkflowNotificationService($this->pdo))->actionForPermission('officer.approve',$target,'OFFICER','New Officer Awaiting Approval','A submitted Officer record is ready for review.','OFFICER',$officerId,'APPROVAL','/hr/officers/'.$officerId,$actorId,$roles);
     }
 
     private function assertChecker(array $row,array $context):void

@@ -18,6 +18,7 @@ final class WorkflowService
         $stmt=Database::pdo()->prepare("UPDATE {$table} SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND approval_status='DRAFT'");
         $stmt->execute([$user['id'],$id]);
         Audit::record('workflow.submit',strtoupper($table),$id);
+        if($table==='office'&&$stmt->rowCount()===1){$q=Database::pdo()->prepare('SELECT linked_location_id FROM office WHERE id=?');$q->execute([$id]);(new \App\Services\WorkflowNotificationService(Database::pdo()))->actionForPermission('office.approve',$q->fetchColumn()?:null,'ORGANIZATION','Office Awaiting Approval','A submitted Office is ready for review.','OFFICE',$id,'APPROVAL','/offices/'.$id,(string)$user['id']);}
     }
 
     public static function approve(string $table,string $id): void
@@ -30,6 +31,7 @@ final class WorkflowService
         $extra=in_array($table,['office','officer'],true)?", operational_status=CASE WHEN effective_from<=CURRENT_DATE() THEN 'ACTIVE' ELSE 'INACTIVE' END":'';
         $pdo->prepare("UPDATE {$table} SET approval_status='APPROVED',approved_by=?,approved_at=NOW() {$extra} WHERE id=?")->execute([$user['id'],$id]);
         Audit::record('workflow.approve',strtoupper($table),$id);
+        if($table==='office'){$notice=new \App\Services\WorkflowNotificationService($pdo);$notice->completeStage('OFFICE',$id,'APPROVAL',(string)$user['id'],'Office approved');if(!empty($row['created_by']))$notice->information((string)$row['created_by'],'ORGANIZATION','Office Approved','Your Office request has been approved.','OFFICE',$id,'/offices/'.$id,(string)$user['id']);}
     }
 
     public static function returnToDraft(string $table,string $id,string $reason): void

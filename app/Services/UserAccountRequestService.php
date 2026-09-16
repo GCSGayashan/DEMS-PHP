@@ -155,6 +155,7 @@ final class UserAccountRequestService
             $stage='AUDIT';
             $this->recordAudit($actorId, 'user.request', $userId, $audit);
             $this->recordAudit($actorId, 'user.submit', $userId, $audit);
+            (new WorkflowNotificationService($this->pdo))->actionForPermission('user.approve',$validated['location_id']??null,'ACCESS_MANAGEMENT','User Account Awaiting Approval','A submitted user account request is ready for review.','SYSTEM_USER',$userId,'APPROVAL','/access-management/account-requests',$actorId);
             return [
                 'user_id' => $userId,
                 'officer_id' => $officerId,
@@ -202,6 +203,7 @@ final class UserAccountRequestService
                     approved_by=?,approved_at=NOW(),activated_by=?,activated_at=NOW(),updated_at=NOW() WHERE id=?")
                 ->execute([$actorId, $actorId, $userId]);
             $this->recordAudit($actorId, 'user.approve', $userId, ['role_assignment_ids' => $assignmentIds]);
+            $notice=new WorkflowNotificationService($this->pdo);$notice->completeStage('SYSTEM_USER',$userId,'APPROVAL',$actorId,'User account approved');if(!empty($user['requested_by']))$notice->information((string)$user['requested_by'],'ACCESS_MANAGEMENT','User Account Request Approved','Your user account request has been approved.','SYSTEM_USER',$userId,'/access-management/account-requests',$actorId);
         });
     }
 

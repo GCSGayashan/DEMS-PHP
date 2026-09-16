@@ -88,6 +88,7 @@ final class LocationController extends Controller
         $stmt->execute([$dad,$typeId,trim((string)($_POST['official_code']??'')) ?: null,$gnIdentifiers['gn_code'],$gnIdentifiers['gn_code_for_plr'],$name,trim((string)($_POST['name_si']??'')) ?: null,trim((string)($_POST['name_ta']??'')) ?: null,$effective,Auth::user()['id']]);
         Audit::record('location.create','LOCATION',null,['dad_number'=>$dad]);
         Audit::record('workflow.submit','LOCATION',null,['dad_number'=>$dad]);
+        $created=Database::pdo()->prepare('SELECT id FROM location WHERE dad_number=?');$created->execute([$dad]);$locationId=$created->fetchColumn();if($locationId)(new \App\Services\WorkflowNotificationService(Database::pdo()))->actionForPermission('location.approve',(string)$locationId,'ORGANIZATION','Location Awaiting Approval','A submitted Location is ready for review.','LOCATION',(string)$locationId,'APPROVAL','/locations/'.$locationId,(string)Auth::user()['id']);
         $this->flash('success','Location submitted: '.$dad); redirect('/locations');
     }
 
@@ -99,6 +100,7 @@ final class LocationController extends Controller
         $stmt->execute([$actor,$id]);
         if($stmt->rowCount()!==1){$this->flash('danger','Only a draft Location can be submitted.');redirect('/locations');}
         Audit::record('workflow.submit','LOCATION',$id);
+        (new \App\Services\WorkflowNotificationService(Database::pdo()))->actionForPermission('location.approve',$id,'ORGANIZATION','Location Awaiting Approval','A submitted Location is ready for review.','LOCATION',$id,'APPROVAL','/locations/'.$id,$actor);
         $this->flash('success','Location submitted.');redirect('/locations');
     }
 
@@ -112,6 +114,7 @@ final class LocationController extends Controller
         if((string)$row['created_by']===$actor){$this->flash('danger','You cannot approve a Location you created.');redirect('/locations');}
         $pdo->prepare("UPDATE location SET approval_status='APPROVED',operational_status=CASE WHEN effective_from<=CURRENT_DATE() THEN 'ACTIVE' ELSE 'INACTIVE' END,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND approval_status='SUBMITTED'")->execute([$actor,$id]);
         Audit::record('workflow.approve','LOCATION',$id);
+        $notice=new \App\Services\WorkflowNotificationService($pdo);$notice->completeStage('LOCATION',$id,'APPROVAL',$actor,'Location approved');if(!empty($row['created_by']))$notice->information((string)$row['created_by'],'ORGANIZATION','Location Approved','Your Location request has been approved.','LOCATION',$id,'/locations/'.$id,$actor);
         $this->flash('success','Location approved.');redirect('/locations');
     }
 
