@@ -365,9 +365,9 @@ final class ArpaAppointmentDataIssueCorrectionService
         $s->execute([$divisionId,$excludeAppointmentId,$end,$from]);$overlap=$s->fetchColumn();
         if($overlap){if($to===null)throw new DomainException('This assignment cannot be reopened because another assignment already starts on '.$this->displayDate((string)$overlap).'.');throw new DomainException('The corrected appointment period overlaps another canonical assignment for this ARPA Division.');}
         $statuses="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
-        $s=$this->pdo->prepare("SELECT MIN(r.requested_effective_from) FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.workflow_status IN({$statuses}) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=?");
+        $s=$this->pdo->prepare("SELECT MIN(r.requested_effective_from) FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.workflow_status IN({$statuses}) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=?");
         $s->execute([$divisionId,$excludeRequestId,$end,$from]);$reservation=$s->fetchColumn();if($reservation)throw new DomainException('The corrected appointment period overlaps a submitted or scheduled assignment starting on '.$this->displayDate((string)$reservation).'.');
-        $s=$this->pdo->prepare("SELECT r.id FROM arpa_division_appointment_request r WHERE r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1 AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=? LIMIT 1");
+        $s=$this->pdo->prepare("SELECT r.id FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1 AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=? LIMIT 1");
         $s->execute([$divisionId,$excludeRequestId,$end,$from]);if($s->fetchColumn())throw new DomainException('This ARPA Division has another unresolved historical appointment record for the corrected period. Resolve that Appointment Data Issue first.');
     }
     private function assertFollowingContinuity(string $appointmentId,string $divisionId,string $from,?string $to,string $requestId):void
@@ -376,7 +376,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         $sql="SELECT MIN(next_start) FROM (
                 SELECT a.effective_from next_start FROM arpa_division_appointment a WHERE a.arpa_division_location_id=? AND a.id<>? AND a.effective_from>?
                 UNION ALL
-                SELECT r.requested_effective_from FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=? AND r.id<>? AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.workflow_status IN({$statuses}) AND r.requested_effective_from>?
+                SELECT r.requested_effective_from FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.id<>? AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.workflow_status IN({$statuses}) AND r.requested_effective_from>?
               ) n";
         $s=$this->pdo->prepare($sql);$s->execute([$divisionId,$appointmentId,$from,$divisionId,$requestId,$from]);$next=$s->fetchColumn();if(!$next)return;
         if($to===null)throw new DomainException('This assignment cannot be reopened because another assignment already starts on '.$this->displayDate((string)$next).'.');

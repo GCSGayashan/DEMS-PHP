@@ -83,7 +83,7 @@ final class ArpaAppointmentService
     public function updateDivisionRequest(string $id, array $data, string $actorId): void
     {
         $this->transaction(function() use($id,$data,$actorId):void {
-            $stmt=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=? FOR UPDATE');$stmt->execute([$id]);$request=$stmt->fetch();
+            $stmt=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=? AND deleted_at IS NULL FOR UPDATE');$stmt->execute([$id]);$request=$stmt->fetch();
             $this->assertEditableRequest($request,$actorId,true);$before=$this->editableRequestSnapshot($request);
             if($request['request_type']==='APPOINTMENT'){
                 $officerId=trim((string)($data['officer_id']??''));$type=strtoupper(trim((string)($data['appointment_type']??'')));$ascId=trim((string)($data['asc_location_id']??''));$divisionId=trim((string)($data['arpa_division_location_id']??''));$from=trim((string)($data['effective_from']??''));$to=$this->nullText($data['effective_to']??null);$endReason=$this->nullText($data['end_reason_id']??null);
@@ -250,7 +250,7 @@ final class ArpaAppointmentService
         return $this->transaction(function () use ($entity, $id, $data, $actorId): string {
             $table=$entity==='division'?'arpa_division_appointment_request':($entity==='subject'?'arpa_subject_assignment_request':null);
             if($table===null)throw new DomainException('Unsupported workflow entity.');
-            $locked=$this->pdo->prepare("SELECT workflow_status FROM {$table} WHERE id=? FOR UPDATE");$locked->execute([$id]);$status=$locked->fetchColumn();
+            $deleted=$entity==='division'?' AND deleted_at IS NULL':'';$locked=$this->pdo->prepare("SELECT workflow_status FROM {$table} WHERE id=?{$deleted} FOR UPDATE");$locked->execute([$id]);$status=$locked->fetchColumn();
             if($status===false)throw new DomainException('Workflow request was not found.');
             if ($entity === 'division') {
                 $this->updateDivisionRequest($id, $data, $actorId);
@@ -274,7 +274,7 @@ final class ArpaAppointmentService
             throw new DomainException('Comments are required when returning or rejecting a request.');
         }
         return $this->transaction(function () use ($table, $history, $entity, $requestId, $action, $stage, $comments, $actorId): string {
-            $stmt = $this->pdo->prepare("SELECT * FROM {$table} WHERE id=? FOR UPDATE");
+            $deleted=$entity==='division'?' AND deleted_at IS NULL':'';$stmt = $this->pdo->prepare("SELECT * FROM {$table} WHERE id=?{$deleted} FOR UPDATE");
             $stmt->execute([$requestId]);
             $request = $stmt->fetch();
             if (!$request) {
@@ -691,6 +691,7 @@ final class ArpaAppointmentService
     private function assertEditableRequest(mixed $request,string $actorId,bool $allowSubmittedMaker=false):void
     {
         if(!is_array($request))throw new DomainException('Workflow request was not found.');
+        if(array_key_exists('deleted_at',$request)&&$request['deleted_at']!==null)throw new DomainException('This workflow request has been administratively deleted.');
         if($allowSubmittedMaker&&$request['workflow_status']==='SUBMITTED'){
             if((string)$request['created_by']!==$actorId)throw new DomainException('Only the original maker may edit this submitted appointment.');
             return;

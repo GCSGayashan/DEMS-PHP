@@ -43,7 +43,7 @@ final class ArpaOfficerTimelineService
                    AND district_rel.approval_status='APPROVED' AND district_rel.effective_from<=CURRENT_DATE()
                    AND (district_rel.effective_to IS NULL OR district_rel.effective_to>=CURRENT_DATE())
                  LEFT JOIN location district ON district.id=district_rel.parent_location_id
-                 WHERE r.record_origin='NATIVE' AND r.legacy_history_only=0
+                 WHERE r.deleted_at IS NULL AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
                    AND r.requested_effective_from IS NOT NULL
                    AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id))";

@@ -89,7 +89,7 @@ final class ArpaWorkflowQueuePolicy
     {
         $access=$this->requestAccess($userId,'q');
         $sql=$access['with']."SELECT COUNT(*) FROM (
-            SELECT workflow_status,asc_location_id FROM arpa_division_appointment_request WHERE record_origin='NATIVE' AND legacy_history_only=0
+            SELECT workflow_status,asc_location_id FROM arpa_division_appointment_request WHERE deleted_at IS NULL AND record_origin='NATIVE' AND legacy_history_only=0
             UNION ALL
             SELECT workflow_status,asc_location_id FROM arpa_subject_assignment_request WHERE record_origin='NATIVE' AND legacy_history_only=0
         ) q WHERE {$access['where']}";

@@ -182,7 +182,7 @@ final class ArpaDivisionTimelineService
                      r.workflow_status,r.record_origin,r.legacy_history_only,r.legacy_exception,NULL,'RESERVATION'
               FROM arpa_division_appointment_request r
               JOIN officer o ON o.id=r.officer_id
-              WHERE r.arpa_division_location_id=? AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+              WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                 AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
                 AND r.requested_effective_from IS NOT NULL
                 AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)

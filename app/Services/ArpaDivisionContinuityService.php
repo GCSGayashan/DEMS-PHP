@@ -27,7 +27,7 @@ final class ArpaDivisionContinuityService
                   SELECT r.arpa_division_location_id,r.id,r.requested_effective_from,
                          CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'RESERVATION'
                   FROM arpa_division_appointment_request r
-                  WHERE r.record_origin='NATIVE' AND r.legacy_history_only=0
+                  WHERE r.deleted_at IS NULL AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                     AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
                     AND r.requested_effective_from IS NOT NULL
                     AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>='{$baseline}')";
@@ -70,7 +70,7 @@ final class ArpaDivisionContinuityService
               SELECT r.arpa_division_location_id,r.id,r.requested_effective_from,
                      CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'RESERVATION'
               FROM arpa_division_appointment_request r
-              WHERE r.arpa_division_location_id IN({$marks}) AND r.id<>COALESCE(?, '')
+              WHERE r.deleted_at IS NULL AND r.arpa_division_location_id IN({$marks}) AND r.id<>COALESCE(?, '')
                 AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                 AND r.request_type IN('APPOINTMENT','TRANSFER')
                 AND r.workflow_status IN({$statuses})
@@ -181,7 +181,7 @@ final class ArpaDivisionContinuityService
               FROM arpa_division_appointment_request r
               JOIN location l ON l.id=r.arpa_division_location_id
               JOIN officer o ON o.id=r.officer_id
-              WHERE r.record_origin='NATIVE' AND r.legacy_history_only=0
+              WHERE r.deleted_at IS NULL AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                 AND r.request_type IN('APPOINTMENT','TRANSFER')
                 AND r.workflow_status IN('{$statuses}') AND r.requested_effective_from IS NOT NULL
               ORDER BY l.name_en,r.requested_effective_from,r.id";
