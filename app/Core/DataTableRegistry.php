@@ -489,7 +489,7 @@ final class DataTableRegistry
     private static function pendingOfficerOfficeAssignments():array
     {
         $user=Auth::user();$userId=(string)($user['id']??'');$officeIds=$user===null?[]:array_column(ScopeService::scopedOffices($userId),'id');
-        $baseWhere=["a.deleted_at IS NULL","a.approval_status='SUBMITTED'",'(a.created_by IS NULL OR a.created_by<>?)','(a.submitted_by IS NULL OR a.submitted_by<>?)'];$params=[$userId,$userId];
+        $baseWhere=["a.deleted_at IS NULL","a.approval_status='SUBMITTED'","(a.reason IS NULL OR a.reason<>'Initial Office for user account request')",'(a.created_by IS NULL OR a.created_by<>?)','(a.submitted_by IS NULL OR a.submitted_by<>?)'];$params=[$userId,$userId];
         if($officeIds===[])$baseWhere[]='1=0';else{$baseWhere[]='a.office_id IN ('.implode(',',array_fill(0,count($officeIds),'?')).')';array_push($params,...$officeIds);}
         return [
             'permission'=>'officer.office-assignment.approve','export'=>false,'filename'=>'pending-officer-office-assignments',

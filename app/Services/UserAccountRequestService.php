@@ -257,7 +257,7 @@ final class UserAccountRequestService
                 VALUES(?,?,?,?,?,?,?,?,?,'INACTIVE','SUBMITTED',?,NOW(),?,NOW())")
             ->execute([$officerId, $dadNumber, $nic, $nic, $matchKey, $name, $designationId, $officerStatusId, $effectiveFrom, $actorId, $actorId]);
 
-        $reason = 'Initial Office for user account request';
+        $reason = OfficerOfficeAssignmentService::USER_ACCOUNT_REQUEST_INITIAL_REASON;
         $officeAssignmentId = (new OfficerOfficeAssignmentService($this->pdo))->create([
             'officer_id' => $officerId,
             'office_id' => $office['id'],
@@ -298,8 +298,8 @@ final class UserAccountRequestService
             throw new DomainException('The Officer registration linked to this user request is not valid for approval.');
         }
 
-        $assignments = $this->pdo->prepare("SELECT id FROM officer_office_assignment WHERE officer_id=? AND approval_status='SUBMITTED' AND created_by=? AND reason='Initial Office for user account request' ORDER BY created_at,id FOR UPDATE");
-        $assignments->execute([$officerId, $user['requested_by']]);
+        $assignments = $this->pdo->prepare("SELECT id FROM officer_office_assignment WHERE officer_id=? AND approval_status='SUBMITTED' AND created_by=? AND reason=? ORDER BY created_at,id FOR UPDATE");
+        $assignments->execute([$officerId, $user['requested_by'], OfficerOfficeAssignmentService::USER_ACCOUNT_REQUEST_INITIAL_REASON]);
         $officeAssignmentIds = array_map('strval', $assignments->fetchAll(PDO::FETCH_COLUMN));
         if (count($officeAssignmentIds) !== 1) {
             throw new DomainException('The Officer registration does not have one valid initial Office assignment.');
@@ -309,7 +309,7 @@ final class UserAccountRequestService
             && (string)$officerRow['effective_from'] <= date('Y-m-d') ? 'ACTIVE' : 'INACTIVE';
         $this->pdo->prepare("UPDATE officer SET approval_status='APPROVED',operational_status=?,approved_by=?,approved_at=NOW(),updated_by=?,version=version+1 WHERE id=?")
             ->execute([$operationalStatus, $actorId, $actorId, $officerId]);
-        (new OfficerOfficeAssignmentService($this->pdo))->approve($officeAssignmentIds[0], $actorId);
+        (new OfficerOfficeAssignmentService($this->pdo))->approveInitialForUserAccountRequest($officeAssignmentIds[0], (string)$user['id'], $actorId);
         $this->recordAudit($actorId, 'officer.approve', $officerId, [
             'office_assignment_id' => $officeAssignmentIds[0],
             'operational_status' => $operationalStatus,

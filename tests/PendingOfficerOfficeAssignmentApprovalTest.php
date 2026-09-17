@@ -48,6 +48,15 @@ final class PendingOfficerOfficeAssignmentApprovalTest
         $this->same($officeA,$this->value('SELECT primary_office_id FROM officer WHERE id=?',[$officer]),'Officer primary Office pointer is synchronized on approval');
         $this->same(1,(int)$this->value("SELECT COUNT(*) FROM officer_office_assignment_audit WHERE assignment_id=? AND action_key='APPROVED'",[$assignment]),'approval is append-only audited');
 
+        $specialOfficer=$this->officer();$this->useContext($systemMaker);$special=$service->create(['officer_id'=>$specialOfficer,'office_id'=>$officeA,'effective_from'=>$today,'reason'=>OfficerOfficeAssignmentService::USER_ACCOUNT_REQUEST_INITIAL_REASON],$systemMaker['user']);
+        $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$special]),'User Account Request initial assignment remains submitted');
+        $this->same(0,(int)$this->value('SELECT active FROM officer_office_assignment WHERE id=?',[$special]),'User Account Request initial assignment remains inactive');
+        $this->same(0,(int)$this->value("SELECT COUNT(*) FROM system_notification WHERE entity_type='OFFICER_OFFICE_ASSIGNMENT' AND entity_id=?",[$special]),'User Account Request initial assignment creates no standalone approval notification');
+        $this->useContext($ascA);$this->same(0,$this->queue($this->dad($specialOfficer))['recordsFiltered'],'User Account Request initial assignment is excluded from the standalone pending queue');
+        $this->throws(fn()=>$service->reviewForApproval($special,$ascA['user']),'normal standalone review rejects a User Account Request initial assignment');
+        $this->throws(fn()=>$service->approve($special,$ascA['user']),'forged standalone approval rejects a User Account Request initial assignment');
+        $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$special]),'failed standalone approval leaves the special assignment submitted');
+
         $otherOfficer=$this->officer();$this->useContext($systemMaker);$outside=$service->create(['officer_id'=>$otherOfficer,'office_id'=>$officeB,'effective_from'=>$today,'reason'=>'Outside ASC target test'],$systemMaker['user']);
         $this->useContext($ascA);$this->same(0,$this->queue($this->dad($otherOfficer))['recordsFiltered'],'ASC Admin queue excludes another ASC target Office');
         $this->throws(fn()=>$service->reviewForApproval($outside,$ascA['user']),'forged direct review outside target Office scope is rejected');

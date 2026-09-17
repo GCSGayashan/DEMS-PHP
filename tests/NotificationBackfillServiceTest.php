@@ -19,6 +19,7 @@ final class NotificationBackfillServiceTest
 
     private function exercise():void
     {
+        $special=$this->specialUserRequestOfficeAssignment();
         $this->same('arpa.appointment.asc-verify',NotificationBackfillService::arpaActionFor('division','END','SUBMITTED')[0]??null,'END submitted routes to ASC verifier');
         $this->same('arpa.appointment.asc-approve',NotificationBackfillService::arpaActionFor('division','END','ASC_VERIFIED')[0]??null,'END ASC verified routes to ASC approver');
         $this->same(true,NotificationBackfillService::isArpaCorrection('RETURNED'),'END returned is backfillable as a maker correction action');
@@ -31,7 +32,15 @@ final class NotificationBackfillServiceTest
         $before=(int)$this->pdo->query('SELECT COUNT(*) FROM system_notification')->fetchColumn();$report=(new NotificationBackfillService($this->pdo))->run(false);$after=(int)$this->pdo->query('SELECT COUNT(*) FROM system_notification')->fetchColumn();
         $this->same($before,$after,'dry-run writes no notifications');
         $this->same(true,array_key_exists('arpa_end_terminal_skipped',$report),'dry-run reports terminal END rows skipped');
+        (new NotificationBackfillService($this->pdo))->run(true);
+        $this->same(0,$this->notificationCount($special,null),'backfill does not create a standalone notification for a User Account Request initial Office assignment');
         $this->recipientBehavior();
+    }
+
+    private function specialUserRequestOfficeAssignment():string
+    {
+        $id=$this->uuid();$officer=(string)$this->pdo->query('SELECT id FROM officer ORDER BY id LIMIT 1')->fetchColumn();$office=(string)$this->pdo->query("SELECT id FROM office WHERE approval_status='APPROVED' AND operational_status='ACTIVE' ORDER BY id LIMIT 1")->fetchColumn();$actor=(string)$this->pdo->query('SELECT id FROM system_user ORDER BY id LIMIT 1')->fetchColumn();
+        $this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,active,reason,approval_status,created_by,submitted_by,submitted_at) VALUES(?,?,?,CURRENT_DATE(),0,'Initial Office for user account request','SUBMITTED',?,?,NOW())")->execute([$id,$officer,$office,$actor,$actor]);return $id;
     }
 
     private function recipientBehavior():void

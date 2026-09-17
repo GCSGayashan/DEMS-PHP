@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,ScopeService};
-use App\Services\{OperationalUserActivationService,UserAccessManagementService,UserAccountRequestService,UserContextService};
+use App\Services\{OfficerOfficeAssignmentService,OperationalUserActivationService,UserAccessManagementService,UserAccountRequestService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -193,10 +193,13 @@ final class UserAccessManagementTest
         $this->same('SUBMITTED',$officer['approval_status'],'new Officer follows the submitted approval workflow');
         $this->same('INACTIVE',$officer['operational_status'],'new Officer is not operational before approval');
         $this->same(null,$officer['primary_office_id'],'submitted Officer does not gain an approved primary Office early');
-        $officeAssignment=$this->row("SELECT a.id,a.approval_status,a.effective_from,o.linked_location_id,ot.system_key office_type FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id WHERE a.id=?",[$manual['office_assignment_id']]);
+        $officeAssignment=$this->row("SELECT a.id,a.approval_status,a.active,a.reason,a.effective_from,o.linked_location_id,ot.system_key office_type FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id WHERE a.id=?",[$manual['office_assignment_id']]);
         $this->same('ASC_OFFICE',$officeAssignment['office_type'],'ARPA Officer is assigned through the canonical ASC Office model');
         $this->same($ascX,$officeAssignment['linked_location_id'],'ARPA Division resolves to its approved parent ASC Office');
         $this->same('SUBMITTED',$officeAssignment['approval_status'],'initial Office assignment is submitted with the account');
+        $this->same(0,(int)$officeAssignment['active'],'initial Office assignment is not operational before parent request approval');
+        $this->same(OfficerOfficeAssignmentService::USER_ACCOUNT_REQUEST_INITIAL_REASON,$officeAssignment['reason'],'initial Office assignment retains the reserved parent-workflow reason');
+        $this->same(0,$this->count("SELECT COUNT(*) FROM system_notification WHERE entity_type='OFFICER_OFFICE_ASSIGNMENT' AND entity_id=?",[$manual['office_assignment_id']]),'initial Office assignment creates no separate approval notification');
         $this->same($today,$officeAssignment['effective_from'],'Officer Office assignment uses the selected Effective From date');
         $this->same(UserAccountRequestService::SOURCE_MANUAL,$user['identity_source'],'manual account source is preserved');
         $this->same('SUBMITTED',$user['approval_status'],'manual account follows the submitted account workflow');
@@ -291,10 +294,14 @@ final class UserAccessManagementTest
             'role_id'=>$this->roleId('ARPA_OFFICER'),'location_id'=>$arpaX,'effective_from'=>$today,'temporary_password'=>$password,'mfa_method'=>'AUTHENTICATOR_APP',
         ]),'an Officer cannot receive a duplicate user identity');
 
-        $this->useContext($checker,'SYSTEM_ADMIN');$service->approve($checker,$userId);
+        $this->useContext($checker,'SYSTEM_ADMIN');
+        $this->throws(fn()=>(new OfficerOfficeAssignmentService($this->pdo))->approve((string)$manual['office_assignment_id'],$checker),'normal Office Assignment approval cannot bypass the parent User Account Request');
+        $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),'forged standalone approval leaves initial Office assignment submitted');
+        $service->approve($checker,$userId);
         $this->same('ACTIVE',(string)$this->value('SELECT account_status FROM system_user WHERE id=?',[$userId]),'different checker activates the approved manual account');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM officer WHERE id=?',[$officerId]),'combined approval approves the created Officer');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),'combined approval approves the initial Office assignment');
+        $this->same(0,$this->count("SELECT COUNT(*) FROM system_notification WHERE entity_type='OFFICER_OFFICE_ASSIGNMENT' AND entity_id=?",[$manual['office_assignment_id']]),'combined approval creates no separate Office Assignment notification');
         $this->same($this->value('SELECT office_id FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),$this->value('SELECT primary_office_id FROM officer WHERE id=?',[$officerId]),'approved initial Office becomes the Officer primary Office');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM user_account_role WHERE id=?',[$assignmentId]),'account approval approves the initial role transactionally');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM user_account_scope WHERE role_assignment_id=?',[$assignmentId]),'account approval approves the linked initial scope');
