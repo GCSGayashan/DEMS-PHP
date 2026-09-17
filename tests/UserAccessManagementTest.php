@@ -437,7 +437,7 @@ final class UserAccessManagementTest
         $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason) VALUES(?,?,?,'ARPA_DIVISION','EXACT',?,'2026-02-01','APPROVED',1,'Separate scope period')")
             ->execute([$unrelatedScope,$target,$arpaAssignment,$arpaX]);
 
-        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $this->useContext($actors['NATIONAL_SUBJECT_OFFICER'],'NATIONAL_SUBJECT_OFFICER');
         $definition=DataTableRegistry::definition('users');
         $before=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['search'=>['value'=>'effective.date.target']])))->response();
         $this->same(1,$before['recordsFiltered'],'Active Users includes the manageable multi-role target');
@@ -447,7 +447,7 @@ final class UserAccessManagementTest
         $this->same(true,str_contains((string)$before['data'][0]['actions'],$arpaAssignment),'Effective From action targets a specific role assignment');
 
         $auditBefore=$this->count("SELECT COUNT(*) FROM audit_event WHERE action_key='user.role.effective-from.update' AND target_id=?",[$arpaAssignment]);
-        $policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$arpaAssignment,'2025-01-01');
+        $policy->updateRoleEffectiveFrom($actors['NATIONAL_SUBJECT_OFFICER'],$arpaAssignment,'2025-01-01');
         $this->same('2025-01-01',(string)$this->value('SELECT effective_from FROM user_account_role WHERE id=?',[$arpaAssignment]),'higher-level actor edits a lower role start date');
         $this->same(1,$this->count('SELECT COUNT(*) FROM user_account_scope WHERE role_assignment_id=? AND effective_from=?',[$arpaAssignment,'2025-01-01']),'scope sharing the original start date is synchronized');
         $this->same('2026-02-01',(string)$this->value('SELECT effective_from FROM user_account_scope WHERE id=?',[$unrelatedScope]),'unrelated scope period is not modified');
@@ -457,12 +457,13 @@ final class UserAccessManagementTest
         $this->same('2026-01-01',$audit['old_effective_from'],'audit preserves the old Effective From date');
         $this->same('2025-01-01',$audit['new_effective_from'],'audit records the new Effective From date');
 
-        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$arpaAssignment,'2024-12-31'),'date before the HR baseline is rejected');
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['NATIONAL_SUBJECT_OFFICER'],$arpaAssignment,'2024-12-31'),'date before the HR baseline is rejected');
         $endedTarget=$this->createUser('effective.ended.target');$endedAssignment=$this->createAssignment($endedTarget,'ARPA_OFFICER',$arpaX,1,'APPROVED','2026-09-01');
-        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$endedAssignment,'2026-09-02'),'start date after end date is rejected');
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['NATIONAL_SUBJECT_OFFICER'],$endedAssignment,'2026-09-02'),'start date after end date is rejected');
         $peer=$this->createActor('ASC_SUBJECT_OFFICER',$ascX,'effective.peer');
         $peerAssignment=(string)$this->value('SELECT id FROM user_account_role WHERE user_id=?',[$peer]);
-        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$peerAssignment,'2025-01-01'),'same-level actor cannot edit Effective From');
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$peerAssignment,'2025-01-01'),'ASC actor cannot use the direct Effective From privilege');
         $higher=$this->createActor('ASC_ADMIN',$ascX,'effective.higher');
         $higherAssignment=(string)$this->value('SELECT id FROM user_account_role WHERE user_id=?',[$higher]);
         $this->throws(fn()=>$policy->updateRoleEffectiveFrom($actors['ASC_SUBJECT_OFFICER'],$higherAssignment,'2025-01-01'),'lower actor cannot edit a higher role');

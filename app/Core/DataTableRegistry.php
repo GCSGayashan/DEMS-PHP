@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -1687,7 +1687,7 @@ final class DataTableRegistry
         $effectiveScopes="(SELECT GROUP_CONCAT(DISTINCT CONCAT(uas.scope_type,' / ',uas.scope_mode,COALESCE(CONCAT(' / ',sl.dad_number),CONCAT(' / ',so.dad_number),'')) ORDER BY uas.scope_type SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location sl ON sl.id=uas.location_id LEFT JOIN office so ON so.id=uas.office_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE()))";
         $stacked=static function(mixed $value,string $empty='None'):string{$items=array_values(array_filter(explode('|||',trim((string)$value)),static fn(string $item):bool=>$item!==''));return $items===[]?'<span class="text-muted">'.e($empty).'</span>':implode('',array_map(static fn(string $item):string=>'<div class="text-nowrap">'.e($item).'</div>',$items));};
         $editActions=static function(array $row):string{
-            if(!Auth::can('user.assign-role'))return '';
+            if(!AssignmentDirectEditPolicy::allowed('user.assign-role'))return '';
             $links=[];
             foreach(array_filter(explode('|||',(string)($row['effective_role_assignments']??''))) as $entry){
                 [$id,$roleName]=array_pad(explode(':::',$entry,2),2,'');
@@ -2185,29 +2185,31 @@ final class DataTableRegistry
 
     private static function roleAssignmentActions(array $row): string
     {
+        $actions=AssignmentDirectEditPolicy::allowed('user.assign-role')?'<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('access-management/role-assignments/'.$row['id'].'/edit')).'">Edit</a>':'';
         if ($row['approval_status'] === 'DRAFT' && Auth::can('user.assign-role')) {
-            return DataTableFormat::actionForm('access-management/role-assignments/' . $row['id'] . '/submit', 'Submit', 'btn-outline-primary');
+            return $actions.DataTableFormat::actionForm('access-management/role-assignments/' . $row['id'] . '/submit', 'Submit', 'btn-outline-primary');
         }
         if ($row['approval_status'] === 'SUBMITTED' && Auth::can('user.assign-role') && !self::isMaker($row['created_by'])) {
-            return DataTableFormat::actionForm('access-management/role-assignments/' . $row['id'] . '/approve', 'Approve', 'btn-success');
+            return $actions.DataTableFormat::actionForm('access-management/role-assignments/' . $row['id'] . '/approve', 'Approve', 'btn-success');
         }
         if ($row['approval_status'] === 'APPROVED' && (int)$row['active'] === 1) {
-            $actions=Auth::can('user.assign-role')?'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('access-management/role-assignments?replace='.$row['id'])).'">Transfer / Change</a>':'';
+            $actions.=Auth::can('user.assign-role')?'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('access-management/role-assignments?replace='.$row['id'])).'">Transfer / Change</a>':'';
             if(Auth::can('user.revoke-role'))$actions.='<a class="btn btn-sm btn-outline-danger" href="'.e(url('access-management/role-assignments/'.$row['id'].'/end')).'">End</a>';
             return $actions;
         }
-        return '';
+        return $actions;
     }
 
     private static function scopeActions(array $row): string
     {
+        $actions=AssignmentDirectEditPolicy::allowed('user.assign-scope')?'<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('access-management/scope-assignments/'.$row['id'].'/edit')).'">Edit</a>':'';
         if ($row['approval_status'] === 'DRAFT' && Auth::can('user.assign-scope')) {
-            return DataTableFormat::actionForm('access-management/scope-assignments/' . $row['id'] . '/submit', 'Submit', 'btn-outline-primary');
+            return $actions.DataTableFormat::actionForm('access-management/scope-assignments/' . $row['id'] . '/submit', 'Submit', 'btn-outline-primary');
         }
         if ($row['approval_status'] === 'SUBMITTED' && Auth::can('user.assign-scope') && !self::isMaker($row['created_by'])) {
-            return DataTableFormat::actionForm('access-management/scope-assignments/' . $row['id'] . '/approve', 'Approve', 'btn-success');
+            return $actions.DataTableFormat::actionForm('access-management/scope-assignments/' . $row['id'] . '/approve', 'Approve', 'btn-success');
         }
-        return '';
+        return $actions;
     }
 
     private static function isMaker(mixed $createdBy): bool

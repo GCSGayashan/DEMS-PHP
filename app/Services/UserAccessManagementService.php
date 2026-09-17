@@ -862,6 +862,7 @@ final class UserAccessManagementService
 
     public function updateRoleEffectiveFrom(string $actorId, string $assignmentId, string $effectiveFrom): void
     {
+        AssignmentDirectEditPolicy::assert('user.assign-role');
         $this->assertActorPermissions($actorId, ['user.assign-role', 'user.assign-scope']);
         $effectiveFrom = $this->date($effectiveFrom);
         if ($effectiveFrom < self::OPERATIONAL_ACCESS_BASELINE_DATE) {
@@ -983,6 +984,69 @@ final class UserAccessManagementService
             $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at)
                     VALUES(?,'user.role.effective-from.update','USER_ROLE',?,?,'INFO',NOW())")
                 ->execute([$actorId, $assignmentId, json_encode($details, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)]);
+        });
+    }
+
+    /** @return array<string,mixed> */
+    public function directEditRoleRecord(string $actorId,string $assignmentId):array
+    {
+        AssignmentDirectEditPolicy::assert('user.assign-role');
+        $this->assertCanManageRoleAssignment($actorId,$assignmentId);
+        $s=$this->pdo->prepare("SELECT uar.*,su.username,su.display_name,r.role_name,r.role_code,r.role_level,(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id WHERE uas.role_assignment_id=uar.id) assigned_location FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.id=?");
+        $s->execute([$assignmentId]);return $s->fetch()?:throw new DomainException('The selected user role was not found.');
+    }
+
+    public function directEditRoleAssignment(string $actorId,string $assignmentId,array $data):void
+    {
+        $context=AssignmentDirectEditPolicy::assert('user.assign-role');$this->assertCanManageRoleAssignment($actorId,$assignmentId);
+        $from=$this->date((string)($data['effective_from']??''));$to=$this->optional($data['effective_to']??null);if($to!==null)$to=$this->date($to);
+        $reason=trim((string)($data['reason']??''));if($reason==='')throw new DomainException('Reason is required.');
+        if($from<self::OPERATIONAL_ACCESS_BASELINE_DATE)throw new DomainException('The start date cannot be before 01 January 2025.');
+        if($to!==null&&$to<$from)throw new DomainException('The end date cannot be before the start date.');
+
+        $this->transaction(function()use($actorId,$assignmentId,$data,$context,$from,$to,$reason):void{
+            $s=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=? FOR UPDATE');$s->execute([$assignmentId]);$before=$s->fetch();if(!$before)throw new DomainException('The selected user role was not found.');
+            $roleId=trim((string)($data['role_id']??$before['role_id']));if($roleId==='')throw new DomainException('Role is required.');
+            $scopes=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE role_assignment_id=? AND user_id=? FOR UPDATE');$scopes->execute([$assignmentId,$before['user_id']]);$scopeRows=$scopes->fetchAll();
+            foreach($scopeRows as $scope){
+                $validated=$this->validateAccountRequestAssignment($actorId,$roleId,$scope['location_id'],$from);
+                if($validated['scope_type']!==$scope['scope_type']||$validated['scope_mode']!==$scope['scope_mode']||$validated['location_id']!==$scope['location_id'])throw new DomainException('The existing assigned location is not valid for the selected role. Edit the location assignment or select a compatible role.');
+                $scopeFrom=(string)$scope['effective_from']===(string)$before['effective_from']?$from:(string)$scope['effective_from'];
+                $scopeTo=$scope['effective_to']===$before['effective_to']?$to:$scope['effective_to'];
+                if($scopeFrom<$from||($to!==null&&($scopeTo===null||(string)$scopeTo>$to))||($scopeTo!==null&&(string)$scopeTo<$scopeFrom))throw new DomainException("The location dates must be within the role's start and end dates.");
+            }
+            if($scopeRows===[])$this->validateAccountRequestAssignment($actorId,$roleId,null,$from);
+            $overlap=$this->pdo->prepare("SELECT COUNT(DISTINCT other.id) FROM user_account_role other WHERE other.id<>? AND other.user_id=? AND other.role_id=? AND other.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND other.effective_from<=COALESCE(?,'9999-12-31') AND (other.effective_to IS NULL OR other.effective_to>=?) AND ((NOT EXISTS(SELECT 1 FROM user_account_scope own_scope WHERE own_scope.role_assignment_id=?) AND NOT EXISTS(SELECT 1 FROM user_account_scope other_scope WHERE other_scope.role_assignment_id=other.id)) OR EXISTS(SELECT 1 FROM user_account_scope own_scope JOIN user_account_scope other_scope ON other_scope.role_assignment_id=other.id AND other_scope.scope_type=own_scope.scope_type AND other_scope.scope_mode=own_scope.scope_mode AND other_scope.location_id<=>own_scope.location_id WHERE own_scope.role_assignment_id=?)) FOR UPDATE");
+            $overlap->execute([$assignmentId,$before['user_id'],$roleId,$to,$from,$assignmentId,$assignmentId]);if((int)$overlap->fetchColumn()>0)throw new DomainException('The edited dates overlap another assignment for the same role and location.');
+            $this->pdo->prepare('UPDATE user_account_scope SET effective_from=CASE WHEN effective_from=? THEN ? ELSE effective_from END,effective_to=CASE WHEN effective_to<=>? THEN ? ELSE effective_to END WHERE role_assignment_id=? AND user_id=?')->execute([$before['effective_from'],$from,$before['effective_to'],$to,$assignmentId,$before['user_id']]);
+            $this->pdo->prepare('UPDATE user_account_role SET role_id=?,effective_from=?,effective_to=?,reason=?,official_reference=? WHERE id=?')->execute([$roleId,$from,$to,$reason,$this->optional($data['official_reference']??null),$assignmentId]);
+            $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=?');$afterStmt->execute([$assignmentId]);$after=$afterStmt->fetch();
+            $this->directEditAudit($actorId,'user.role.direct-edit','USER_ROLE',$assignmentId,$before,$after,AssignmentDirectEditPolicy::auditContext($context));
+        });
+    }
+
+    /** @return array<string,mixed> */
+    public function directEditScopeRecord(string $actorId,string $scopeId):array
+    {
+        AssignmentDirectEditPolicy::assert('user.assign-scope');
+        $s=$this->pdo->prepare("SELECT uas.*,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to,su.username,su.display_name,r.role_name,r.role_code,r.role_level,l.dad_number location_dad,l.name_en location_name FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id JOIN system_user su ON su.id=uas.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN location l ON l.id=uas.location_id WHERE uas.id=?");
+        $s->execute([$scopeId]);$row=$s->fetch()?:throw new DomainException('The assigned location was not found.');$this->assertCanManageRoleAssignment($actorId,(string)$row['role_assignment_id']);return $row;
+    }
+
+    public function directEditScopeAssignment(string $actorId,string $scopeId,array $data):void
+    {
+        $context=AssignmentDirectEditPolicy::assert('user.assign-scope');$current=$this->directEditScopeRecord($actorId,$scopeId);
+        $from=$this->date((string)($data['effective_from']??''));$to=$this->optional($data['effective_to']??null);if($to!==null)$to=$this->date($to);
+        if($to!==null&&$to<$from)throw new DomainException('The end date cannot be before the start date.');
+        $location=$this->optional($data['location_id']??null);$validated=$this->validateAccountRequestAssignment($actorId,(string)$current['role_id'],$location,$from);
+        $this->transaction(function()use($actorId,$scopeId,$data,$context,$from,$to,$validated):void{
+            $s=$this->pdo->prepare("SELECT uas.*,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id WHERE uas.id=? FOR UPDATE");$s->execute([$scopeId]);$before=$s->fetch();if(!$before)throw new DomainException('The assigned location was not found.');
+            if($from<(string)$before['role_effective_from']||($before['role_effective_to']!==null&&($to===null||$to>(string)$before['role_effective_to'])))throw new DomainException("The location dates must be within the role's start and end dates.");
+            $duplicate=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id WHERE uas.id<>? AND uas.user_id=? AND uar.role_id=? AND uas.scope_type=? AND uas.scope_mode=? AND uas.location_id<=>? AND uas.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND uas.effective_from<=COALESCE(?,'9999-12-31') AND (uas.effective_to IS NULL OR uas.effective_to>=?) FOR UPDATE");
+            $duplicate->execute([$scopeId,$before['user_id'],$before['role_id'],$validated['scope_type'],$validated['scope_mode'],$validated['location_id'],$to,$from]);if((int)$duplicate->fetchColumn()>0)throw new DomainException('This user already has an overlapping assignment for the selected role and location.');
+            $this->pdo->prepare('UPDATE user_account_scope SET scope_type=?,scope_mode=?,location_id=?,effective_from=?,effective_to=?,reason=?,official_reference=? WHERE id=?')->execute([$validated['scope_type'],$validated['scope_mode'],$validated['location_id'],$from,$to,$this->optional($data['reason']??null),$this->optional($data['official_reference']??null),$scopeId]);
+            $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE id=?');$afterStmt->execute([$scopeId]);$after=$afterStmt->fetch();
+            $this->directEditAudit($actorId,'user.scope.direct-edit','USER_SCOPE',$scopeId,$before,$after,AssignmentDirectEditPolicy::auditContext($context));
         });
     }
 
@@ -1203,6 +1267,14 @@ final class UserAccessManagementService
         $stmt = $this->pdo->prepare("SELECT l.id,l.dad_number,l.name_en,lt.system_key location_type FROM location l JOIN location_type lt ON lt.id=l.location_type_id WHERE lt.system_key IN ({$placeholders}) AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?) ORDER BY FIELD(lt.system_key,'DISTRICT','ASC','ARPA_DIVISION'),l.name_en");
         $stmt->execute(array_merge($types,[$date,$date]));
         return $stmt->fetchAll();
+    }
+
+    private function directEditAudit(string $actorId,string $action,string $targetType,string $targetId,array $before,array $after,array $context):void
+    {
+        $changed=[];foreach($after as $field=>$value){if(array_key_exists($field,$before)&&$before[$field]!==$value)$changed[$field]=['before'=>$before[$field],'after'=>$value];}
+        $details=['assignment_id'=>$targetId,'changed_fields'=>$changed,'previous_values'=>$before,'new_values'=>$after,'active_context'=>$context];
+        $this->pdo->prepare('INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at) VALUES(?,?,?,?,?,\'INFO\',NOW())')
+            ->execute([$actorId,$action,$targetType,$targetId,json_encode($details,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
     }
 
     private function date(string $value): string

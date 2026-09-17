@@ -279,10 +279,29 @@ final class UserManagementController extends Controller
         Audit::record('user.role.approve','USER_ROLE',$id); $this->flash('success','User role approved.'); redirect('/access-management/role-assignments');
     }
 
+    public function editRoleAssignment(string $id):void
+    {
+        Auth::requirePermission('user.assign-role');$actor=(string)Auth::user()['id'];
+        try{$assignment=$this->managementPolicy()->directEditRoleRecord($actor,$id);}
+        catch(DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Head Office direct assignment editing']);return;}
+        $roles=$this->managementPolicy()->manageableRoles($actor);$baseline=UserAccessManagementService::OPERATIONAL_ACCESS_BASELINE_DATE;$this->render('users/edit_role_assignment',compact('assignment','roles','baseline'));
+    }
+
+    public function updateRoleAssignment(string $id):void
+    {
+        Auth::requirePermission('user.assign-role');Csrf::validate();$actor=(string)Auth::user()['id'];
+        try{$this->managementPolicy()->directEditRoleRecord($actor,$id);}
+        catch(DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Head Office direct assignment editing']);return;}
+        try{$this->managementPolicy()->directEditRoleAssignment($actor,$id,$_POST);$this->flash('success','Assignment updated successfully.');}
+        catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments/'.$id.'/edit');}
+        redirect('/access-management/role-assignments');
+    }
+
     public function editRoleEffectiveFromForm(string $id):void
     {
         Auth::requirePermission('user.assign-role');
         $policy=$this->managementPolicy();
+        $this->authorize(fn()=>\App\Services\AssignmentDirectEditPolicy::assert('user.assign-role'));
         $this->authorize(fn()=>$policy->assertCanManageRoleAssignment((string)Auth::user()['id'],$id));
         $stmt=Database::pdo()->prepare("SELECT uar.id,uar.effective_from,uar.effective_to,su.username,su.display_name,r.role_name,
                 (SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.name_en,IF(l.dad_number IS NULL,'',CONCAT(' (',l.dad_number,')'))),CONCAT(o.name_en,IF(o.dad_number IS NULL,'',CONCAT(' (',o.dad_number,')'))),'National Level') ORDER BY l.name_en,o.name_en SEPARATOR '; ')
@@ -385,6 +404,24 @@ final class UserManagementController extends Controller
         $pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([Auth::user()['id'],$id]);
         (new \App\Services\WorkflowNotificationService($pdo))->completeStage('USER_SCOPE',$id,'APPROVAL',(string)Auth::user()['id'],'Scope assignment approved');
         Audit::record('user.scope.approve','USER_SCOPE',$id);$this->flash('success','Assigned location approved.');redirect('/access-management/scope-assignments');
+    }
+
+    public function editScopeAssignment(string $id):void
+    {
+        Auth::requirePermission('user.assign-scope');$actor=(string)Auth::user()['id'];$policy=$this->managementPolicy();
+        try{$assignment=$policy->directEditScopeRecord($actor,$id);}
+        catch(DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Head Office direct assignment editing']);return;}
+        $locations=$policy->searchAssignableLocations($actor,(string)$assignment['role_id'],'',5000);$this->render('users/edit_scope_assignment',compact('assignment','locations'));
+    }
+
+    public function updateScopeAssignment(string $id):void
+    {
+        Auth::requirePermission('user.assign-scope');Csrf::validate();$actor=(string)Auth::user()['id'];$policy=$this->managementPolicy();
+        try{$policy->directEditScopeRecord($actor,$id);}
+        catch(DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Head Office direct assignment editing']);return;}
+        try{$policy->directEditScopeAssignment($actor,$id,$_POST);$this->flash('success','Assignment updated successfully.');}
+        catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/access-management/scope-assignments/'.$id.'/edit');}
+        redirect('/access-management/scope-assignments');
     }
 
     public function provisioningFailures(): void

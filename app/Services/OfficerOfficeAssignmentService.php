@@ -121,6 +121,51 @@ final class OfficerOfficeAssignmentService
         $this->transaction(function()use($id,$actorId):void{$r=$this->locked($id);$today=date('Y-m-d');if($r['approval_status']!=='APPROVED'||!(int)$r['active']||$r['effective_from']>$today||($r['effective_to']!==null&&$r['effective_to']<$today))throw new DomainException('Only a current approved Office assignment may be primary.');$this->assertScope($r,$actorId);$before=$r;$this->clearCurrentPrimary((string)$r['officer_id'],$id,$actorId);$this->pdo->prepare('UPDATE officer_office_assignment SET is_primary=1,updated_by=?,version=version+1 WHERE id=?')->execute([$actorId,$id]);$this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$r['office_id'],$actorId,$r['officer_id']]);$this->event($id,'SET_PRIMARY',$before,$this->row($id),null,$actorId);});
     }
 
+    /** @return array<string,mixed> */
+    public function directEditRecord(string $id,string $actorId):array
+    {
+        AssignmentDirectEditPolicy::assert('officer.office-assignment.view');
+        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.id=?");
+        $s->execute([$id]);$row=$s->fetch();
+        if(!$row)throw new DomainException('Office assignment was not found.');
+        $this->assertScope($row,$actorId);
+        return $row;
+    }
+
+    public function directEdit(string $id,array $data,string $actorId):void
+    {
+        $context=AssignmentDirectEditPolicy::assert('officer.office-assignment.view');
+        $office=trim((string)($data['office_id']??''));$from=$this->validDate($data['effective_from']??null,'Effective From');
+        $to=$this->optionalDate($data['effective_to']??null,'Effective To');$reason=trim((string)($data['reason']??''));
+        if($office===''||$reason==='')throw new DomainException('Office, Start Date, and Reason are required.');
+        if($to!==null&&$to<$from)throw new DomainException('Effective To cannot precede Effective From.');
+        if(!ScopeService::canAccessOffice($actorId,$office))throw new DomainException('You cannot select this Office.');
+        $this->assertActiveOffice($office);
+
+        $this->transaction(function()use($id,$data,$actorId,$context,$office,$from,$to,$reason):void{
+            $before=$this->locked($id);$this->assertScope($before,$actorId);
+            $candidate=$before;$candidate['office_id']=$office;$candidate['effective_from']=$from;$candidate['effective_to']=$to;
+            $duplicate=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND effective_from<=COALESCE(?,'9999-12-31') AND (effective_to IS NULL OR effective_to>=?) FOR UPDATE");
+            $duplicate->execute([$id,$before['officer_id'],$office,$to,$from]);
+            if((int)$duplicate->fetchColumn()>0)throw new DomainException('This Officer already has an overlapping assignment to the selected Office.');
+
+            $primary=!empty($data['is_primary'])?1:0;$today=date('Y-m-d');
+            if($primary===1&&($before['approval_status']!=='APPROVED'||!(int)$before['active']||$from>$today||($to!==null&&$to<$today)))throw new DomainException('Only a current approved Office assignment may be primary.');
+            if($primary===1)$this->clearCurrentPrimary((string)$before['officer_id'],$id,$actorId);
+            $this->pdo->prepare('UPDATE officer_office_assignment SET office_id=?,effective_from=?,effective_to=?,is_primary=?,reason=?,official_reference=?,remarks=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')
+                ->execute([$office,$from,$to,$primary,$reason,$this->null($data['official_reference']??null),$this->null($data['remarks']??null),$actorId,$id]);
+            $after=$this->row($id);
+            if($primary===1){
+                $this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$office,$actorId,$before['officer_id']]);
+            }elseif((int)$before['is_primary']===1){
+                $replacement=$this->pdo->prepare("SELECT office_id FROM officer_office_assignment WHERE officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) ORDER BY effective_from DESC,id LIMIT 1");
+                $replacement->execute([$before['officer_id'],$id]);$replacementOffice=$replacement->fetchColumn()?:null;
+                $this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$replacementOffice,$actorId,$before['officer_id']]);
+            }
+            $this->directEditEvent($id,$before,$after,$actorId,$context);
+        });
+    }
+
     public function hasCurrentAscOfficeAssignment(string $officerId,string $ascLocationId,string $date):bool
     {
         $s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' WHERE a.officer_id=? AND o.linked_location_id=? AND a.active=1 AND a.approval_status='APPROVED' AND a.effective_from<=? AND (a.effective_to IS NULL OR a.effective_to>=?) AND o.operational_status='ACTIVE' AND o.approval_status='APPROVED'");$s->execute([$officerId,$ascLocationId,$date,$date]);return (int)$s->fetchColumn()>0;
@@ -151,6 +196,14 @@ final class OfficerOfficeAssignmentService
     private function locked(string $id):array{$s=$this->pdo->prepare('SELECT * FROM officer_office_assignment WHERE id=? FOR UPDATE');$s->execute([$id]);$r=$s->fetch();if(!$r)throw new DomainException('Office assignment was not found.');return $r;}
     private function row(string $id):array{$s=$this->pdo->prepare('SELECT * FROM officer_office_assignment WHERE id=?');$s->execute([$id]);return $s->fetch()?:[];}
     private function event(string $id,string $action,?array $before,array $after,?string $reason,string $actor):void{$this->pdo->prepare('INSERT INTO officer_office_assignment_audit(assignment_id,action_key,previous_state_json,new_state_json,reason,actor_user_id) VALUES(?,?,?,?,?,?)')->execute([$id,$action,$before?json_encode($before,JSON_UNESCAPED_UNICODE):null,json_encode($after,JSON_UNESCAPED_UNICODE),$reason,$actor]);}
+    private function directEditEvent(string $id,array $before,array $after,string $actor,array $context):void
+    {
+        $changed=[];foreach($after as $field=>$value){if(array_key_exists($field,$before)&&$before[$field]!==$value)$changed[$field]=['before'=>$before[$field],'after'=>$value];}
+        $payload=['assignment'=>$after,'changed_fields'=>$changed,'active_context'=>AssignmentDirectEditPolicy::auditContext($context)];
+        $this->pdo->prepare('INSERT INTO officer_office_assignment_audit(assignment_id,action_key,previous_state_json,new_state_json,reason,actor_user_id) VALUES(?,?,?,?,?,?)')->execute([$id,'DIRECT_EDIT',json_encode($before,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR),json_encode($payload,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR),'Head Office direct edit',$actor]);
+    }
+    private function validDate(mixed $value,string $label):string{$value=trim((string)$value);$date=\DateTimeImmutable::createFromFormat('!Y-m-d',$value);if(!$date||$date->format('Y-m-d')!==$value)throw new DomainException($label.' must be a valid date.');return $value;}
+    private function optionalDate(mixed $value,string $label):?string{$value=trim((string)$value);return $value===''?null:$this->validDate($value,$label);}
     private function null(mixed $v):?string{$v=trim((string)$v);return $v===''?null:$v;}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
     private function transaction(callable $fn):mixed{$own=!$this->pdo->inTransaction();if($own)$this->pdo->beginTransaction();try{$r=$fn();if($own)$this->pdo->commit();return $r;}catch(Throwable $e){if($own&&$this->pdo->inTransaction())$this->pdo->rollBack();throw $e;}}

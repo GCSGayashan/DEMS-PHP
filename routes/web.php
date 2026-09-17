@@ -51,6 +51,8 @@ $router->post('/hr/officers/{id}/edit', [OfficerController::class, 'update']);
 $router->get('/hr/officers/{id}', [OfficerController::class, 'show']);
 $router->get('/hr/officers/{id}/offices/assign', [OfficerController::class, 'assignOffice']);
 $router->post('/hr/officers/{id}/offices', [OfficerController::class, 'storeOfficeAssignment']);
+$router->get('/hr/officers/{id}/offices/{assignmentId}/edit', [OfficerController::class, 'editOfficeAssignment']);
+$router->post('/hr/officers/{id}/offices/{assignmentId}/edit', [OfficerController::class, 'updateOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/submit', [OfficerController::class, 'submitOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/approve', [OfficerController::class, 'approveOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/end', [OfficerController::class, 'endOfficeAssignment']);
@@ -161,6 +163,8 @@ $router->get('/access-management/assignment-locations', [UserManagementControlle
 $router->post('/access-management/role-assignments', [UserManagementController::class, 'assignRole']);
 $router->post('/access-management/role-assignments/{id}/submit', [UserManagementController::class, 'submitRoleAssignment']);
 $router->post('/access-management/role-assignments/{id}/approve', [UserManagementController::class, 'approveRoleAssignment']);
+$router->get('/access-management/role-assignments/{id}/edit', [UserManagementController::class, 'editRoleAssignment']);
+$router->post('/access-management/role-assignments/{id}/edit', [UserManagementController::class, 'updateRoleAssignment']);
 $router->get('/access-management/role-assignments/{id}/effective-from/edit', [UserManagementController::class, 'editRoleEffectiveFromForm']);
 $router->post('/access-management/role-assignments/{id}/effective-from', [UserManagementController::class, 'updateRoleEffectiveFrom']);
 $router->get('/access-management/role-assignments/{id}/end', [UserManagementController::class, 'endRoleAssignmentForm']);
@@ -169,6 +173,8 @@ $router->get('/access-management/scope-assignments', [UserManagementController::
 $router->post('/access-management/scope-assignments', [UserManagementController::class, 'assignScope']);
 $router->post('/access-management/scope-assignments/{id}/submit', [UserManagementController::class, 'submitScope']);
 $router->post('/access-management/scope-assignments/{id}/approve', [UserManagementController::class, 'approveScope']);
+$router->get('/access-management/scope-assignments/{id}/edit', [UserManagementController::class, 'editScopeAssignment']);
+$router->post('/access-management/scope-assignments/{id}/edit', [UserManagementController::class, 'updateScopeAssignment']);
 $router->get('/access-management/provisioning-failures', [UserManagementController::class, 'provisioningFailures']);
 $router->get('/access-management/security-history', [UserManagementController::class, 'securityHistory']);
 
