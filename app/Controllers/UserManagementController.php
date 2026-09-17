@@ -424,6 +424,54 @@ final class UserManagementController extends Controller
         redirect('/access-management/scope-assignments');
     }
 
+    public function deleteRoleAssignmentForm(string $id):void
+    {
+        Auth::requireLogin();$actor=(string)Auth::user()['id'];$service=$this->managementPolicy();
+        try{$assignment=$service->deleteRoleRecord($actor,$id);}
+        catch(DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'DEMS operational administrator assignment deletion']);return;}
+        $assignmentType='User Role Assignment';$subjectLabel=trim((string)$assignment['display_name'].' ('.(string)$assignment['username'].')');
+        $assignmentLabel=trim((string)$assignment['role_name'].($assignment['assigned_location']?' - '.(string)$assignment['assigned_location']:''));
+        $postUrl='access-management/role-assignments/'.$id.'/delete';$cancelUrl='access-management/role-assignments';
+        $this->render('assignments/delete_confirm',compact('assignment','assignmentType','subjectLabel','assignmentLabel','postUrl','cancelUrl'));
+    }
+
+    public function deleteRoleAssignment(string $id):void
+    {
+        Auth::requireLogin();Csrf::validate();$actor=(string)Auth::user()['id'];$service=$this->managementPolicy();
+        try{
+            $service->deleteRoleRecord($actor,$id);if((string)($_POST['confirm_delete']??'')!=='1')throw new DomainException('Explicit deletion confirmation is required.');
+            $service->adminDeleteRoleAssignment($actor,$id,(string)($_POST['delete_reason']??''));$this->flash('success','Assignment deleted successfully.');
+        }catch(DomainException $e){
+            if(!\App\Services\AssignmentDeletePolicy::allowed()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'DEMS operational administrator assignment deletion']);return;}
+            $this->flash('danger',$e->getMessage());redirect('/access-management/role-assignments/'.$id.'/delete');
+        }
+        redirect('/access-management/role-assignments');
+    }
+
+    public function deleteScopeAssignmentForm(string $id):void
+    {
+        Auth::requireLogin();$actor=(string)Auth::user()['id'];$service=$this->managementPolicy();
+        try{$assignment=$service->deleteScopeRecord($actor,$id);}
+        catch(DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'DEMS operational administrator assignment deletion']);return;}
+        $assignmentType='User Scope Assignment';$subjectLabel=trim((string)$assignment['display_name'].' ('.(string)$assignment['username'].')');
+        $assignmentLabel=trim((string)$assignment['role_name'].' - '.(string)$assignment['assigned_location']);
+        $postUrl='access-management/scope-assignments/'.$id.'/delete';$cancelUrl='access-management/scope-assignments';
+        $this->render('assignments/delete_confirm',compact('assignment','assignmentType','subjectLabel','assignmentLabel','postUrl','cancelUrl'));
+    }
+
+    public function deleteScopeAssignment(string $id):void
+    {
+        Auth::requireLogin();Csrf::validate();$actor=(string)Auth::user()['id'];$service=$this->managementPolicy();
+        try{
+            $service->deleteScopeRecord($actor,$id);if((string)($_POST['confirm_delete']??'')!=='1')throw new DomainException('Explicit deletion confirmation is required.');
+            $service->adminDeleteScopeAssignment($actor,$id,(string)($_POST['delete_reason']??''));$this->flash('success','Assignment deleted successfully.');
+        }catch(DomainException $e){
+            if(!\App\Services\AssignmentDeletePolicy::allowed()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'DEMS operational administrator assignment deletion']);return;}
+            $this->flash('danger',$e->getMessage());redirect('/access-management/scope-assignments/'.$id.'/delete');
+        }
+        redirect('/access-management/scope-assignments');
+    }
+
     public function provisioningFailures(): void
     {
         Auth::requirePermission('user.retry-provisioning');

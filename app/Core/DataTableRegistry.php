@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -489,7 +489,7 @@ final class DataTableRegistry
     private static function pendingOfficerOfficeAssignments():array
     {
         $user=Auth::user();$userId=(string)($user['id']??'');$officeIds=$user===null?[]:array_column(ScopeService::scopedOffices($userId),'id');
-        $baseWhere=["a.approval_status='SUBMITTED'",'(a.created_by IS NULL OR a.created_by<>?)','(a.submitted_by IS NULL OR a.submitted_by<>?)'];$params=[$userId,$userId];
+        $baseWhere=["a.deleted_at IS NULL","a.approval_status='SUBMITTED'",'(a.created_by IS NULL OR a.created_by<>?)','(a.submitted_by IS NULL OR a.submitted_by<>?)'];$params=[$userId,$userId];
         if($officeIds===[])$baseWhere[]='1=0';else{$baseWhere[]='a.office_id IN ('.implode(',',array_fill(0,count($officeIds),'?')).')';array_push($params,...$officeIds);}
         return [
             'permission'=>'officer.office-assignment.approve','export'=>false,'filename'=>'pending-officer-office-assignments',
@@ -507,7 +507,7 @@ final class DataTableRegistry
                 self::col('Submitted By','submitted_by_name','su.display_name',fn($r)=>DataTableFormat::text($r['submitted_by_name']?:$r['submitted_by_username'])),
                 self::col('Submitted At','submitted_at','a.submitted_at',fn($r)=>DataTableFormat::dateTime($r['submitted_at'])),
                 self::col('Status','approval_status','a.approval_status',fn($r)=>DataTableFormat::badge($r['approval_status'])),
-                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/officers/office-assignments/'.$r['id'].'/review')).'">Review / Approve</a>'),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('hr/officers/office-assignments/'.$r['id'].'/review')).'">Review / Approve</a>'.(AssignmentDeletePolicy::allowed()?'<a class="btn btn-sm btn-outline-danger" href="'.e(url('hr/officers/'.$r['officer_id'].'/offices/'.$r['id'].'/delete')).'">Delete</a>':'')),
             ],
             'defaultOrder'=>[7,'DESC'],'emptyMessage'=>'No submitted Office assignments are awaiting your approval in the current working context.',
         ];
@@ -1680,11 +1680,11 @@ final class DataTableRegistry
         $visibility = $actor
             ? (new UserAccessManagementService(Database::pdo()))->activeUserVisibility((string)$actor['id'])
             : ['with' => '', 'where' => '1=0', 'params' => []];
-        $currentRole="uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED'";
+        $currentRole="uar.deleted_at IS NULL AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED'";
         $effectiveRoles="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$currentRole})";
         $effectiveDates="(SELECT GROUP_CONCAT(DATE_FORMAT(uar.effective_from,'%d %b %Y') ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$currentRole})";
         $effectiveAssignments="(SELECT GROUP_CONCAT(CONCAT(uar.id,':::',REPLACE(r.role_name,'|||',' ')) ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$currentRole})";
-        $effectiveScopes="(SELECT GROUP_CONCAT(DISTINCT CONCAT(uas.scope_type,' / ',uas.scope_mode,COALESCE(CONCAT(' / ',sl.dad_number),CONCAT(' / ',so.dad_number),'')) ORDER BY uas.scope_type SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location sl ON sl.id=uas.location_id LEFT JOIN office so ON so.id=uas.office_id WHERE uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE()))";
+        $effectiveScopes="(SELECT GROUP_CONCAT(DISTINCT CONCAT(uas.scope_type,' / ',uas.scope_mode,COALESCE(CONCAT(' / ',sl.dad_number),CONCAT(' / ',so.dad_number),'')) ORDER BY uas.scope_type SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location sl ON sl.id=uas.location_id LEFT JOIN office so ON so.id=uas.office_id WHERE uar.deleted_at IS NULL AND uas.deleted_at IS NULL AND uar.user_id=su.id AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=CURRENT_DATE() AND (uar.effective_to IS NULL OR uar.effective_to>=CURRENT_DATE()) AND r.active=1 AND r.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=CURRENT_DATE() AND (uas.effective_to IS NULL OR uas.effective_to>=CURRENT_DATE()))";
         $stacked=static function(mixed $value,string $empty='None'):string{$items=array_values(array_filter(explode('|||',trim((string)$value)),static fn(string $item):bool=>$item!==''));return $items===[]?'<span class="text-muted">'.e($empty).'</span>':implode('',array_map(static fn(string $item):string=>'<div class="text-nowrap">'.e($item).'</div>',$items));};
         $editActions=static function(array $row):string{
             if(!AssignmentDirectEditPolicy::allowed('user.assign-role'))return '';
@@ -1762,10 +1762,10 @@ final class DataTableRegistry
         $visibility=$actor
             ?(new UserAccessManagementService(Database::pdo()))->inactiveUserVisibility((string)$actor['id'])
             :['with'=>'','where'=>'1=0','params'=>[]];
-        $latestRole="uar.approval_status='APPROVED' AND r.approval_status='APPROVED' AND NOT EXISTS (SELECT 1 FROM user_account_role newer WHERE newer.user_id=uar.user_id AND newer.approval_status='APPROVED' AND COALESCE(newer.effective_to,'9999-12-31')>COALESCE(uar.effective_to,'9999-12-31'))";
+        $latestRole="uar.deleted_at IS NULL AND uar.approval_status='APPROVED' AND r.approval_status='APPROVED' AND NOT EXISTS (SELECT 1 FROM user_account_role newer WHERE newer.deleted_at IS NULL AND newer.user_id=uar.user_id AND newer.approval_status='APPROVED' AND COALESCE(newer.effective_to,'9999-12-31')>COALESCE(uar.effective_to,'9999-12-31'))";
         $lastRoles="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$latestRole})";
         $lastDates="(SELECT GROUP_CONCAT(DATE_FORMAT(uar.effective_from,'%d %b %Y') ORDER BY r.role_name,uar.effective_from,uar.id SEPARATOR '|||') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND {$latestRole})";
-        $lastScopes="(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.name_en,IF(l.dad_number IS NULL,'',CONCAT(' (',l.dad_number,')'))),'National Level') ORDER BY l.name_en SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location l ON l.id=uas.location_id WHERE uar.user_id=su.id AND {$latestRole} AND uas.approval_status='APPROVED' AND NOT EXISTS (SELECT 1 FROM user_account_scope newer_scope WHERE newer_scope.role_assignment_id=uas.role_assignment_id AND newer_scope.user_id=uas.user_id AND newer_scope.approval_status='APPROVED' AND COALESCE(newer_scope.effective_to,'9999-12-31')>COALESCE(uas.effective_to,'9999-12-31')))";
+        $lastScopes="(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.name_en,IF(l.dad_number IS NULL,'',CONCAT(' (',l.dad_number,')'))),'National Level') ORDER BY l.name_en SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id LEFT JOIN location l ON l.id=uas.location_id WHERE uar.user_id=su.id AND {$latestRole} AND uas.deleted_at IS NULL AND uas.approval_status='APPROVED' AND NOT EXISTS (SELECT 1 FROM user_account_scope newer_scope WHERE newer_scope.deleted_at IS NULL AND newer_scope.role_assignment_id=uas.role_assignment_id AND newer_scope.user_id=uas.user_id AND newer_scope.approval_status='APPROVED' AND COALESCE(newer_scope.effective_to,'9999-12-31')>COALESCE(uas.effective_to,'9999-12-31')))";
         $deactivatedAt="(SELECT MAX(uoae.acted_at) FROM user_operational_access_event uoae WHERE uoae.user_id=su.id AND uoae.event_type='DEACTIVATE')";
         $stacked=static function(mixed $value,string $empty='Not recorded'):string{$items=array_values(array_filter(explode('|||',trim((string)$value)),static fn(string $item):bool=>$item!==''));return $items===[]?'<span class="text-muted">'.e($empty).'</span>':implode('',array_map(static fn(string $item):string=>'<div class="text-nowrap">'.e($item).'</div>',$items));};
         return [
@@ -1804,9 +1804,9 @@ final class DataTableRegistry
         $visibility=$actor
             ?(new UserAccountRequestService(Database::pdo()))->pendingVisibility((string)$actor['id'])
             :['with'=>'','where'=>'1=0','params'=>[]];
-        $initialRole="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=su.id AND uar.approval_status IN('SUBMITTED','APPROVED'))";
-        $initialLocation="(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),'National Level') ORDER BY l.name_en SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id WHERE uas.user_id=su.id AND uas.approval_status IN('SUBMITTED','APPROVED'))";
-        $initialDate="(SELECT MIN(uar.effective_from) FROM user_account_role uar WHERE uar.user_id=su.id AND uar.approval_status IN('SUBMITTED','APPROVED'))";
+        $initialRole="(SELECT GROUP_CONCAT(r.role_name ORDER BY r.role_name SEPARATOR '; ') FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.deleted_at IS NULL AND uar.user_id=su.id AND uar.approval_status IN('SUBMITTED','APPROVED'))";
+        $initialLocation="(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),'National Level') ORDER BY l.name_en SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id WHERE uas.deleted_at IS NULL AND uas.user_id=su.id AND uas.approval_status IN('SUBMITTED','APPROVED'))";
+        $initialDate="(SELECT MIN(uar.effective_from) FROM user_account_role uar WHERE uar.deleted_at IS NULL AND uar.user_id=su.id AND uar.approval_status IN('SUBMITTED','APPROVED'))";
         $source="CASE WHEN su.identity_source='MANUAL_NO_OFFICER' THEN 'User Not Yet Registered as Officer' ELSE 'Existing Approved Officer' END";
         return [
             'permission' => 'user.view', 'export' => true, 'filename' => 'account-requests',
@@ -1900,9 +1900,9 @@ final class DataTableRegistry
         $visibility=$ids!==[]?'uar.id IN ('.implode(',',array_fill(0,count($ids),'?')).')':'1=0';
         return [
             'permission' => 'user.assign-role', 'export' => true, 'filename' => 'role-assignments',
-            'from' => "user_account_role uar JOIN `system_user` su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN (SELECT uas.role_assignment_id,GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') assigned_locations FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id GROUP BY uas.role_assignment_id) sx ON sx.role_assignment_id=uar.id",
+            'from' => "user_account_role uar JOIN `system_user` su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN (SELECT uas.role_assignment_id,GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') assigned_locations FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id WHERE uas.deleted_at IS NULL GROUP BY uas.role_assignment_id) sx ON sx.role_assignment_id=uar.id",
             'select' => ['uar.id', 'uar.user_id', 'uar.role_id', 'su.username','su.display_name', 'r.role_name', 'r.role_code','r.role_level','sx.assigned_locations', 'uar.effective_from', 'uar.effective_to', 'uar.approval_status', 'uar.active', 'uar.created_by', 'uar.created_at'],
-            'count' => 'uar.id','baseWhere'=>[$visibility],'baseParams'=>$ids,
+            'count' => 'uar.id','baseWhere'=>['uar.deleted_at IS NULL',$visibility],'baseParams'=>$ids,
             'searchable' => ['su.username','su.display_name', 'r.role_name', 'r.role_code','sx.assigned_locations', 'uar.approval_status'],
             'filters' => [
                 'role' => ['column' => 'uar.role_id', 'pattern' => self::uuidPattern(), 'ui' => ['label' => 'Role']],
@@ -1933,7 +1933,7 @@ final class DataTableRegistry
             'permission' => 'user.assign-scope', 'export' => true, 'filename' => 'scope-assignments',
             'from' => 'user_account_scope uas JOIN `system_user` su ON su.id=uas.user_id LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN user_account_role uar ON uar.id=uas.role_assignment_id LEFT JOIN application_role r ON r.id=uar.role_id',
             'select' => ['uas.id', 'uas.user_id', 'su.username', 'r.role_name', 'uas.scope_type', 'uas.scope_mode', 'l.id AS location_id', 'l.dad_number AS location_number', 'l.name_en AS location_name', 'uas.effective_from', 'uas.effective_to', 'uas.approval_status', 'uas.active', 'uas.created_by', 'uas.created_at'],
-            'count' => 'uas.id','baseWhere'=>[$visibility],'baseParams'=>$ids,
+            'count' => 'uas.id','baseWhere'=>['uas.deleted_at IS NULL','uar.deleted_at IS NULL',$visibility],'baseParams'=>$ids,
             'searchable' => ['su.username', 'r.role_name', 'uas.scope_type', 'uas.scope_mode', 'l.dad_number', 'l.name_en'],
             'filters' => [
                 'scope_type' => ['column' => 'uas.scope_type', 'pattern' => '/^[A-Z0-9_]{1,50}$/', 'ui' => ['label' => 'Location Type']],
@@ -2186,6 +2186,7 @@ final class DataTableRegistry
     private static function roleAssignmentActions(array $row): string
     {
         $actions=AssignmentDirectEditPolicy::allowed('user.assign-role')?'<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('access-management/role-assignments/'.$row['id'].'/edit')).'">Edit</a>':'';
+        if(AssignmentDeletePolicy::allowed())$actions.='<a class="btn btn-sm btn-outline-danger me-1" href="'.e(url('access-management/role-assignments/'.$row['id'].'/delete')).'">Delete</a>';
         if ($row['approval_status'] === 'DRAFT' && Auth::can('user.assign-role')) {
             return $actions.DataTableFormat::actionForm('access-management/role-assignments/' . $row['id'] . '/submit', 'Submit', 'btn-outline-primary');
         }
@@ -2203,6 +2204,7 @@ final class DataTableRegistry
     private static function scopeActions(array $row): string
     {
         $actions=AssignmentDirectEditPolicy::allowed('user.assign-scope')?'<a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('access-management/scope-assignments/'.$row['id'].'/edit')).'">Edit</a>':'';
+        if(AssignmentDeletePolicy::allowed())$actions.='<a class="btn btn-sm btn-outline-danger me-1" href="'.e(url('access-management/scope-assignments/'.$row['id'].'/delete')).'">Delete</a>';
         if ($row['approval_status'] === 'DRAFT' && Auth::can('user.assign-scope')) {
             return $actions.DataTableFormat::actionForm('access-management/scope-assignments/' . $row['id'] . '/submit', 'Submit', 'btn-outline-primary');
         }

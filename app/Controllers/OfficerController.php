@@ -707,6 +707,29 @@ final class OfficerController extends Controller
         catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id.'/offices/'.$assignmentId.'/edit');}
         redirect('/hr/officers/'.$id);
     }
+    public function deleteOfficeAssignmentForm(string $id,string $assignmentId):void
+    {
+        Auth::requireLogin();$actor=(string)Auth::user()['id'];$service=new OfficerOfficeAssignmentService(Database::pdo());
+        try{$assignment=$service->deleteRecord($assignmentId,$actor);if((string)$assignment['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');}
+        catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'DEMS operational administrator assignment deletion']);return;}
+        $assignmentType='Officer Office Assignment';$subjectLabel=trim((string)$assignment['officer_dad'].' - '.(string)$assignment['officer_name']);
+        $assignmentLabel=trim((string)$assignment['office_dad'].' - '.(string)$assignment['office_name']);
+        $postUrl='hr/officers/'.$id.'/offices/'.$assignmentId.'/delete';$cancelUrl='hr/officers/'.$id;
+        $this->render('assignments/delete_confirm',compact('assignment','assignmentType','subjectLabel','assignmentLabel','postUrl','cancelUrl'));
+    }
+    public function deleteOfficeAssignment(string $id,string $assignmentId):void
+    {
+        Auth::requireLogin();Csrf::validate();$actor=(string)Auth::user()['id'];$service=new OfficerOfficeAssignmentService(Database::pdo());
+        try{
+            $assignment=$service->deleteRecord($assignmentId,$actor);if((string)$assignment['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');
+            if((string)($_POST['confirm_delete']??'')!=='1')throw new \DomainException('Explicit deletion confirmation is required.');
+            $service->adminDelete($assignmentId,(string)($_POST['delete_reason']??''),$actor);$this->flash('success','Assignment deleted successfully.');
+        }catch(\DomainException $e){
+            if(!\App\Services\AssignmentDeletePolicy::allowed()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'DEMS operational administrator assignment deletion']);return;}
+            $this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id.'/offices/'.$assignmentId.'/delete');
+        }
+        redirect('/hr/officers/'.$id);
+    }
     public function submitOfficeAssignment(string $id,string $assignmentId):void{Auth::requirePermission('officer.office-assignment.submit');Csrf::validate();$this->assignmentAction(fn($s,$u)=>$s->submit($assignmentId,$u),$id,'Office assignment submitted.');}
     public function approveOfficeAssignment(string $id,string $assignmentId):void{Auth::requirePermission('officer.office-assignment.approve');Csrf::validate();$this->assignmentAction(fn($s,$u)=>$s->approve($assignmentId,$u),$id,'Office assignment approved.');}
     public function endOfficeAssignment(string $id,string $assignmentId):void{Auth::requirePermission('officer.office-assignment.end');Csrf::validate();$this->assignmentAction(fn($s,$u)=>$s->end($assignmentId,(string)($_POST['effective_to']??''),(string)($_POST['reason']??''),$u),$id,'Office assignment ended.');}

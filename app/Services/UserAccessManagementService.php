@@ -48,9 +48,10 @@ final class UserAccessManagementService
                 JOIN application_role r ON r.id=uar.role_id
                 LEFT JOIN user_account_scope uas
                   ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id
+                 AND uas.deleted_at IS NULL
                  AND uas.active=1 AND uas.approval_status='APPROVED'
                  AND uas.effective_from<=? AND (uas.effective_to IS NULL OR uas.effective_to>=?)
-                WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED'
+                WHERE uar.deleted_at IS NULL AND uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED'
                   AND uar.effective_from<=? AND (uar.effective_to IS NULL OR uar.effective_to>=?)
                   AND r.active=1 AND r.approval_status='APPROVED'");
         $stmt->execute([$date,$date,$actorId,$date,$date]);
@@ -149,7 +150,7 @@ final class UserAccessManagementService
                 JOIN application_role r ON r.id=uar.role_id
                 JOIN application_role_permission rp ON rp.role_id=r.id
                 JOIN application_permission p ON p.id=rp.permission_id
-                WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED'
+                WHERE uar.deleted_at IS NULL AND uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED'
                   AND uar.effective_from<=? AND (uar.effective_to IS NULL OR uar.effective_to>=?)
                   AND r.active=1 AND r.approval_status='APPROVED' AND p.active=1
                   {$assignmentClause}
@@ -238,7 +239,7 @@ final class UserAccessManagementService
     {
         $date ??= date('Y-m-d');
         $authority = $this->authority($actorId, $date);
-        $effectiveRole = "uar.active=1 AND uar.approval_status='APPROVED'
+        $effectiveRole = "uar.deleted_at IS NULL AND uar.active=1 AND uar.approval_status='APPROVED'
             AND uar.effective_from<=(SELECT as_of_date FROM user_visibility_date)
             AND (uar.effective_to IS NULL OR uar.effective_to>=(SELECT as_of_date FROM user_visibility_date))
             AND r.active=1 AND r.approval_status='APPROVED'";
@@ -302,7 +303,7 @@ final class UserAccessManagementService
             array_push($params, ...$roots);
         }
 
-        $scopeEffective = "uas.active=1 AND uas.approval_status='APPROVED'
+        $scopeEffective = "uas.deleted_at IS NULL AND uas.active=1 AND uas.approval_status='APPROVED'
             AND uas.effective_from<=(SELECT as_of_date FROM user_visibility_date)
             AND (uas.effective_to IS NULL OR uas.effective_to>=(SELECT as_of_date FROM user_visibility_date))";
         $locationBoundary = $restrictLocations
@@ -369,10 +370,10 @@ final class UserAccessManagementService
     {
         $date ??= date('Y-m-d');
         $authority = $this->authority($actorId, $date);
-        $latestRole = "uar.approval_status='APPROVED' AND r.approval_status='APPROVED'
+        $latestRole = "uar.deleted_at IS NULL AND uar.approval_status='APPROVED' AND r.approval_status='APPROVED'
             AND NOT EXISTS (
                 SELECT 1 FROM user_account_role newer
-                WHERE newer.user_id=uar.user_id AND newer.approval_status='APPROVED'
+                WHERE newer.deleted_at IS NULL AND newer.user_id=uar.user_id AND newer.approval_status='APPROVED'
                   AND COALESCE(newer.effective_to,'9999-12-31')>COALESCE(uar.effective_to,'9999-12-31')
             )";
 
@@ -430,9 +431,9 @@ final class UserAccessManagementService
             array_push($params, ...$roots);
         }
 
-        $latestScope = "uas.approval_status='APPROVED' AND NOT EXISTS (
+        $latestScope = "uas.deleted_at IS NULL AND uas.approval_status='APPROVED' AND NOT EXISTS (
             SELECT 1 FROM user_account_scope newer_scope
-            WHERE newer_scope.role_assignment_id=uas.role_assignment_id
+            WHERE newer_scope.deleted_at IS NULL AND newer_scope.role_assignment_id=uas.role_assignment_id
               AND newer_scope.user_id=uas.user_id AND newer_scope.approval_status='APPROVED'
               AND COALESCE(newer_scope.effective_to,'9999-12-31')>COALESCE(uas.effective_to,'9999-12-31')
         )";
@@ -502,7 +503,7 @@ final class UserAccessManagementService
             : '';
         $legacyBranch = "NOT EXISTS (
                 SELECT 1 FROM user_account_role previous_role
-                WHERE previous_role.user_id=su.id AND previous_role.approval_status='APPROVED'
+                WHERE previous_role.deleted_at IS NULL AND previous_role.user_id=su.id AND previous_role.approval_status='APPROVED'
             )
             AND EXISTS (
                 SELECT 1 FROM legacy_user_reference lurv
@@ -703,7 +704,7 @@ final class UserAccessManagementService
     /** @return array{role_id:string,user_id:string,role_level:string,role_code:string} */
     public function assertCanManageRoleAssignment(string $actorId, string $assignmentId): array
     {
-        $stmt = $this->pdo->prepare("SELECT uar.id,uar.user_id,uar.role_id,r.role_level,r.role_code FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.id=?");
+        $stmt = $this->pdo->prepare("SELECT uar.id,uar.user_id,uar.role_id,r.role_level,r.role_code FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.id=? AND uar.deleted_at IS NULL");
         $stmt->execute([$assignmentId]);
         $assignment = $stmt->fetch();
         if (!$assignment) {
@@ -714,7 +715,7 @@ final class UserAccessManagementService
             throw new DomainException($this->roleDeniedMessage($authority));
         }
         if (in_array((string)$assignment['role_level'], ['NATIONAL', 'DISTRICT', 'ASC', 'ARPA'], true)) {
-            $scopeStmt = $this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? AND user_id=?');
+            $scopeStmt = $this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? AND user_id=? AND deleted_at IS NULL');
             $scopeStmt->execute([$assignmentId, $assignment['user_id']]);
             $scopes = $scopeStmt->fetchAll();
             if ($scopes === []) {
@@ -730,7 +731,7 @@ final class UserAccessManagementService
     /** @return array<string,mixed> */
     public function assertCanManageScopeAssignment(string $actorId, string $scopeId): array
     {
-        $stmt = $this->pdo->prepare("SELECT uas.*,uar.role_id,r.role_level,r.role_code FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id JOIN application_role r ON r.id=uar.role_id WHERE uas.id=?");
+        $stmt = $this->pdo->prepare("SELECT uas.*,uar.role_id,r.role_level,r.role_code FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id JOIN application_role r ON r.id=uar.role_id WHERE uas.id=? AND uas.deleted_at IS NULL AND uar.deleted_at IS NULL");
         $stmt->execute([$scopeId]);
         $scope = $stmt->fetch();
         if (!$scope) {
@@ -748,7 +749,7 @@ final class UserAccessManagementService
     public function manageableRoleAssignmentIds(string $actorId): array
     {
         $ids = [];
-        foreach ($this->pdo->query('SELECT id FROM user_account_role')->fetchAll() as $row) {
+        foreach ($this->pdo->query('SELECT id FROM user_account_role WHERE deleted_at IS NULL')->fetchAll() as $row) {
             try {
                 $this->assertCanManageRoleAssignment($actorId, (string)$row['id']);
                 $ids[] = (string)$row['id'];
@@ -762,7 +763,7 @@ final class UserAccessManagementService
     public function manageableScopeAssignmentIds(string $actorId): array
     {
         $ids = [];
-        foreach ($this->pdo->query('SELECT id FROM user_account_scope')->fetchAll() as $row) {
+        foreach ($this->pdo->query('SELECT id FROM user_account_scope WHERE deleted_at IS NULL')->fetchAll() as $row) {
             try {
                 $this->assertCanManageScopeAssignment($actorId, (string)$row['id']);
                 $ids[] = (string)$row['id'];
@@ -804,7 +805,7 @@ final class UserAccessManagementService
                 throw new DomainException('This assignment already has a pending transfer or role change.');
             }
         }
-        $duplicateSql="SELECT COUNT(*) FROM user_account_role uar LEFT JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id WHERE uar.user_id=? AND uar.role_id=? AND uar.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND uar.effective_from<=COALESCE(?,'9999-12-31') AND (uar.effective_to IS NULL OR uar.effective_to>=?) AND ((? IS NULL AND uas.location_id IS NULL) OR uas.location_id=?)";
+        $duplicateSql="SELECT COUNT(*) FROM user_account_role uar LEFT JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id AND uas.deleted_at IS NULL WHERE uar.deleted_at IS NULL AND uar.user_id=? AND uar.role_id=? AND uar.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND uar.effective_from<=COALESCE(?,'9999-12-31') AND (uar.effective_to IS NULL OR uar.effective_to>=?) AND ((? IS NULL AND uas.location_id IS NULL) OR uas.location_id=?)";
         $duplicateParams=[$userId,$roleId,$to,$from,$validated['location_id'],$validated['location_id']];
         if($replacesAssignmentId!==null){$duplicateSql.=' AND uar.id<>?';$duplicateParams[]=$replacesAssignmentId;}
         $duplicate=$this->pdo->prepare($duplicateSql);$duplicate->execute($duplicateParams);
@@ -851,7 +852,7 @@ final class UserAccessManagementService
                 throw new DomainException('An ended assignment cannot be extended through this action.');
             }
             $active = $effectiveTo < date('Y-m-d') ? 0 : (int)$current['active'];
-            $this->pdo->prepare("UPDATE user_account_scope SET effective_to=CASE WHEN effective_to IS NULL OR effective_to>? THEN ? ELSE effective_to END,active=CASE WHEN ?<CURRENT_DATE() THEN 0 ELSE active END,action_reason=CONCAT_WS(' | ',NULLIF(action_reason,''),?) WHERE role_assignment_id=? AND user_id=?")
+            $this->pdo->prepare("UPDATE user_account_scope SET effective_to=CASE WHEN effective_to IS NULL OR effective_to>? THEN ? ELSE effective_to END,active=CASE WHEN ?<CURRENT_DATE() THEN 0 ELSE active END,action_reason=CONCAT_WS(' | ',NULLIF(action_reason,''),?) WHERE role_assignment_id=? AND user_id=? AND deleted_at IS NULL")
                 ->execute([$effectiveTo,$effectiveTo,$effectiveTo,$reason,$assignmentId,$assignment['user_id']]);
             $this->pdo->prepare("UPDATE user_account_role SET effective_to=?,active=?,reason=CONCAT_WS(' | ',NULLIF(reason,''),?),official_reference=COALESCE(?,official_reference) WHERE id=?")
                 ->execute([$effectiveTo,$active,$reason,$this->optional($reference),$assignmentId]);
@@ -876,7 +877,7 @@ final class UserAccessManagementService
                 FROM user_account_role uar
                 JOIN application_role r ON r.id=uar.role_id
                 JOIN system_user su ON su.id=uar.user_id
-                WHERE uar.id=? FOR UPDATE");
+                WHERE uar.id=? AND uar.deleted_at IS NULL FOR UPDATE");
             $stmt->execute([$assignmentId]);
             $assignment = $stmt->fetch();
             if (!$assignment) {
@@ -899,7 +900,7 @@ final class UserAccessManagementService
             $scopeStmt = $this->pdo->prepare("SELECT uas.*,l.dad_number,l.name_en
                 FROM user_account_scope uas
                 LEFT JOIN location l ON l.id=uas.location_id
-                WHERE uas.role_assignment_id=? AND uas.user_id=? FOR UPDATE");
+                WHERE uas.role_assignment_id=? AND uas.user_id=? AND uas.deleted_at IS NULL FOR UPDATE");
             $scopeStmt->execute([$assignmentId, $assignment['user_id']]);
             $scopes = $scopeStmt->fetchAll();
             foreach ($scopes as $scope) {
@@ -915,20 +916,20 @@ final class UserAccessManagementService
 
             $overlap = $this->pdo->prepare("SELECT COUNT(DISTINCT other.id)
                 FROM user_account_role other
-                WHERE other.id<>? AND other.user_id=? AND other.role_id=?
+                WHERE other.deleted_at IS NULL AND other.id<>? AND other.user_id=? AND other.role_id=?
                   AND other.approval_status IN ('DRAFT','SUBMITTED','APPROVED')
                   AND other.effective_from<=COALESCE(?,'9999-12-31')
                   AND (other.effective_to IS NULL OR other.effective_to>=?)
                   AND (
-                    (NOT EXISTS (SELECT 1 FROM user_account_scope own_scope WHERE own_scope.role_assignment_id=?)
-                     AND NOT EXISTS (SELECT 1 FROM user_account_scope other_scope WHERE other_scope.role_assignment_id=other.id))
+                    (NOT EXISTS (SELECT 1 FROM user_account_scope own_scope WHERE own_scope.role_assignment_id=? AND own_scope.deleted_at IS NULL)
+                     AND NOT EXISTS (SELECT 1 FROM user_account_scope other_scope WHERE other_scope.role_assignment_id=other.id AND other_scope.deleted_at IS NULL))
                     OR EXISTS (
                         SELECT 1 FROM user_account_scope own_scope
-                        JOIN user_account_scope other_scope ON other_scope.role_assignment_id=other.id
+                        JOIN user_account_scope other_scope ON other_scope.role_assignment_id=other.id AND other_scope.deleted_at IS NULL
                           AND other_scope.scope_type=own_scope.scope_type
                           AND other_scope.scope_mode=own_scope.scope_mode
                           AND other_scope.location_id<=>own_scope.location_id
-                        WHERE own_scope.role_assignment_id=?
+                        WHERE own_scope.role_assignment_id=? AND own_scope.deleted_at IS NULL
                     )
                   )");
             $overlap->execute([
@@ -992,7 +993,7 @@ final class UserAccessManagementService
     {
         AssignmentDirectEditPolicy::assert('user.assign-role');
         $this->assertCanManageRoleAssignment($actorId,$assignmentId);
-        $s=$this->pdo->prepare("SELECT uar.*,su.username,su.display_name,r.role_name,r.role_code,r.role_level,(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id WHERE uas.role_assignment_id=uar.id) assigned_location FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.id=?");
+        $s=$this->pdo->prepare("SELECT uar.*,su.username,su.display_name,r.role_name,r.role_code,r.role_level,(SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ') FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id WHERE uas.role_assignment_id=uar.id AND uas.deleted_at IS NULL) assigned_location FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id WHERE uar.id=? AND uar.deleted_at IS NULL");
         $s->execute([$assignmentId]);return $s->fetch()?:throw new DomainException('The selected user role was not found.');
     }
 
@@ -1005,9 +1006,9 @@ final class UserAccessManagementService
         if($to!==null&&$to<$from)throw new DomainException('The end date cannot be before the start date.');
 
         $this->transaction(function()use($actorId,$assignmentId,$data,$context,$from,$to,$reason):void{
-            $s=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=? FOR UPDATE');$s->execute([$assignmentId]);$before=$s->fetch();if(!$before)throw new DomainException('The selected user role was not found.');
+            $s=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=? AND deleted_at IS NULL FOR UPDATE');$s->execute([$assignmentId]);$before=$s->fetch();if(!$before)throw new DomainException('The selected user role was not found.');
             $roleId=trim((string)($data['role_id']??$before['role_id']));if($roleId==='')throw new DomainException('Role is required.');
-            $scopes=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE role_assignment_id=? AND user_id=? FOR UPDATE');$scopes->execute([$assignmentId,$before['user_id']]);$scopeRows=$scopes->fetchAll();
+            $scopes=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE role_assignment_id=? AND user_id=? AND deleted_at IS NULL FOR UPDATE');$scopes->execute([$assignmentId,$before['user_id']]);$scopeRows=$scopes->fetchAll();
             foreach($scopeRows as $scope){
                 $validated=$this->validateAccountRequestAssignment($actorId,$roleId,$scope['location_id'],$from);
                 if($validated['scope_type']!==$scope['scope_type']||$validated['scope_mode']!==$scope['scope_mode']||$validated['location_id']!==$scope['location_id'])throw new DomainException('The existing assigned location is not valid for the selected role. Edit the location assignment or select a compatible role.');
@@ -1016,9 +1017,9 @@ final class UserAccessManagementService
                 if($scopeFrom<$from||($to!==null&&($scopeTo===null||(string)$scopeTo>$to))||($scopeTo!==null&&(string)$scopeTo<$scopeFrom))throw new DomainException("The location dates must be within the role's start and end dates.");
             }
             if($scopeRows===[])$this->validateAccountRequestAssignment($actorId,$roleId,null,$from);
-            $overlap=$this->pdo->prepare("SELECT COUNT(DISTINCT other.id) FROM user_account_role other WHERE other.id<>? AND other.user_id=? AND other.role_id=? AND other.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND other.effective_from<=COALESCE(?,'9999-12-31') AND (other.effective_to IS NULL OR other.effective_to>=?) AND ((NOT EXISTS(SELECT 1 FROM user_account_scope own_scope WHERE own_scope.role_assignment_id=?) AND NOT EXISTS(SELECT 1 FROM user_account_scope other_scope WHERE other_scope.role_assignment_id=other.id)) OR EXISTS(SELECT 1 FROM user_account_scope own_scope JOIN user_account_scope other_scope ON other_scope.role_assignment_id=other.id AND other_scope.scope_type=own_scope.scope_type AND other_scope.scope_mode=own_scope.scope_mode AND other_scope.location_id<=>own_scope.location_id WHERE own_scope.role_assignment_id=?)) FOR UPDATE");
+            $overlap=$this->pdo->prepare("SELECT COUNT(DISTINCT other.id) FROM user_account_role other WHERE other.deleted_at IS NULL AND other.id<>? AND other.user_id=? AND other.role_id=? AND other.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND other.effective_from<=COALESCE(?,'9999-12-31') AND (other.effective_to IS NULL OR other.effective_to>=?) AND ((NOT EXISTS(SELECT 1 FROM user_account_scope own_scope WHERE own_scope.role_assignment_id=? AND own_scope.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM user_account_scope other_scope WHERE other_scope.role_assignment_id=other.id AND other_scope.deleted_at IS NULL)) OR EXISTS(SELECT 1 FROM user_account_scope own_scope JOIN user_account_scope other_scope ON other_scope.role_assignment_id=other.id AND other_scope.deleted_at IS NULL AND other_scope.scope_type=own_scope.scope_type AND other_scope.scope_mode=own_scope.scope_mode AND other_scope.location_id<=>own_scope.location_id WHERE own_scope.role_assignment_id=? AND own_scope.deleted_at IS NULL)) FOR UPDATE");
             $overlap->execute([$assignmentId,$before['user_id'],$roleId,$to,$from,$assignmentId,$assignmentId]);if((int)$overlap->fetchColumn()>0)throw new DomainException('The edited dates overlap another assignment for the same role and location.');
-            $this->pdo->prepare('UPDATE user_account_scope SET effective_from=CASE WHEN effective_from=? THEN ? ELSE effective_from END,effective_to=CASE WHEN effective_to<=>? THEN ? ELSE effective_to END WHERE role_assignment_id=? AND user_id=?')->execute([$before['effective_from'],$from,$before['effective_to'],$to,$assignmentId,$before['user_id']]);
+            $this->pdo->prepare('UPDATE user_account_scope SET effective_from=CASE WHEN effective_from=? THEN ? ELSE effective_from END,effective_to=CASE WHEN effective_to<=>? THEN ? ELSE effective_to END WHERE role_assignment_id=? AND user_id=? AND deleted_at IS NULL')->execute([$before['effective_from'],$from,$before['effective_to'],$to,$assignmentId,$before['user_id']]);
             $this->pdo->prepare('UPDATE user_account_role SET role_id=?,effective_from=?,effective_to=?,reason=?,official_reference=? WHERE id=?')->execute([$roleId,$from,$to,$reason,$this->optional($data['official_reference']??null),$assignmentId]);
             $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=?');$afterStmt->execute([$assignmentId]);$after=$afterStmt->fetch();
             $this->directEditAudit($actorId,'user.role.direct-edit','USER_ROLE',$assignmentId,$before,$after,AssignmentDirectEditPolicy::auditContext($context));
@@ -1029,7 +1030,7 @@ final class UserAccessManagementService
     public function directEditScopeRecord(string $actorId,string $scopeId):array
     {
         AssignmentDirectEditPolicy::assert('user.assign-scope');
-        $s=$this->pdo->prepare("SELECT uas.*,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to,su.username,su.display_name,r.role_name,r.role_code,r.role_level,l.dad_number location_dad,l.name_en location_name FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id JOIN system_user su ON su.id=uas.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN location l ON l.id=uas.location_id WHERE uas.id=?");
+        $s=$this->pdo->prepare("SELECT uas.*,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to,su.username,su.display_name,r.role_name,r.role_code,r.role_level,l.dad_number location_dad,l.name_en location_name FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id JOIN system_user su ON su.id=uas.user_id JOIN application_role r ON r.id=uar.role_id LEFT JOIN location l ON l.id=uas.location_id WHERE uas.id=? AND uas.deleted_at IS NULL AND uar.deleted_at IS NULL");
         $s->execute([$scopeId]);$row=$s->fetch()?:throw new DomainException('The assigned location was not found.');$this->assertCanManageRoleAssignment($actorId,(string)$row['role_assignment_id']);return $row;
     }
 
@@ -1040,13 +1041,74 @@ final class UserAccessManagementService
         if($to!==null&&$to<$from)throw new DomainException('The end date cannot be before the start date.');
         $location=$this->optional($data['location_id']??null);$validated=$this->validateAccountRequestAssignment($actorId,(string)$current['role_id'],$location,$from);
         $this->transaction(function()use($actorId,$scopeId,$data,$context,$from,$to,$validated):void{
-            $s=$this->pdo->prepare("SELECT uas.*,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id WHERE uas.id=? FOR UPDATE");$s->execute([$scopeId]);$before=$s->fetch();if(!$before)throw new DomainException('The assigned location was not found.');
+            $s=$this->pdo->prepare("SELECT uas.*,uar.role_id,uar.effective_from role_effective_from,uar.effective_to role_effective_to FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id WHERE uas.id=? AND uas.deleted_at IS NULL AND uar.deleted_at IS NULL FOR UPDATE");$s->execute([$scopeId]);$before=$s->fetch();if(!$before)throw new DomainException('The assigned location was not found.');
             if($from<(string)$before['role_effective_from']||($before['role_effective_to']!==null&&($to===null||$to>(string)$before['role_effective_to'])))throw new DomainException("The location dates must be within the role's start and end dates.");
-            $duplicate=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id WHERE uas.id<>? AND uas.user_id=? AND uar.role_id=? AND uas.scope_type=? AND uas.scope_mode=? AND uas.location_id<=>? AND uas.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND uas.effective_from<=COALESCE(?,'9999-12-31') AND (uas.effective_to IS NULL OR uas.effective_to>=?) FOR UPDATE");
+            $duplicate=$this->pdo->prepare("SELECT COUNT(*) FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id WHERE uas.deleted_at IS NULL AND uar.deleted_at IS NULL AND uas.id<>? AND uas.user_id=? AND uar.role_id=? AND uas.scope_type=? AND uas.scope_mode=? AND uas.location_id<=>? AND uas.approval_status IN('DRAFT','SUBMITTED','APPROVED') AND uas.effective_from<=COALESCE(?,'9999-12-31') AND (uas.effective_to IS NULL OR uas.effective_to>=?) FOR UPDATE");
             $duplicate->execute([$scopeId,$before['user_id'],$before['role_id'],$validated['scope_type'],$validated['scope_mode'],$validated['location_id'],$to,$from]);if((int)$duplicate->fetchColumn()>0)throw new DomainException('This user already has an overlapping assignment for the selected role and location.');
             $this->pdo->prepare('UPDATE user_account_scope SET scope_type=?,scope_mode=?,location_id=?,effective_from=?,effective_to=?,reason=?,official_reference=? WHERE id=?')->execute([$validated['scope_type'],$validated['scope_mode'],$validated['location_id'],$from,$to,$this->optional($data['reason']??null),$this->optional($data['official_reference']??null),$scopeId]);
             $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE id=?');$afterStmt->execute([$scopeId]);$after=$afterStmt->fetch();
             $this->directEditAudit($actorId,'user.scope.direct-edit','USER_SCOPE',$scopeId,$before,$after,AssignmentDirectEditPolicy::auditContext($context));
+        });
+    }
+
+    /** @return array<string,mixed> */
+    public function deleteRoleRecord(string $actorId,string $assignmentId):array
+    {
+        AssignmentDeletePolicy::assert($actorId);
+        $s=$this->pdo->prepare("SELECT uar.*,su.username,su.display_name,r.role_name,r.role_code,r.role_level,
+            (SELECT GROUP_CONCAT(DISTINCT COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') ORDER BY l.name_en,o.name_en SEPARATOR '; ')
+             FROM user_account_scope uas LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id
+             WHERE uas.role_assignment_id=uar.id AND uas.deleted_at IS NULL) assigned_location
+            FROM user_account_role uar JOIN system_user su ON su.id=uar.user_id JOIN application_role r ON r.id=uar.role_id
+            WHERE uar.id=? AND uar.deleted_at IS NULL");
+        $s->execute([$assignmentId]);
+        return $s->fetch()?:throw new DomainException('The selected user role was not found.');
+    }
+
+    public function adminDeleteRoleAssignment(string $actorId,string $assignmentId,string $reason):void
+    {
+        $context=AssignmentDeletePolicy::assert($actorId);$reason=trim($reason);
+        if($reason==='')throw new DomainException('Delete Reason is required.');
+        $this->transaction(function()use($actorId,$assignmentId,$reason,$context):void{
+            $s=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=? AND deleted_at IS NULL FOR UPDATE');$s->execute([$assignmentId]);
+            $before=$s->fetch();if(!$before)throw new DomainException('The selected user role was not found.');
+            $scopeStmt=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE role_assignment_id=? AND deleted_at IS NULL FOR UPDATE');$scopeStmt->execute([$assignmentId]);$scopes=$scopeStmt->fetchAll();
+            $this->pdo->prepare('UPDATE user_account_scope SET active=0,deleted_at=NOW(),deleted_by=?,delete_reason=? WHERE role_assignment_id=? AND deleted_at IS NULL')->execute([$actorId,$reason,$assignmentId]);
+            $this->pdo->prepare('UPDATE user_account_role SET active=0,deleted_at=NOW(),deleted_by=?,delete_reason=? WHERE id=? AND deleted_at IS NULL')->execute([$actorId,$reason,$assignmentId]);
+            $contextAudit=AssignmentDeletePolicy::auditContext($context);
+            foreach($scopes as $scope){
+                $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE id=?');$afterStmt->execute([$scope['id']]);$afterScope=$afterStmt->fetch()?:[];
+                $this->auditDelete($actorId,'user.scope.admin-delete','USER_SCOPE',(string)$scope['id'],['before'=>$scope,'after'=>$afterScope,'parent_role_assignment_id'=>$assignmentId,'active_context'=>$contextAudit,'delete_reason'=>$reason]);
+            }
+            $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_role WHERE id=?');$afterStmt->execute([$assignmentId]);$after=$afterStmt->fetch()?:[];
+            $this->auditDelete($actorId,'user.role.admin-delete','USER_ROLE',$assignmentId,['before'=>$before,'after'=>$after,'dependent_scopes'=>$scopes,'active_context'=>$contextAudit,'delete_reason'=>$reason]);
+        });
+    }
+
+    /** @return array<string,mixed> */
+    public function deleteScopeRecord(string $actorId,string $scopeId):array
+    {
+        AssignmentDeletePolicy::assert($actorId);
+        $s=$this->pdo->prepare("SELECT uas.*,su.username,su.display_name,r.role_name,r.role_code,
+            COALESCE(CONCAT(l.dad_number,' - ',l.name_en),CONCAT(o.dad_number,' - ',o.name_en),'National') assigned_location
+            FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id
+            JOIN system_user su ON su.id=uas.user_id JOIN application_role r ON r.id=uar.role_id
+            LEFT JOIN location l ON l.id=uas.location_id LEFT JOIN office o ON o.id=uas.office_id
+            WHERE uas.id=? AND uas.deleted_at IS NULL AND uar.deleted_at IS NULL");
+        $s->execute([$scopeId]);
+        return $s->fetch()?:throw new DomainException('The assigned location was not found.');
+    }
+
+    public function adminDeleteScopeAssignment(string $actorId,string $scopeId,string $reason):void
+    {
+        $context=AssignmentDeletePolicy::assert($actorId);$reason=trim($reason);
+        if($reason==='')throw new DomainException('Delete Reason is required.');
+        $this->transaction(function()use($actorId,$scopeId,$reason,$context):void{
+            $s=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE id=? AND deleted_at IS NULL FOR UPDATE');$s->execute([$scopeId]);
+            $before=$s->fetch();if(!$before)throw new DomainException('The assigned location was not found.');
+            $this->pdo->prepare('UPDATE user_account_scope SET active=0,deleted_at=NOW(),deleted_by=?,delete_reason=? WHERE id=? AND deleted_at IS NULL')->execute([$actorId,$reason,$scopeId]);
+            $afterStmt=$this->pdo->prepare('SELECT * FROM user_account_scope WHERE id=?');$afterStmt->execute([$scopeId]);$after=$afterStmt->fetch()?:[];
+            $this->auditDelete($actorId,'user.scope.admin-delete','USER_SCOPE',$scopeId,['before'=>$before,'after'=>$after,'active_context'=>AssignmentDeletePolicy::auditContext($context),'delete_reason'=>$reason]);
         });
     }
 
@@ -1058,8 +1120,8 @@ final class UserAccessManagementService
             $stmt=$this->pdo->prepare("UPDATE user_account_role SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE id=? AND created_by=? AND approval_status='DRAFT'");
             $stmt->execute([$actorId,$assignmentId,$actorId]);
             if($stmt->rowCount()!==1)throw new DomainException('Only the person who created this draft can submit it.');
-            $this->pdo->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE role_assignment_id=? AND created_by=? AND approval_status='DRAFT'")->execute([$actorId,$assignmentId,$actorId]);
-            $q=$this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? ORDER BY created_at LIMIT 1');$q->execute([$assignmentId]);$location=$q->fetchColumn()?:null;
+            $this->pdo->prepare("UPDATE user_account_scope SET approval_status='SUBMITTED',submitted_by=?,submitted_at=NOW() WHERE role_assignment_id=? AND created_by=? AND approval_status='DRAFT' AND deleted_at IS NULL")->execute([$actorId,$assignmentId,$actorId]);
+            $q=$this->pdo->prepare('SELECT location_id FROM user_account_scope WHERE role_assignment_id=? AND deleted_at IS NULL ORDER BY created_at LIMIT 1');$q->execute([$assignmentId]);$location=$q->fetchColumn()?:null;
             (new WorkflowNotificationService($this->pdo))->actionForPermission('user.assign-role',$location,'ACCESS_MANAGEMENT','User Role Assignment Awaiting Approval','A submitted user role assignment is ready for review.','USER_ROLE',$assignmentId,'APPROVAL','/access-management/role-assignments',$actorId,['SYSTEM_ADMIN','USER_ADMIN','NATIONAL_ADMIN','DISTRICT_ADMIN','ASC_ADMIN']);
         });
     }
@@ -1074,13 +1136,13 @@ final class UserAccessManagementService
             if(!$row||$row['approval_status']!=='SUBMITTED')throw new DomainException('Only submitted user roles can be approved.');
             if((string)$row['created_by']===$actorId)throw new DomainException('You cannot approve a user role you created.');
             $this->pdo->prepare("UPDATE user_account_role SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE id=?")->execute([$actorId,$assignmentId]);
-            $this->pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE role_assignment_id=? AND approval_status='SUBMITTED'")->execute([$actorId,$assignmentId]);
+            $this->pdo->prepare("UPDATE user_account_scope SET approval_status='APPROVED',active=1,approved_by=?,approved_at=NOW() WHERE role_assignment_id=? AND approval_status='SUBMITTED' AND deleted_at IS NULL")->execute([$actorId,$assignmentId]);
             if($row['replaces_assignment_id']){
                 $oldId=(string)$row['replaces_assignment_id'];$old=$this->pdo->prepare('SELECT user_id,effective_from FROM user_account_role WHERE id=? FOR UPDATE');$old->execute([$oldId]);$oldRow=$old->fetch();
                 if(!$oldRow||(string)$oldRow['user_id']!==(string)$row['user_id'])throw new DomainException('The replacement assignment no longer matches the original user.');
                 $end=(new \DateTimeImmutable((string)$row['effective_from']))->modify('-1 day')->format('Y-m-d');
                 if($end<(string)$oldRow['effective_from'])throw new DomainException('The replacement effective date would create an invalid original period.');
-                $this->pdo->prepare("UPDATE user_account_scope SET effective_to=CASE WHEN effective_to IS NULL OR effective_to>? THEN ? ELSE effective_to END,active=CASE WHEN ?<CURRENT_DATE() THEN 0 ELSE active END,action_reason=CONCAT_WS(' | ',NULLIF(action_reason,''),'Replaced by approved assignment') WHERE role_assignment_id=?")->execute([$end,$end,$end,$oldId]);
+                $this->pdo->prepare("UPDATE user_account_scope SET effective_to=CASE WHEN effective_to IS NULL OR effective_to>? THEN ? ELSE effective_to END,active=CASE WHEN ?<CURRENT_DATE() THEN 0 ELSE active END,action_reason=CONCAT_WS(' | ',NULLIF(action_reason,''),'Replaced by approved assignment') WHERE role_assignment_id=? AND deleted_at IS NULL")->execute([$end,$end,$end,$oldId]);
                 $this->pdo->prepare("UPDATE user_account_role SET effective_to=CASE WHEN effective_to IS NULL OR effective_to>? THEN ? ELSE effective_to END,active=CASE WHEN ?<CURRENT_DATE() THEN 0 ELSE active END,reason=CONCAT_WS(' | ',NULLIF(reason,''),'Replaced by approved assignment') WHERE id=?")->execute([$end,$end,$end,$oldId]);
             }
             $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at) VALUES(?,'user.role.approve','USER_ROLE',?,?,'INFO',NOW())")->execute([$actorId,$assignmentId,json_encode(['replaces_assignment_id'=>$row['replaces_assignment_id']],JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
@@ -1149,7 +1211,7 @@ final class UserAccessManagementService
     /** @return array<int,array<string,mixed>> */
     private function effectiveAssignments(string $userId, string $date): array
     {
-        $stmt = $this->pdo->prepare("SELECT uar.id,uar.user_id,uar.role_id,r.role_code,r.role_level FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=? AND (uar.effective_to IS NULL OR uar.effective_to>=?) AND r.active=1 AND r.approval_status='APPROVED'");
+        $stmt = $this->pdo->prepare("SELECT uar.id,uar.user_id,uar.role_id,r.role_code,r.role_level FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id WHERE uar.deleted_at IS NULL AND uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND uar.effective_from<=? AND (uar.effective_to IS NULL OR uar.effective_to>=?) AND r.active=1 AND r.approval_status='APPROVED'");
         $stmt->execute([$userId, $date, $date]);
         return $stmt->fetchAll();
     }
@@ -1157,7 +1219,7 @@ final class UserAccessManagementService
     /** @return array<int,array<string,mixed>> */
     private function effectiveScopes(string $assignmentId, string $date): array
     {
-        $stmt = $this->pdo->prepare("SELECT uas.* FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id WHERE uas.role_assignment_id=? AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=? AND (uas.effective_to IS NULL OR uas.effective_to>=?)");
+        $stmt = $this->pdo->prepare("SELECT uas.* FROM user_account_scope uas JOIN user_account_role uar ON uar.id=uas.role_assignment_id AND uar.user_id=uas.user_id WHERE uas.deleted_at IS NULL AND uar.deleted_at IS NULL AND uas.role_assignment_id=? AND uas.active=1 AND uas.approval_status='APPROVED' AND uas.effective_from<=? AND (uas.effective_to IS NULL OR uas.effective_to>=?)");
         $stmt->execute([$assignmentId, $date, $date]);
         return $stmt->fetchAll();
     }
@@ -1274,6 +1336,12 @@ final class UserAccessManagementService
         $changed=[];foreach($after as $field=>$value){if(array_key_exists($field,$before)&&$before[$field]!==$value)$changed[$field]=['before'=>$before[$field],'after'=>$value];}
         $details=['assignment_id'=>$targetId,'changed_fields'=>$changed,'previous_values'=>$before,'new_values'=>$after,'active_context'=>$context];
         $this->pdo->prepare('INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at) VALUES(?,?,?,?,?,\'INFO\',NOW())')
+            ->execute([$actorId,$action,$targetType,$targetId,json_encode($details,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
+    }
+
+    private function auditDelete(string $actorId,string $action,string $targetType,string $targetId,array $details):void
+    {
+        $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,created_at) VALUES(?,?,?,?,?,'WARNING',NOW())")
             ->execute([$actorId,$action,$targetType,$targetId,json_encode($details,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
     }
 

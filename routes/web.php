@@ -53,6 +53,8 @@ $router->get('/hr/officers/{id}/offices/assign', [OfficerController::class, 'ass
 $router->post('/hr/officers/{id}/offices', [OfficerController::class, 'storeOfficeAssignment']);
 $router->get('/hr/officers/{id}/offices/{assignmentId}/edit', [OfficerController::class, 'editOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/edit', [OfficerController::class, 'updateOfficeAssignment']);
+$router->get('/hr/officers/{id}/offices/{assignmentId}/delete', [OfficerController::class, 'deleteOfficeAssignmentForm']);
+$router->post('/hr/officers/{id}/offices/{assignmentId}/delete', [OfficerController::class, 'deleteOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/submit', [OfficerController::class, 'submitOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/approve', [OfficerController::class, 'approveOfficeAssignment']);
 $router->post('/hr/officers/{id}/offices/{assignmentId}/end', [OfficerController::class, 'endOfficeAssignment']);
@@ -165,6 +167,8 @@ $router->post('/access-management/role-assignments/{id}/submit', [UserManagement
 $router->post('/access-management/role-assignments/{id}/approve', [UserManagementController::class, 'approveRoleAssignment']);
 $router->get('/access-management/role-assignments/{id}/edit', [UserManagementController::class, 'editRoleAssignment']);
 $router->post('/access-management/role-assignments/{id}/edit', [UserManagementController::class, 'updateRoleAssignment']);
+$router->get('/access-management/role-assignments/{id}/delete', [UserManagementController::class, 'deleteRoleAssignmentForm']);
+$router->post('/access-management/role-assignments/{id}/delete', [UserManagementController::class, 'deleteRoleAssignment']);
 $router->get('/access-management/role-assignments/{id}/effective-from/edit', [UserManagementController::class, 'editRoleEffectiveFromForm']);
 $router->post('/access-management/role-assignments/{id}/effective-from', [UserManagementController::class, 'updateRoleEffectiveFrom']);
 $router->get('/access-management/role-assignments/{id}/end', [UserManagementController::class, 'endRoleAssignmentForm']);
@@ -175,6 +179,8 @@ $router->post('/access-management/scope-assignments/{id}/submit', [UserManagemen
 $router->post('/access-management/scope-assignments/{id}/approve', [UserManagementController::class, 'approveScope']);
 $router->get('/access-management/scope-assignments/{id}/edit', [UserManagementController::class, 'editScopeAssignment']);
 $router->post('/access-management/scope-assignments/{id}/edit', [UserManagementController::class, 'updateScopeAssignment']);
+$router->get('/access-management/scope-assignments/{id}/delete', [UserManagementController::class, 'deleteScopeAssignmentForm']);
+$router->post('/access-management/scope-assignments/{id}/delete', [UserManagementController::class, 'deleteScopeAssignment']);
 $router->get('/access-management/provisioning-failures', [UserManagementController::class, 'provisioningFailures']);
 $router->get('/access-management/security-history', [UserManagementController::class, 'securityHistory']);
 

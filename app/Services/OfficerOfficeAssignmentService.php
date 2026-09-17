@@ -25,7 +25,7 @@ final class OfficerOfficeAssignmentService
             if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$effectiveFrom))throw new DomainException('Select a valid Office Assignment Effective From date.');
             if(!ScopeService::canAccessOffice($actorId,$officeId))throw new DomainException('You cannot select this Office.');
             $this->assertActiveOffice($officeId);
-            $existingId=(string)($existing['id']??'');$dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND (effective_to IS NULL OR effective_to>=?)");$dup->execute([$existingId,$officerId,$officeId,$effectiveFrom]);
+            $existingId=(string)($existing['id']??'');$dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE deleted_at IS NULL AND id<>? AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND (effective_to IS NULL OR effective_to>=?)");$dup->execute([$existingId,$officerId,$officeId,$effectiveFrom]);
             if((int)$dup->fetchColumn()>0)throw new DomainException('An overlapping Office assignment already exists for this Officer and Office.');
             $primary=$effectiveFrom<=date('Y-m-d')?1:0;
             if($existing){
@@ -72,7 +72,7 @@ final class OfficerOfficeAssignmentService
         if(!ScopeService::canAccessOffice($actorId,$office))throw new DomainException('You cannot select this Office.');
         $this->assertEntity('officer',$officer);$this->assertActiveOffice($office);
         return $this->transaction(function()use($data,$actorId,$officer,$office,$from,$reason):string{
-            $dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND effective_from=?");$dup->execute([$officer,$office,$from]);
+            $dup=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE deleted_at IS NULL AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND effective_from=?");$dup->execute([$officer,$office,$from]);
             if((int)$dup->fetchColumn()>0)throw new DomainException('An Office assignment already exists for this Officer, Office and effective date.');
             $id=$this->uuid();$primary=!empty($data['is_primary'])?1:0;
             if($primary===1&&$from>date('Y-m-d'))throw new DomainException('A future Office assignment can be set as Primary when it becomes effective.');
@@ -103,10 +103,10 @@ final class OfficerOfficeAssignmentService
     public function reviewForApproval(string $id,string $actorId):array
     {
         $this->assertApprovalPermission($actorId);
-        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,f.nic,d.name_en designation_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.dad_number location_dad,l.name_en location_name,su.display_name submitted_by_name,su.username submitted_by_username FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id LEFT JOIN designation d ON d.id=f.primary_designation_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id LEFT JOIN system_user su ON su.id=a.submitted_by WHERE a.id=? AND a.approval_status='SUBMITTED'");
+        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,f.nic,d.name_en designation_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.dad_number location_dad,l.name_en location_name,su.display_name submitted_by_name,su.username submitted_by_username FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id LEFT JOIN designation d ON d.id=f.primary_designation_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id LEFT JOIN system_user su ON su.id=a.submitted_by WHERE a.id=? AND a.deleted_at IS NULL AND a.approval_status='SUBMITTED'");
         $s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('The submitted Office assignment was not found.');if($row['created_by']===$actorId||$row['submitted_by']===$actorId)throw new DomainException('Maker-checker policy prevents self-approval.');$this->assertScope($row,$actorId);
         $allowed=array_column(ScopeService::scopedOffices($actorId),'id');$where=$allowed===[]?'1=0':'a.office_id IN ('.implode(',',array_fill(0,count($allowed),'?')).')';
-        $current=$this->pdo->prepare("SELECT o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name,a.effective_from,a.is_primary FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.officer_id=? AND a.approval_status='APPROVED' AND a.active=1 AND a.effective_from<=CURRENT_DATE() AND (a.effective_to IS NULL OR a.effective_to>=CURRENT_DATE()) AND {$where} ORDER BY a.is_primary DESC,o.name_en");
+        $current=$this->pdo->prepare("SELECT o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name,a.effective_from,a.is_primary FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.deleted_at IS NULL AND a.officer_id=? AND a.approval_status='APPROVED' AND a.active=1 AND a.effective_from<=CURRENT_DATE() AND (a.effective_to IS NULL OR a.effective_to>=CURRENT_DATE()) AND {$where} ORDER BY a.is_primary DESC,o.name_en");
         $current->execute(array_merge([(string)$row['officer_id']],$allowed));$row['current_offices']=$current->fetchAll();return $row;
     }
 
@@ -125,7 +125,7 @@ final class OfficerOfficeAssignmentService
     public function directEditRecord(string $id,string $actorId):array
     {
         AssignmentDirectEditPolicy::assert('officer.office-assignment.view');
-        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.id=?");
+        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.id=? AND a.deleted_at IS NULL");
         $s->execute([$id]);$row=$s->fetch();
         if(!$row)throw new DomainException('Office assignment was not found.');
         $this->assertScope($row,$actorId);
@@ -145,7 +145,7 @@ final class OfficerOfficeAssignmentService
         $this->transaction(function()use($id,$data,$actorId,$context,$office,$from,$to,$reason):void{
             $before=$this->locked($id);$this->assertScope($before,$actorId);
             $candidate=$before;$candidate['office_id']=$office;$candidate['effective_from']=$from;$candidate['effective_to']=$to;
-            $duplicate=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND effective_from<=COALESCE(?,'9999-12-31') AND (effective_to IS NULL OR effective_to>=?) FOR UPDATE");
+            $duplicate=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE deleted_at IS NULL AND id<>? AND officer_id=? AND office_id=? AND ((approval_status IN('DRAFT','SUBMITTED','RETURNED')) OR (approval_status='APPROVED' AND active=1)) AND effective_from<=COALESCE(?,'9999-12-31') AND (effective_to IS NULL OR effective_to>=?) FOR UPDATE");
             $duplicate->execute([$id,$before['officer_id'],$office,$to,$from]);
             if((int)$duplicate->fetchColumn()>0)throw new DomainException('This Officer already has an overlapping assignment to the selected Office.');
 
@@ -158,7 +158,7 @@ final class OfficerOfficeAssignmentService
             if($primary===1){
                 $this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$office,$actorId,$before['officer_id']]);
             }elseif((int)$before['is_primary']===1){
-                $replacement=$this->pdo->prepare("SELECT office_id FROM officer_office_assignment WHERE officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) ORDER BY effective_from DESC,id LIMIT 1");
+                $replacement=$this->pdo->prepare("SELECT office_id FROM officer_office_assignment WHERE deleted_at IS NULL AND officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) ORDER BY effective_from DESC,id LIMIT 1");
                 $replacement->execute([$before['officer_id'],$id]);$replacementOffice=$replacement->fetchColumn()?:null;
                 $this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=?')->execute([$replacementOffice,$actorId,$before['officer_id']]);
             }
@@ -166,21 +166,45 @@ final class OfficerOfficeAssignmentService
         });
     }
 
+    /** @return array<string,mixed> */
+    public function deleteRecord(string $id,string $actorId):array
+    {
+        AssignmentDeletePolicy::assert($actorId);
+        $s=$this->pdo->prepare("SELECT a.*,f.dad_number officer_dad,f.name_with_initials officer_name,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN officer f ON f.id=a.officer_id JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.id=? AND a.deleted_at IS NULL");
+        $s->execute([$id]);return $s->fetch()?:throw new DomainException('Office assignment was not found.');
+    }
+
+    public function adminDelete(string $id,string $reason,string $actorId):void
+    {
+        $context=AssignmentDeletePolicy::assert($actorId);$reason=trim($reason);if($reason==='')throw new DomainException('Delete Reason is required.');
+        $this->transaction(function()use($id,$reason,$actorId,$context):void{
+            $before=$this->locked($id);if($before['deleted_at']!==null)throw new DomainException('Office assignment was not found.');
+            $this->pdo->prepare('UPDATE officer_office_assignment SET active=0,is_primary=0,deleted_at=NOW(),deleted_by=?,delete_reason=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND deleted_at IS NULL')->execute([$actorId,$reason,$actorId,$id]);
+            if((int)$before['is_primary']===1){
+                $replacement=$this->pdo->prepare("SELECT office_id FROM officer_office_assignment WHERE officer_id=? AND id<>? AND deleted_at IS NULL AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) ORDER BY effective_from DESC,id LIMIT 1");
+                $replacement->execute([$before['officer_id'],$id]);$office=$replacement->fetchColumn()?:null;
+                $this->pdo->prepare('UPDATE officer SET primary_office_id=?,updated_by=?,version=version+1 WHERE id=? AND primary_office_id=?')->execute([$office,$actorId,$before['officer_id'],$before['office_id']]);
+            }
+            $after=$this->row($id);$payload=$after;$payload['_active_context']=AssignmentDeletePolicy::auditContext($context);
+            $this->pdo->prepare('INSERT INTO officer_office_assignment_audit(assignment_id,action_key,previous_state_json,new_state_json,reason,actor_user_id) VALUES(?,?,?,?,?,?)')->execute([$id,'ADMIN_DELETE',json_encode($before,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR),json_encode($payload,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR),$reason,$actorId]);
+        });
+    }
+
     public function hasCurrentAscOfficeAssignment(string $officerId,string $ascLocationId,string $date):bool
     {
-        $s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' WHERE a.officer_id=? AND o.linked_location_id=? AND a.active=1 AND a.approval_status='APPROVED' AND a.effective_from<=? AND (a.effective_to IS NULL OR a.effective_to>=?) AND o.operational_status='ACTIVE' AND o.approval_status='APPROVED'");$s->execute([$officerId,$ascLocationId,$date,$date]);return (int)$s->fetchColumn()>0;
+        $s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' WHERE a.deleted_at IS NULL AND a.officer_id=? AND o.linked_location_id=? AND a.active=1 AND a.approval_status='APPROVED' AND a.effective_from<=? AND (a.effective_to IS NULL OR a.effective_to>=?) AND o.operational_status='ACTIVE' AND o.approval_status='APPROVED'");$s->execute([$officerId,$ascLocationId,$date,$date]);return (int)$s->fetchColumn()>0;
     }
 
     public function hasCurrentAscOfficeAssignmentNow(string $officerId,string $ascLocationId):bool
     {
-        $s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' WHERE a.officer_id=? AND o.linked_location_id=? AND a.active=1 AND a.approval_status='APPROVED' AND a.effective_from<=CURRENT_DATE() AND (a.effective_to IS NULL OR a.effective_to>=CURRENT_DATE()) AND o.operational_status='ACTIVE' AND o.approval_status='APPROVED' AND o.effective_from<=CURRENT_DATE() AND (o.effective_to IS NULL OR o.effective_to>=CURRENT_DATE())");$s->execute([$officerId,$ascLocationId]);return (int)$s->fetchColumn()>0;
+        $s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id AND ot.system_key='ASC_OFFICE' WHERE a.deleted_at IS NULL AND a.officer_id=? AND o.linked_location_id=? AND a.active=1 AND a.approval_status='APPROVED' AND a.effective_from<=CURRENT_DATE() AND (a.effective_to IS NULL OR a.effective_to>=CURRENT_DATE()) AND o.operational_status='ACTIVE' AND o.approval_status='APPROVED' AND o.effective_from<=CURRENT_DATE() AND (o.effective_to IS NULL OR o.effective_to>=CURRENT_DATE())");$s->execute([$officerId,$ascLocationId]);return (int)$s->fetchColumn()>0;
     }
 
-    private function assertNoOverlap(array $r):void{$s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE id<>? AND officer_id=? AND office_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=COALESCE(?, '9999-12-31') AND (effective_to IS NULL OR effective_to>=?) FOR UPDATE");$s->execute([$r['id'],$r['officer_id'],$r['office_id'],$r['effective_to'],$r['effective_from']]);if((int)$s->fetchColumn()>0)throw new DomainException('This Officer already has an overlapping approved assignment to the selected Office.');}
-    private function hasCurrentPrimary(string $officerId,string $except):bool{$s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) FOR UPDATE");$s->execute([$officerId,$except]);return (int)$s->fetchColumn()>0;}
+    private function assertNoOverlap(array $r):void{$s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE deleted_at IS NULL AND id<>? AND officer_id=? AND office_id=? AND active=1 AND approval_status='APPROVED' AND effective_from<=COALESCE(?, '9999-12-31') AND (effective_to IS NULL OR effective_to>=?) FOR UPDATE");$s->execute([$r['id'],$r['officer_id'],$r['office_id'],$r['effective_to'],$r['effective_from']]);if((int)$s->fetchColumn()>0)throw new DomainException('This Officer already has an overlapping approved assignment to the selected Office.');}
+    private function hasCurrentPrimary(string $officerId,string $except):bool{$s=$this->pdo->prepare("SELECT COUNT(*) FROM officer_office_assignment WHERE deleted_at IS NULL AND officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) FOR UPDATE");$s->execute([$officerId,$except]);return (int)$s->fetchColumn()>0;}
     private function lockedInitialForOfficer(string $officerId):?array{$rows=$this->initialRows($officerId,true);if(count($rows)>1)throw new DomainException('The Officer has multiple initial Office assignments and requires review.');return $rows[0]??null;}
-    private function initialRows(string $officerId,bool $lock):array{$sql="SELECT a.*,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.officer_id=? AND a.reason=? ORDER BY a.created_at,a.id".($lock?' FOR UPDATE':'');$s=$this->pdo->prepare($sql);$s->execute([$officerId,self::INITIAL_OFFICER_REASON]);return $s->fetchAll();}
-    private function clearCurrentPrimary(string $officerId,string $except,string $actorId):void{$s=$this->pdo->prepare("SELECT id FROM officer_office_assignment WHERE officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) FOR UPDATE");$s->execute([$officerId,$except]);foreach($s->fetchAll(PDO::FETCH_COLUMN) as $id){$before=$this->row($id);$this->pdo->prepare('UPDATE officer_office_assignment SET is_primary=0,updated_by=?,version=version+1 WHERE id=?')->execute([$actorId,$id]);$this->event($id,'PRIMARY_REPLACED',$before,$this->row($id),null,$actorId);}}
+    private function initialRows(string $officerId,bool $lock):array{$sql="SELECT a.*,o.dad_number office_dad,o.name_en office_name,ot.name_en office_type,l.name_en location_name FROM officer_office_assignment a JOIN office o ON o.id=a.office_id JOIN office_type ot ON ot.id=o.office_type_id LEFT JOIN location l ON l.id=o.linked_location_id WHERE a.deleted_at IS NULL AND a.officer_id=? AND a.reason=? ORDER BY a.created_at,a.id".($lock?' FOR UPDATE':'');$s=$this->pdo->prepare($sql);$s->execute([$officerId,self::INITIAL_OFFICER_REASON]);return $s->fetchAll();}
+    private function clearCurrentPrimary(string $officerId,string $except,string $actorId):void{$s=$this->pdo->prepare("SELECT id FROM officer_office_assignment WHERE deleted_at IS NULL AND officer_id=? AND id<>? AND is_primary=1 AND approval_status='APPROVED' AND active=1 AND effective_from<=CURRENT_DATE() AND (effective_to IS NULL OR effective_to>=CURRENT_DATE()) FOR UPDATE");$s->execute([$officerId,$except]);foreach($s->fetchAll(PDO::FETCH_COLUMN) as $id){$before=$this->row($id);$this->pdo->prepare('UPDATE officer_office_assignment SET is_primary=0,updated_by=?,version=version+1 WHERE id=?')->execute([$actorId,$id]);$this->event($id,'PRIMARY_REPLACED',$before,$this->row($id),null,$actorId);}}
     private function assertScope(array $r,string $actor):void{if(!ScopeService::canAccessOffice($actor,(string)$r['office_id']))throw new DomainException('You cannot manage this Office assignment.');}
     private function assertApprovalPermission(string $actor):void
     {
