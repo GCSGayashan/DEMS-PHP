@@ -13,6 +13,9 @@ final class ArpaAppointmentReadService
     public const RESERVING_REQUEST_STATUSES = [
         'SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED',
     ];
+    public const QUALIFYING_PERMANENT_REQUEST_STATUSES = [
+        'ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED','NATIONAL_APPROVED',
+    ];
     public const CURRENT_ACTION_ISSUES=[
         'DIVISION_MULTIPLE_OPEN','OFFICER_MULTIPLE_PERMANENT','OFFICER_MULTIPLE_ACTING',
         'OFFICER_MULTIPLE_ATTEND_TO_DUTY','DEPENDENT_WITHOUT_PERMANENT',
@@ -270,7 +273,9 @@ final class ArpaAppointmentReadService
             $conflicts=['PERMANENT'=>false,'ACTING'=>false,'ATTEND_TO_DUTY'=>false];$actingDivisions=[];$dutyDivisions=[];
             foreach($byOfficer[$officerId]??[] as $period){
                 $type=(string)$period['appointment_type'];
-                if($type==='PERMANENT'&&$period['source_kind']==='OPERATIONAL'
+                $qualifyingPermanentSource=$period['source_kind']==='OPERATIONAL'
+                    ||($period['source_kind']==='REQUEST'&&in_array((string)$period['request_workflow_status'],self::QUALIFYING_PERMANENT_REQUEST_STATUSES,true));
+                if($type==='PERMANENT'&&$qualifyingPermanentSource
                     &&(string)$period['effective_from']<=$effectiveFrom
                     &&($period['effective_to']===null||(string)$period['effective_to']>=$effectiveFrom))$hasPermanent=true;
                 if(isset($conflicts[$type]))$conflicts[$type]=true;
@@ -303,23 +308,25 @@ final class ArpaAppointmentReadService
     {
         if($officerIds===[])return [];
         $officerPlaceholders=implode(',',array_fill(0,count($officerIds),'?'));
-        $statusPlaceholders=implode(',',array_fill(0,count(self::RESERVING_REQUEST_STATUSES),'?'));
+        $availabilityRequestStatuses=array_values(array_unique(array_merge(self::RESERVING_REQUEST_STATUSES,self::QUALIFYING_PERMANENT_REQUEST_STATUSES)));
+        $statusPlaceholders=implode(',',array_fill(0,count($availabilityRequestStatuses),'?'));
         $proposedEnd=$effectiveTo??'9999-12-31';
-        $sql="SELECT a.officer_id,a.appointment_type,a.arpa_division_location_id,a.effective_from,c.effective_to,'OPERATIONAL' source_kind
+        $sql="SELECT a.officer_id,a.appointment_type,a.arpa_division_location_id,a.effective_from,c.effective_to,'OPERATIONAL' source_kind,NULL request_workflow_status
               FROM arpa_division_appointment a
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               WHERE a.officer_id IN({$officerPlaceholders}) AND a.legacy_history_only=0 AND a.id<>COALESCE(?, '')
                 AND a.effective_from<=? AND (c.effective_to IS NULL OR c.effective_to>=?)
               UNION ALL
               SELECT r.officer_id,r.appointment_type,r.arpa_division_location_id,r.requested_effective_from,
-                     CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'REQUEST'
+                     CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'REQUEST',r.workflow_status
               FROM arpa_division_appointment_request r
               WHERE r.deleted_at IS NULL AND r.officer_id IN({$officerPlaceholders}) AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                 AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statusPlaceholders})
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment canonical_a WHERE canonical_a.request_id=r.id)
                 AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?
                 AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)
                 AND r.id<>COALESCE(?, '')";
-        $params=array_merge($officerIds,[$excludeAppointmentId,$proposedEnd,$effectiveFrom],$officerIds,self::RESERVING_REQUEST_STATUSES,[$proposedEnd,$effectiveFrom,$excludeRequestId]);
+        $params=array_merge($officerIds,[$excludeAppointmentId,$proposedEnd,$effectiveFrom],$officerIds,$availabilityRequestStatuses,[$proposedEnd,$effectiveFrom,$excludeRequestId]);
         $stmt=$this->pdo->prepare($sql);$stmt->execute($params);return $stmt->fetchAll();
     }
 

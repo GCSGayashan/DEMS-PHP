@@ -71,8 +71,31 @@ final class ArpaAppointmentBusinessRulesTest
         $this->same($divisions[9],$audit['new']['arpa_division_location_id']??null,'edit audit retains the updated submitted values');
         $otherActor=(string)$this->value('SELECT id FROM system_user WHERE id<>? ORDER BY id LIMIT 1',[$actor]);
         $this->throwsMessage(fn()=>$service->updateAndResubmitRequest('division',$permanentRequest,$editedPermanent,$otherActor),'Only the original maker may edit this submitted appointment.','another maker cannot edit a submitted appointment');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='DRAFT' WHERE id=?")->execute([$permanentRequest]);
+        $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Draft Permanent request does not qualify as the Acting foundation');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='SUBMITTED' WHERE id=?")->execute([$permanentRequest]);
+        $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Submitted Permanent request does not qualify as the Acting foundation');
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='ASC_VERIFIED' WHERE id=?")->execute([$permanentRequest]);
+        $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'ASC-verified Permanent request does not qualify as the Acting foundation');
         $this->throwsMessage(fn()=>$service->updateAndResubmitRequest('division',$permanentRequest,$editedPermanent,$actor),'This appointment has already been verified and can no longer be edited.','verification lock prevents a stale maker edit');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='RETURNED' WHERE id=?")->execute([$permanentRequest]);
+        $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Returned Permanent request does not qualify as the Acting foundation');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='ASC_APPROVED',deleted_at=NOW(),deleted_by=? WHERE id=?")->execute([$actor,$permanentRequest]);
+        $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Deleted ASC-approved Permanent request does not qualify as the Acting foundation');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NULL,deleted_by=NULL,delete_reason=NULL,requested_effective_from=? WHERE id=?")->execute([$future,$permanentRequest]);
+        $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Future ASC-approved Permanent request does not qualify before its effective date');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET requested_effective_from=? WHERE id=?")->execute([$today,$permanentRequest]);
+        foreach(['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED','NATIONAL_APPROVED'] as $qualifyingStatus){
+            $this->pdo->prepare('UPDATE arpa_division_appointment_request SET workflow_status=? WHERE id=?')->execute([$qualifyingStatus,$permanentRequest]);
+            $availability=$read->appointmentTypeAvailability($permanentOfficer,$today);
+            $this->same(true,(bool)$availability['has_qualifying_permanent'],"{$qualifyingStatus} Permanent request qualifies on its effective date");
+            $this->same(true,in_array('ACTING',$availability['allowed_types'],true),"{$qualifyingStatus} Permanent request exposes Acting in the server-derived options");
+        }
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='ASC_APPROVED' WHERE id=?")->execute([$permanentRequest]);
+        $approvedFoundationActing=$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'ACTING',$asc,$divisions[1],$today),$actor);
+        $this->same('SUBMITTED',$this->value('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$approvedFoundationActing]),'backend accepts Acting for another Division when the Permanent foundation is ASC approved');
+        $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE request_id=?',[$permanentRequest]),'ASC-approved Permanent remains a reservation and is not canonicalized early');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NOW(),deleted_by=?,delete_reason='Eligibility regression fixture complete' WHERE id=?")->execute([$actor,$approvedFoundationActing]);
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='SUBMITTED' WHERE id=?")->execute([$permanentRequest]);
         $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'PERMANENT',$asc,$divisions[1],$today),$actor),'This officer already has a Permanent ARPA Division assignment.','submitted Permanent reserves the officer');
         $this->promoteRequest($permanentRequest,$actor);
