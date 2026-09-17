@@ -54,13 +54,19 @@ final class ArpaAppointmentDateChangeOptionsTest
         $this->same('',$invalid['selectedOfficer'],'invalidated Officer is cleared alone');
         $this->same('',$invalid['selectedDivision'],'invalidated Division is cleared alone');
         $this->same(true,in_array('The previously selected Officer is not eligible on the selected start date.',$invalid['selectionMessages'],true),'invalid Officer receives a controlled message');
-        $this->same(true,in_array('The previously selected ARPA Division has no uncovered period available on the selected start date or is outside the selected ASC.',$invalid['selectionMessages'],true),'invalid Division receives a controlled message');
+        $this->same(true,in_array('The previously selected ARPA Division is outside the selected ASC or is not effective on the selected start date.',$invalid['selectionMessages'],true),'invalid Division receives a controlled message');
 
         ArpaAppointmentRules::assertNativeEffectiveDate('2025-01-01');$this->assertions++;
         $this->throws(fn()=>$formOptions->load($user,$asc,'2024-12-31'),'pre-baseline option request is rejected by business-date validation');
 
         $otherAsc=(string)$this->value("SELECT l.id FROM location l JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ASC' WHERE l.id<>? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' LIMIT 1",[$asc]);
         $this->same(false,ScopeService::canAccessCurrentArpaStage($user,'ASC',$otherAsc),'forged ASC remains outside current Active Working Context');
+
+        $exampleOfficer=(string)$this->value("SELECT id FROM officer WHERE id='5216e28e-4205-48ad-9b58-5ca8078c757b' AND nic='735370707V'");
+        if($exampleOfficer==='')throw new RuntimeException('The reported Permanent Officer fixture is required.');
+        $example=$read->appointmentTypeAvailability($exampleOfficer,$date);
+        $this->same(true,(bool)$example['has_qualifying_permanent'],'reported Officer has a qualifying Permanent ARPA Division appointment');
+        $this->same(true,in_array('ACTING',$example['allowed_types'],true),'reported Officer receives Acting in server-derived New Appointment options');
 
         if(count($divisions)<3)throw new RuntimeException('Three vacant ARPA Division fixtures are required.');
         $ended=$this->appointment($user,$officer,$asc,(string)$divisions[0]['id'],'2025-01-01');

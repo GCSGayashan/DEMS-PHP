@@ -230,8 +230,8 @@ final class ArpaAppointmentReadService
         if($appointmentType==='PERMANENT'&&$availability['conflicts']['PERMANENT']){
             throw new DomainException('This officer already has a Permanent ARPA Division assignment.');
         }
-        if($appointmentType==='ACTING'&&$availability['conflicts']['ACTING']){
-            throw new DomainException('This officer already has an Acting assignment.');
+        if($appointmentType==='ACTING'&&in_array($divisionId,$availability['acting_division_ids'],true)){
+            throw new DomainException('This officer already has an overlapping Acting assignment for this ARPA Division.');
         }
         if($appointmentType==='ATTEND_TO_DUTY'&&$availability['conflicts']['ATTEND_TO_DUTY']){
             throw new DomainException('This officer already has an Attend to the Duty assignment.');
@@ -267,21 +267,26 @@ final class ArpaAppointmentReadService
         $result=[];
         foreach($officers as $officer){
             $officerId=(string)$officer['id'];$hasPermanent=false;
-            $conflicts=['PERMANENT'=>false,'ACTING'=>false,'ATTEND_TO_DUTY'=>false];$dutyDivisions=[];
+            $conflicts=['PERMANENT'=>false,'ACTING'=>false,'ATTEND_TO_DUTY'=>false];$actingDivisions=[];$dutyDivisions=[];
             foreach($byOfficer[$officerId]??[] as $period){
                 $type=(string)$period['appointment_type'];
                 if($type==='PERMANENT'&&$period['source_kind']==='OPERATIONAL'
                     &&(string)$period['effective_from']<=$effectiveFrom
                     &&($period['effective_to']===null||(string)$period['effective_to']>=$effectiveFrom))$hasPermanent=true;
                 if(isset($conflicts[$type]))$conflicts[$type]=true;
+                if($type==='ACTING')$actingDivisions[]=(string)$period['arpa_division_location_id'];
                 if($type==='DUTY_COVERING')$dutyDivisions[]=(string)$period['arpa_division_location_id'];
             }
             $permanency=(string)($officer['arpa_service_permanency']??'');
             $result[]=[
                 'officer_id'=>$officerId,'service_permanency'=>$permanency,
                 'has_qualifying_permanent'=>$hasPermanent,'conflicts'=>$conflicts,
+                'acting_division_ids'=>array_values(array_unique($actingDivisions)),
                 'duty_covering_division_ids'=>array_values(array_unique($dutyDivisions)),
-                'allowed_types'=>ArpaAppointmentRules::allowedAppointmentTypes($permanency,$hasPermanent,$conflicts['PERMANENT'],$conflicts['ACTING'],$conflicts['ATTEND_TO_DUTY']),
+                // Acting is Division-specific. Keep it available in the form;
+                // assertAppointmentTypeAvailable() rejects only an overlapping
+                // Acting period for the selected Division.
+                'allowed_types'=>ArpaAppointmentRules::allowedAppointmentTypes($permanency,$hasPermanent,$conflicts['PERMANENT'],false,$conflicts['ATTEND_TO_DUTY']),
             ];
         }
         return $result;

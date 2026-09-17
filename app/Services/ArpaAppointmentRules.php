@@ -44,7 +44,7 @@ final class ArpaAppointmentRules
         string $permanency,
         bool $hasPermanent,
         bool $permanentConflict,
-        bool $actingConflict,
+        bool $sameDivisionActingConflict,
         bool $attendToDutyConflict
     ): array {
         if (!in_array($permanency, self::PERMANENCIES, true)) return [];
@@ -53,7 +53,7 @@ final class ArpaAppointmentRules
         if (!$permanentConflict) $allowed[] = 'PERMANENT';
         if (!$hasPermanent) return $allowed;
 
-        if ($permanency === 'PERMANENT_IN_SERVICE' && !$actingConflict) $allowed[] = 'ACTING';
+        if ($permanency === 'PERMANENT_IN_SERVICE' && !$sameDivisionActingConflict) $allowed[] = 'ACTING';
         $allowed[] = 'DUTY_COVERING';
         if ($permanency === 'NOT_PERMANENT_IN_SERVICE' && !$attendToDutyConflict) $allowed[] = 'ATTEND_TO_DUTY';
         return $allowed;
