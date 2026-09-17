@@ -100,6 +100,8 @@ $router->get('/hr/arpa-appointments/divisions', [ArpaAppointmentController::clas
 $router->get('/hr/arpa-appointments/divisions/create', [ArpaAppointmentController::class, 'createDivision']);
 $router->post('/hr/arpa-appointments/divisions', [ArpaAppointmentController::class, 'storeDivision']);
 $router->get('/hr/arpa-appointments/divisions/{id}', [ArpaAppointmentController::class, 'divisionDetail']);
+$router->get('/hr/arpa-appointments/divisions/{id}/edit-dates', [ArpaAppointmentController::class, 'editAppointmentDates']);
+$router->post('/hr/arpa-appointments/divisions/{id}/edit-dates', [ArpaAppointmentController::class, 'updateAppointmentDates']);
 $router->get('/hr/arpa-appointments/divisions/{id}/end', [ArpaAppointmentController::class, 'endDivision']);
 $router->post('/hr/arpa-appointments/divisions/{id}/end', [ArpaAppointmentController::class, 'storeDivisionEnd']);
 $router->get('/hr/arpa-appointments/divisions/{id}/transfer', [ArpaAppointmentController::class, 'transfer']);
@@ -110,6 +112,8 @@ $router->post('/hr/arpa-appointments/subjects', [ArpaAppointmentController::clas
 $router->get('/hr/arpa-appointments/subjects/{id}/end', [ArpaAppointmentController::class, 'endSubject']);
 $router->post('/hr/arpa-appointments/subjects/{id}/end', [ArpaAppointmentController::class, 'storeSubjectEnd']);
 $router->get('/hr/arpa-appointments/pending', [ArpaAppointmentController::class, 'pending']);
+$router->get('/hr/arpa-appointments/requests/division/{id}/delete', [ArpaAppointmentController::class, 'deleteWorkflowRequestForm']);
+$router->post('/hr/arpa-appointments/requests/division/{id}/delete', [ArpaAppointmentController::class, 'deleteWorkflowRequest']);
 $router->get('/hr/arpa-appointments/requests/{entity}/{id}/edit', [ArpaAppointmentController::class, 'editRequest']);
 $router->post('/hr/arpa-appointments/requests/{entity}/{id}/edit', [ArpaAppointmentController::class, 'updateRequest']);
 $router->get('/hr/arpa-appointments/requests/{entity}/{id}', [ArpaAppointmentController::class, 'requestDetail']);

@@ -1,0 +1,11 @@
+<?php use App\Core\Csrf; ?>
+<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Administrative Correction</div><h1>Correct Appointment Dates</h1><p>This immediate correction preserves workflow approval and records an append-only audit entry.</p></div></div>
+<div class="alert alert-warning">This does not create a new approval workflow or notification. Only the authoritative business dates shown below are editable.</div>
+<div class="card mb-4"><div class="card-body"><dl class="row mb-0"><dt class="col-md-4">Officer</dt><dd class="col-md-8"><?= e($record['officer_number'].' - '.$record['officer_name']) ?></dd><dt class="col-md-4">Appointment</dt><dd class="col-md-8"><?= e(str_replace('_',' ',$record['appointment_type']).' / '.$record['arpa_name_snapshot']) ?></dd><dt class="col-md-4">ASC</dt><dd class="col-md-8"><?= e($record['asc_name_snapshot']) ?></dd><dt class="col-md-4">Workflow Status</dt><dd class="col-md-8"><?= e($record['workflow_status']) ?></dd></dl></div></div>
+<form method="post" action="<?= e(url('hr/arpa-appointments/divisions/'.$record['id'].'/edit-dates')) ?>" class="card"><div class="card-body">
+<?= Csrf::field() ?>
+<div class="row g-3"><div class="col-md-6"><label class="form-label" for="effective_from">Appointment Effective From <span class="text-danger">*</span></label><input class="form-control" type="date" id="effective_from" name="effective_from" value="<?= e($record['effective_from']) ?>" min="2025-01-01" required></div>
+<?php if($record['closure_id']!==null): ?><div class="col-md-6"><label class="form-label" for="effective_to">Appointment Effective To <span class="text-danger">*</span></label><input class="form-control" type="date" id="effective_to" name="effective_to" value="<?= e($record['effective_to']) ?>" min="2025-01-01" required></div><?php endif; ?></div>
+<div class="mt-3"><label class="form-label" for="correction_reason">Correction Reason <span class="text-danger">*</span></label><textarea class="form-control" id="correction_reason" name="correction_reason" rows="3" maxlength="500" required></textarea></div>
+<div class="mt-3"><button class="btn btn-primary" type="submit">Save Date Correction</button> <a class="btn btn-outline-secondary" href="<?= e(url('hr/arpa-appointments/divisions/'.$record['id'])) ?>">Cancel</a></div>
+</div></form>

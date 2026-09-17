@@ -3,7 +3,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,DataTableRegistry,NicNormalizer,ScopeService};
-use App\Services\{OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
+use App\Services\{ArpaAdministrativePolicy,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
 
 final class OfficerController extends Controller
 {
@@ -28,10 +28,10 @@ final class OfficerController extends Controller
 
     public function show(string $id):void
     {
-        Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$workflowService=new OfficerWorkflowService(Database::pdo());
-        if(!$workflowService->canAccess($id,$userId)){http_response_code(404);$this->render('partials/not-found');return;}
-        $restricted=ScopeService::requiresGeographicRestriction($userId);$offices=ScopeService::scopedOffices($userId);$ascIds=$restricted?array_column(ScopeService::scopedLocations($userId,'ASC'),'id'):null;
-        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=(new OfficerOfficeAssignmentService(Database::pdo()))->initialForOfficer($id);$this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment'));
+        Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$workflowService=new OfficerWorkflowService(Database::pdo());$demsAdmin=ArpaAdministrativePolicy::isCanonicalDemsAdmin();
+        if(!$demsAdmin&&!$workflowService->canAccess($id,$userId)){http_response_code(404);$this->render('partials/not-found');return;}
+        $restricted=!$demsAdmin&&ScopeService::requiresGeographicRestriction($userId);$offices=$demsAdmin?[]:ScopeService::scopedOffices($userId);$ascIds=$restricted?array_column(ScopeService::scopedLocations($userId,'ASC'),'id'):null;
+        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds,$demsAdmin);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=(new OfficerOfficeAssignmentService(Database::pdo()))->initialForOfficer($id);$canAdminDateCorrect=ArpaAdministrativePolicy::canCorrectDates();$this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment','demsAdmin','canAdminDateCorrect'));
     }
 
     public function search():void

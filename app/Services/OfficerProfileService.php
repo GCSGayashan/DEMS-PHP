@@ -10,13 +10,34 @@ final class OfficerProfileService
 {
     public function __construct(private readonly PDO $pdo){}
 
-    public function profile(string $officerId,array $allowedOfficeIds=[],?array $allowedAscIds=null):array
+    public function profile(string $officerId,array $allowedOfficeIds=[],?array $allowedAscIds=null,bool $includeAllWorkflowRequests=false):array
     {
         $s=$this->pdo->prepare("SELECT o.*,t.name_en title_name,cs.name_en civil_status_name,d.name_en designation_name,d.system_key designation_key,c.name_en class_name,os.name_en officer_status_name,po.dad_number primary_office_dad,po.name_en primary_office_name FROM officer o LEFT JOIN hr_title t ON t.id=o.title_id LEFT JOIN civil_status cs ON cs.id=o.civil_status_id LEFT JOIN designation d ON d.id=o.primary_designation_id LEFT JOIN officer_class c ON c.id=o.class_id LEFT JOIN officer_status os ON os.id=o.officer_status_id LEFT JOIN office po ON po.id=o.primary_office_id WHERE o.id=?");$s->execute([$officerId]);$officer=$s->fetch();if(!$officer)throw new RuntimeException('Officer was not found.');
         $officeSql="SELECT a.*,ofc.dad_number office_dad,ofc.name_en office_name,ot.name_en office_type,l.dad_number location_dad,l.name_en location_name,CASE WHEN a.approval_status='APPROVED' AND a.active=1 AND a.effective_from<=CURRENT_DATE() AND (a.effective_to IS NULL OR a.effective_to>=CURRENT_DATE()) THEN 1 ELSE 0 END is_current FROM officer_office_assignment a JOIN office ofc ON ofc.id=a.office_id JOIN office_type ot ON ot.id=ofc.office_type_id LEFT JOIN location l ON l.id=ofc.linked_location_id WHERE a.deleted_at IS NULL AND a.officer_id=?";$params=[$officerId];if($allowedOfficeIds!==[]){$officeSql.=' AND a.office_id IN ('.implode(',',array_fill(0,count($allowedOfficeIds),'?')).')';$params=array_merge($params,$allowedOfficeIds);}$officeSql.=' ORDER BY is_current DESC,a.effective_from DESC,a.id';$s=$this->pdo->prepare($officeSql);$s->execute($params);$officeRows=$s->fetchAll();
         [$operationalAppointments,$appointmentWorkflow]=$this->operationalAppointments($officerId,$allowedAscIds);[$operationalSubjects,$subjectWorkflow]=$this->operationalSubjects($officerId,$allowedAscIds);
         $legacy=$this->legacyHistory($officerId,$allowedAscIds);
-        return ['officer'=>$officer,'service_permanency_evidence'=>$this->servicePermanencyEvidence($officerId),'current_offices'=>array_values(array_filter($officeRows,fn($r)=>(int)$r['is_current']===1)),'historical_offices'=>array_values(array_filter($officeRows,fn($r)=>(int)$r['is_current']!==1&&$r['approval_status']==='APPROVED')),'current_appointments'=>$this->period($operationalAppointments,'CURRENT'),'future_appointments'=>$this->period($operationalAppointments,'FUTURE'),'previous_appointments'=>$this->period($operationalAppointments,'PREVIOUS'),'current_subjects'=>$this->period($operationalSubjects,'CURRENT'),'future_subjects'=>$this->period($operationalSubjects,'FUTURE'),'previous_subjects'=>$this->period($operationalSubjects,'PREVIOUS'),'appointment_workflow'=>$appointmentWorkflow,'subject_workflow'=>$subjectWorkflow,'legacy_current'=>$this->period($legacy,'CURRENT'),'legacy_future'=>$this->period($legacy,'FUTURE'),'legacy_previous'=>$this->period($legacy,'PREVIOUS'),'appointment_corrections'=>(new ArpaAppointmentDataIssueCorrectionService($this->pdo))->correctionsForOfficer($officerId,$allowedAscIds)];
+        return ['officer'=>$officer,'service_permanency_evidence'=>$this->servicePermanencyEvidence($officerId),'current_offices'=>array_values(array_filter($officeRows,fn($r)=>(int)$r['is_current']===1)),'historical_offices'=>array_values(array_filter($officeRows,fn($r)=>(int)$r['is_current']!==1&&$r['approval_status']==='APPROVED')),'current_appointments'=>$this->period($operationalAppointments,'CURRENT'),'future_appointments'=>$this->period($operationalAppointments,'FUTURE'),'previous_appointments'=>$this->period($operationalAppointments,'PREVIOUS'),'current_subjects'=>$this->period($operationalSubjects,'CURRENT'),'future_subjects'=>$this->period($operationalSubjects,'FUTURE'),'previous_subjects'=>$this->period($operationalSubjects,'PREVIOUS'),'appointment_workflow'=>$appointmentWorkflow,'subject_workflow'=>$subjectWorkflow,'legacy_current'=>$this->period($legacy,'CURRENT'),'legacy_future'=>$this->period($legacy,'FUTURE'),'legacy_previous'=>$this->period($legacy,'PREVIOUS'),'appointment_corrections'=>(new ArpaAppointmentDataIssueCorrectionService($this->pdo))->correctionsForOfficer($officerId,$allowedAscIds),'arpa_workflow_requests'=>$includeAllWorkflowRequests?$this->workflowRequests($officerId):[]];
+    }
+
+    private function workflowRequests(string $officerId):array
+    {
+        $sql="SELECT r.*,asc_l.dad_number asc_number,asc_l.name_en asc_name,arpa.dad_number arpa_number,arpa.name_en arpa_name,
+                     COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.location_snapshot_json,'$.district.name_en')),
+                       (SELECT d.name_en FROM location_relationship da JOIN location d ON d.id=da.parent_location_id
+                         WHERE da.child_location_id=r.asc_location_id AND da.relationship_type='DISTRICT_ASC'
+                           AND da.active=1 AND da.approval_status='APPROVED' AND da.effective_from<=CURRENT_DATE()
+                           AND (da.effective_to IS NULL OR da.effective_to>=CURRENT_DATE()) ORDER BY da.effective_from DESC,da.id LIMIT 1)) district_name,
+                     source_a.arpa_name_snapshot source_appointment_name,
+                     canonical.id canonical_appointment_id,closure.id canonical_closure_id
+                FROM arpa_division_appointment_request r
+                LEFT JOIN location asc_l ON asc_l.id=r.asc_location_id
+                LEFT JOIN location arpa ON arpa.id=r.arpa_division_location_id
+                LEFT JOIN arpa_division_appointment source_a ON source_a.id=r.source_appointment_id
+                LEFT JOIN arpa_division_appointment canonical ON canonical.request_id=r.id
+                LEFT JOIN arpa_division_appointment_closure closure ON closure.request_id=r.id
+               WHERE r.officer_id=?
+               ORDER BY COALESCE(r.requested_effective_from,r.requested_effective_to,r.created_at) DESC,r.created_at DESC,r.id";
+        $s=$this->pdo->prepare($sql);$s->execute([$officerId]);return $s->fetchAll();
     }
 
     private function operationalAppointments(string $id,?array $ascIds):array
