@@ -92,6 +92,8 @@ $router->get('/hr/arpa-appointments/timeline/officers/{id}', [ArpaAppointmentCon
 $router->get('/hr/arpa-appointments/timeline/{id}', [ArpaAppointmentController::class, 'appointmentTimelineDetail']);
 $router->get('/hr/arpa-appointments/data-issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues', [ArpaAppointmentController::class, 'dataIssues']);
+$router->get('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'bulkLegacyCurrentReconciliation']);
+$router->post('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'executeBulkLegacyCurrentReconciliation']);
 $router->get('/hr/arpa-appointments/issues/corrections/{id}', [ArpaAppointmentController::class, 'dataIssueCorrectionDetail']);
 $router->get('/hr/arpa-appointments/issues/{key}', [ArpaAppointmentController::class, 'dataIssueDetail']);
 $router->post('/hr/arpa-appointments/issues/{key}/correct', [ArpaAppointmentController::class, 'correctDataIssue']);

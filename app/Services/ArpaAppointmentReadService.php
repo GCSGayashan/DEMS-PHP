@@ -225,23 +225,43 @@ final class ArpaAppointmentReadService
         ?string $excludeAppointmentId = null
     ): void {
         $availability=$this->appointmentTypeAvailability($officerId,$effectiveFrom,$effectiveTo,$excludeRequestId,$excludeAppointmentId);
-        ArpaAppointmentRules::assertAppointmentTypeAllowed(
-            (string)$availability['service_permanency'],
-            $appointmentType,
-            (bool)$availability['has_qualifying_permanent']
-        );
-        if($appointmentType==='PERMANENT'&&$availability['conflicts']['PERMANENT']){
-            throw new DomainException('This officer already has a Permanent ARPA Division assignment.');
+        $blocker=self::appointmentTypeBlocker($availability,$appointmentType,$divisionId);
+        if($blocker!==null)throw new DomainException($blocker['message']);
+    }
+
+    /**
+     * Shared appointment-combination decision used by interactive validation and
+     * legacy-current reconciliation. Keeping this rule in one place prevents the
+     * bulk preview from developing a second interpretation of ARPA eligibility.
+     *
+     * @param array<string,mixed> $availability
+     * @return array{code:string,message:string}|null
+     */
+    public static function appointmentTypeBlocker(array $availability,string $appointmentType,string $divisionId):?array
+    {
+        try{
+            ArpaAppointmentRules::assertAppointmentTypeAllowed(
+                (string)($availability['service_permanency']??''),
+                $appointmentType,
+                (bool)($availability['has_qualifying_permanent']??false)
+            );
+        }catch(DomainException $e){
+            return ['code'=>'INVALID_APPOINTMENT_COMBINATION','message'=>$e->getMessage()];
         }
-        if($appointmentType==='ACTING'&&in_array($divisionId,$availability['acting_division_ids'],true)){
-            throw new DomainException('This officer already has an overlapping Acting assignment for this ARPA Division.');
+        $conflicts=is_array($availability['conflicts']??null)?$availability['conflicts']:[];
+        if($appointmentType==='PERMANENT'&&!empty($conflicts['PERMANENT'])){
+            return ['code'=>'OFFICER_PERMANENT_CONFLICT','message'=>'This officer already has a Permanent ARPA Division assignment.'];
         }
-        if($appointmentType==='ATTEND_TO_DUTY'&&$availability['conflicts']['ATTEND_TO_DUTY']){
-            throw new DomainException('This officer already has an Attend to the Duty assignment.');
+        if($appointmentType==='ACTING'&&in_array($divisionId,(array)($availability['acting_division_ids']??[]),true)){
+            return ['code'=>'OFFICER_ACTING_DIVISION_CONFLICT','message'=>'This officer already has an overlapping Acting assignment for this ARPA Division.'];
         }
-        if($appointmentType==='DUTY_COVERING'&&in_array($divisionId,$availability['duty_covering_division_ids'],true)){
-            throw new DomainException('This officer already covers this ARPA Division for the selected period.');
+        if($appointmentType==='ATTEND_TO_DUTY'&&!empty($conflicts['ATTEND_TO_DUTY'])){
+            return ['code'=>'OFFICER_ATTEND_TO_DUTY_CONFLICT','message'=>'This officer already has an Attend to the Duty assignment.'];
         }
+        if($appointmentType==='DUTY_COVERING'&&in_array($divisionId,(array)($availability['duty_covering_division_ids']??[]),true)){
+            return ['code'=>'OFFICER_DUTY_COVERING_DIVISION_CONFLICT','message'=>'This officer already covers this ARPA Division for the selected period.'];
+        }
+        return null;
     }
 
     /** @param array<int,array<string,mixed>> $officers @return array<int,array<string,mixed>> */

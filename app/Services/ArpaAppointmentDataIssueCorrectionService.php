@@ -27,6 +27,53 @@ final class ArpaAppointmentDataIssueCorrectionService
 
     public function __construct(private readonly PDO $pdo){}
 
+    /** @return array<int,array<string,mixed>> */
+    public function canonicalPromotionCandidates(?string $businessDate=null):array
+    {
+        $rows=$this->canonicalPromotionRows(null,$businessDate,true);
+        foreach($rows as &$row)$row=array_merge($row,$this->canonicalPromotionAssessmentFromRow($row));
+        unset($row);
+        return $rows;
+    }
+
+    /** @return array<string,mixed> */
+    public function canonicalPromotionAssessment(string $appointmentId,?string $businessDate=null,bool $includeLegacyPeerConflicts=true):array
+    {
+        $rows=$this->canonicalPromotionRows($appointmentId,$businessDate,false);
+        if($rows===[])return ['eligible'=>false,'classification'=>'SKIPPED_OTHER_DATA_ISSUE','blocker_code'=>'APPOINTMENT_NOT_FOUND','blocker_reason'=>'The imported appointment was not found.'];
+        return array_merge($rows[0],$this->canonicalPromotionAssessmentFromRow($rows[0],$includeLegacyPeerConflicts));
+    }
+
+    /**
+     * Canonical dems.admin entry point. Each call owns one appointment-level
+     * transaction and delegates to the same promotion method as the individual
+     * Appointment Data Issue action.
+     *
+     * @return array<string,mixed>
+     */
+    public function promoteCanonicalAppointmentFromBulk(string $appointmentId,string $actorId,string $batchId):array
+    {
+        if(!ArpaAdministrativePolicy::isCanonicalDemsAdmin()||(string)(Auth::user()['id']??'')!==$actorId){
+            throw new DomainException('Only the canonical dems.admin account may execute bulk legacy current reconciliation.');
+        }
+        $batchId=trim($batchId);if($batchId==='')throw new DomainException('A bulk reconciliation batch ID is required.');
+        return $this->transaction(function()use($appointmentId,$actorId,$batchId):array{
+            $this->lockAppointments([$appointmentId]);
+            $target=$this->appointment($appointmentId);
+            $this->lockDivision((string)$target['arpa_division_location_id']);
+            $assessment=$this->canonicalPromotionAssessment($appointmentId);
+            if(!$assessment['eligible'])throw new DomainException((string)$assessment['blocker_reason']);
+            $rowKey='LEGACY_HISTORICAL_EXCEPTION:'.$appointmentId;
+            $issue=['issue_type'=>'LEGACY_HISTORICAL_EXCEPTION','related_ids'=>$appointmentId,'asc_location_id'=>$target['asc_location_id']];
+            return $this->promoteHistoricalAppointment($rowKey,$issue,[
+                'appointment_id'=>$appointmentId,
+                'batch_id'=>$batchId,
+                'remarks'=>'Automated bulk reconciliation batch '.$batchId,
+                'evidence_reference'=>'Automated conflict validation; batch '.$batchId,
+            ],$actorId,'Bulk canonical reconciliation: imported open appointment confirmed as the unique authoritative current assignment after automated conflict validation.',[$target]);
+        });
+    }
+
     public function canCorrect(string $userId,string $ascLocationId):bool
     {
         $context=Auth::activeContextForUser($userId);
@@ -277,6 +324,12 @@ final class ArpaAppointmentDataIssueCorrectionService
         if((string)$target['record_origin']!=='LEGACY_IMPORT'||(int)$target['legacy_history_only']!==1||(int)$target['legacy_exception']!==1)throw new DomainException('Only an imported historical exception can be made authoritative through this action.');
         if($target['closure_id']!==null||$target['effective_to']!==null)throw new DomainException('An ended historical appointment cannot be promoted as the current assignment.');
 
+        $this->lockDivision((string)$target['arpa_division_location_id']);
+        // A human single-record correction may explicitly choose between legacy
+        // peers. Bulk preview/execution is stricter and skips every ambiguous peer.
+        $assessment=$this->canonicalPromotionAssessment($appointmentId,null,false);
+        if(!$assessment['eligible'])throw new DomainException((string)$assessment['blocker_reason']);
+
         $request=$this->requestRecord((string)$target['request_id'],true);
         $duplicates=$this->exactDuplicateNativeReservations($target,true);
         $correctionId=$this->uuid();$deleteReason='Superseded by canonical imported appointment '.$appointmentId.' through Data Issue correction '.$correctionId.'.';
@@ -291,7 +344,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         (new ArpaAppointmentReadService($this->pdo))->assertAppointmentTypeAvailable((string)$target['officer_id'],(string)$target['appointment_type'],(string)$target['arpa_division_location_id'],(string)$target['effective_from'],null,(string)$target['request_id'],$appointmentId);
 
         $metadata=$this->decode((string)$target['origin_metadata_json']);
-        $metadata['data_issue_resolution']=['correction_id'=>$correctionId,'issue_row_key'=>$rowKey,'resolved_by'=>$actorId,'resolved_at'=>date(DATE_ATOM),'authority'=>'APPOINTMENT_DATA_ISSUE','previous_legacy_history_only'=>(int)$target['legacy_history_only'],'previous_legacy_exception'=>(int)$target['legacy_exception'],'superseded_native_request_ids'=>array_column($duplicates,'id')];
+        $metadata['data_issue_resolution']=['correction_id'=>$correctionId,'issue_row_key'=>$rowKey,'resolved_by'=>$actorId,'resolved_at'=>date(DATE_ATOM),'authority'=>'APPOINTMENT_DATA_ISSUE','batch_id'=>$this->nullText($input['batch_id']??null),'previous_legacy_history_only'=>(int)$target['legacy_history_only'],'previous_legacy_exception'=>(int)$target['legacy_exception'],'superseded_native_request_ids'=>array_column($duplicates,'id')];
         $before=['appointment'=>$target,'request'=>$request,'duplicate_requests'=>$duplicates];
         $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=0,legacy_exception=0,origin_metadata_json=? WHERE id=?')->execute([$this->json($metadata),$appointmentId]);
         $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=0,legacy_exception=0,origin_metadata_json=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$this->json($metadata),$actorId,$target['request_id']]);
@@ -390,6 +443,132 @@ final class ArpaAppointmentDataIssueCorrectionService
     private function requestRecord(string $id,bool $lock=false):array
     {
         $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=?'.($lock?' FOR UPDATE':''));$s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('Appointment request was not found.');return $row;
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private function canonicalPromotionRows(?string $appointmentId,?string $businessDate,bool $onlyCandidates):array
+    {
+        $date=$this->date($businessDate??date('Y-m-d'),'Business date');$asOf=$this->pdo->quote($date);
+        $reserving="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
+        $availabilityStatuses="'".implode("','",array_values(array_unique(array_merge(ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES,ArpaAppointmentReadService::QUALIFYING_PERMANENT_REQUEST_STATUSES))))."'";
+        $qualifying="'".implode("','",ArpaAppointmentReadService::QUALIFYING_PERMANENT_REQUEST_STATUSES)."'";
+        $exact="r2.officer_id=a.officer_id AND r2.appointment_type=a.appointment_type
+                AND r2.asc_location_id=a.asc_location_id AND r2.arpa_division_location_id=a.arpa_division_location_id
+                AND r2.requested_effective_from=a.effective_from AND r2.requested_effective_to IS NULL
+                AND r2.request_type='APPOINTMENT' AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment exact_a WHERE exact_a.request_id=r2.id)";
+        $activeLegacyCandidate="a2.record_origin='LEGACY_IMPORT' AND a2.legacy_history_only=1 AND a2.legacy_exception=1
+                AND c2.id IS NULL AND a2.effective_from<={$asOf}
+                AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction done2 WHERE done2.appointment_id=a2.id
+                    AND done2.correction_action IN('RESOLVE_CANONICAL_ASSIGNMENT','KEEP_AS_HISTORICAL_EXCEPTION')
+                    AND done2.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+        $requestOverlap="r2.requested_effective_from IS NOT NULL AND COALESCE(r2.requested_effective_to,'9999-12-31')>=a.effective_from";
+        $sql="SELECT a.*,r.workflow_status,r.deleted_at request_deleted_at,c.id closure_id,c.effective_to,{$asOf} business_date,
+                     o.dad_number officer_number,o.name_with_initials officer_name,o.nic,o.arpa_service_permanency,
+                     a.arpa_name_snapshot arpa_division_name,a.asc_name_snapshot asc_name,a.district_name_snapshot district_name,
+                     EXISTS(SELECT 1 FROM arpa_appointment_data_correction kept WHERE kept.appointment_id=a.id
+                       AND kept.correction_action='KEEP_AS_HISTORICAL_EXCEPTION' AND kept.resolution_status='KEPT_HISTORICAL_EXCEPTION') kept_historical,
+                     EXISTS(SELECT 1 FROM arpa_appointment_data_correction resolved WHERE resolved.appointment_id=a.id
+                       AND resolved.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND resolved.resolution_status='RESOLVED_BY_CORRECTION') already_resolved,
+                     EXISTS(SELECT 1 FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
+                       WHERE a2.id<>a.id AND a2.arpa_division_location_id=a.arpa_division_location_id
+                         AND a2.legacy_history_only=0 AND a2.effective_from<='9999-12-31'
+                         AND COALESCE(c2.effective_to,'9999-12-31')>=a.effective_from) authoritative_division_conflict,
+                     EXISTS(SELECT 1 FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
+                       WHERE a2.id<>a.id AND a2.arpa_division_location_id=a.arpa_division_location_id AND {$activeLegacyCandidate}) peer_legacy_division_conflict,
+                     EXISTS(SELECT 1 FROM arpa_division_appointment_request r2
+                       WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE' AND r2.legacy_history_only=0
+                         AND r2.arpa_division_location_id=a.arpa_division_location_id AND r2.workflow_status IN({$reserving})
+                         AND {$requestOverlap} AND NOT({$exact})) active_workflow_reservation,
+                     (SELECT COUNT(*) FROM arpa_division_appointment_request r2
+                       WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE' AND r2.legacy_history_only=0
+                         AND r2.workflow_status IN({$reserving}) AND {$exact}) exact_duplicate_count,
+                     EXISTS(SELECT 1 FROM arpa_division_appointment_request lr
+                       WHERE lr.deleted_at IS NULL AND lr.record_origin='LEGACY_IMPORT' AND lr.legacy_exception=1
+                         AND lr.id<>a.request_id AND lr.arpa_division_location_id=a.arpa_division_location_id
+                         AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment la WHERE la.request_id=lr.id)
+                         AND lr.requested_effective_from<='9999-12-31' AND COALESCE(lr.requested_effective_to,'9999-12-31')>=a.effective_from) unresolved_legacy_record,
+                     (EXISTS(SELECT 1 FROM arpa_division_appointment pa LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=pa.id
+                        WHERE pa.id<>a.id AND pa.officer_id=a.officer_id AND pa.appointment_type='PERMANENT' AND pa.legacy_history_only=0
+                          AND pa.effective_from<=a.effective_from AND COALESCE(pc.effective_to,'9999-12-31')>=a.effective_from)
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment_request r2 WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE'
+                          AND r2.legacy_history_only=0 AND r2.officer_id=a.officer_id AND r2.appointment_type='PERMANENT'
+                          AND r2.workflow_status IN({$qualifying}) AND r2.requested_effective_from<=a.effective_from
+                          AND COALESCE(r2.requested_effective_to,'9999-12-31')>=a.effective_from AND NOT({$exact}))) has_qualifying_permanent,
+                     (EXISTS(SELECT 1 FROM arpa_division_appointment pa LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=pa.id
+                        WHERE pa.id<>a.id AND pa.officer_id=a.officer_id AND pa.appointment_type='PERMANENT' AND pa.legacy_history_only=0
+                          AND COALESCE(pc.effective_to,'9999-12-31')>=a.effective_from)
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment_request r2 WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE'
+                          AND r2.legacy_history_only=0 AND r2.officer_id=a.officer_id AND r2.appointment_type='PERMANENT'
+                          AND r2.workflow_status IN({$availabilityStatuses}) AND {$requestOverlap} AND NOT({$exact}))
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
+                          WHERE a2.id<>a.id AND a2.officer_id=a.officer_id AND a2.appointment_type='PERMANENT' AND {$activeLegacyCandidate})) permanent_conflict,
+                     (EXISTS(SELECT 1 FROM arpa_division_appointment pa LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=pa.id
+                        WHERE pa.id<>a.id AND pa.officer_id=a.officer_id AND pa.appointment_type='ACTING'
+                          AND pa.arpa_division_location_id=a.arpa_division_location_id AND pa.legacy_history_only=0
+                          AND COALESCE(pc.effective_to,'9999-12-31')>=a.effective_from)
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment_request r2 WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE'
+                          AND r2.legacy_history_only=0 AND r2.officer_id=a.officer_id AND r2.appointment_type='ACTING'
+                          AND r2.arpa_division_location_id=a.arpa_division_location_id AND r2.workflow_status IN({$availabilityStatuses})
+                          AND {$requestOverlap} AND NOT({$exact}))) acting_division_conflict,
+                     (EXISTS(SELECT 1 FROM arpa_division_appointment pa LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=pa.id
+                        WHERE pa.id<>a.id AND pa.officer_id=a.officer_id AND pa.appointment_type='DUTY_COVERING'
+                          AND pa.arpa_division_location_id=a.arpa_division_location_id AND pa.legacy_history_only=0
+                          AND COALESCE(pc.effective_to,'9999-12-31')>=a.effective_from)
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment_request r2 WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE'
+                          AND r2.legacy_history_only=0 AND r2.officer_id=a.officer_id AND r2.appointment_type='DUTY_COVERING'
+                          AND r2.arpa_division_location_id=a.arpa_division_location_id AND r2.workflow_status IN({$availabilityStatuses})
+                          AND {$requestOverlap} AND NOT({$exact}))) duty_division_conflict,
+                     (EXISTS(SELECT 1 FROM arpa_division_appointment pa LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=pa.id
+                        WHERE pa.id<>a.id AND pa.officer_id=a.officer_id AND pa.appointment_type='ATTEND_TO_DUTY' AND pa.legacy_history_only=0
+                          AND COALESCE(pc.effective_to,'9999-12-31')>=a.effective_from)
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment_request r2 WHERE r2.deleted_at IS NULL AND r2.record_origin='NATIVE'
+                          AND r2.legacy_history_only=0 AND r2.officer_id=a.officer_id AND r2.appointment_type='ATTEND_TO_DUTY'
+                          AND r2.workflow_status IN({$availabilityStatuses}) AND {$requestOverlap} AND NOT({$exact}))
+                       OR EXISTS(SELECT 1 FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
+                          WHERE a2.id<>a.id AND a2.officer_id=a.officer_id AND a2.appointment_type='ATTEND_TO_DUTY' AND {$activeLegacyCandidate})) attend_conflict
+              FROM arpa_division_appointment a
+              JOIN arpa_division_appointment_request r ON r.id=a.request_id
+              JOIN officer o ON o.id=a.officer_id
+              LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+              WHERE 1=1";
+        $params=[];
+        if($appointmentId!==null){$sql.=' AND a.id=?';$params[]=$appointmentId;}
+        if($onlyCandidates)$sql.=" AND a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=1 AND a.legacy_exception=1 AND c.id IS NULL AND a.effective_from<={$asOf}";
+        $sql.=' ORDER BY FIELD(a.appointment_type,\'PERMANENT\',\'ACTING\',\'DUTY_COVERING\',\'ATTEND_TO_DUTY\'),a.effective_from,a.id';
+        $s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchAll();
+    }
+
+    /** @param array<string,mixed> $row @return array<string,mixed> */
+    private function canonicalPromotionAssessmentFromRow(array $row,bool $includeLegacyPeerConflicts=true):array
+    {
+        $blocked=static fn(string $classification,string $code,string $reason):array=>['eligible'=>false,'classification'=>$classification,'blocker_code'=>$code,'blocker_reason'=>$reason];
+        if((string)($row['record_origin']??'')!=='LEGACY_IMPORT'||(int)($row['legacy_history_only']??0)!==1||(int)($row['legacy_exception']??0)!==1){
+            return $blocked('SKIPPED_OTHER_DATA_ISSUE','NOT_IMPORTED_HISTORICAL_EXCEPTION','Only an imported historical exception can be promoted.');
+        }
+        if($row['request_deleted_at']!==null)return $blocked('SKIPPED_OTHER_DATA_ISSUE','SOURCE_REQUEST_DELETED','The imported source request was administratively deleted and cannot be promoted automatically.');
+        if($row['closure_id']!==null||$row['effective_to']!==null)return $blocked('SKIPPED_GENUINE_HISTORICAL_EXCEPTION','ENDED_HISTORY','The imported appointment has a documented closure and remains historical.');
+        if((string)$row['effective_from']>(string)($row['business_date']??date('Y-m-d')))return $blocked('SKIPPED_GENUINE_HISTORICAL_EXCEPTION','FUTURE_APPOINTMENT','The imported appointment has not reached its effective date.');
+        if(!empty($row['kept_historical']))return $blocked('SKIPPED_GENUINE_HISTORICAL_EXCEPTION','CONFIRMED_HISTORICAL','This appointment was explicitly confirmed as a genuine historical exception.');
+        if(!empty($row['already_resolved']))return $blocked('SKIPPED_OTHER_DATA_ISSUE','ALREADY_RESOLVED','This appointment has already been made authoritative.');
+        if(!empty($row['authoritative_division_conflict'])||($includeLegacyPeerConflicts&&!empty($row['peer_legacy_division_conflict'])))return $blocked('SKIPPED_CONFLICTING_CURRENT_APPOINTMENT','DIVISION_CURRENT_CONFLICT','Another open assignment can occupy this ARPA Division. Manual reconciliation is required.');
+        if(!empty($row['active_workflow_reservation']))return $blocked('SKIPPED_ACTIVE_WORKFLOW_RESERVATION','ACTIVE_WORKFLOW_RESERVATION','A non-deleted workflow request reserves the same ARPA Division or period.');
+        if(!empty($row['unresolved_legacy_record']))return $blocked('SKIPPED_OTHER_DATA_ISSUE','UNRESOLVED_LEGACY_RECORD','Another unresolved imported record overlaps this ARPA Division period.');
+        $availability=[
+            'service_permanency'=>(string)($row['arpa_service_permanency']??''),
+            'has_qualifying_permanent'=>!empty($row['has_qualifying_permanent']),
+            'conflicts'=>['PERMANENT'=>!empty($row['permanent_conflict']),'ATTEND_TO_DUTY'=>!empty($row['attend_conflict'])],
+            'acting_division_ids'=>!empty($row['acting_division_conflict'])?[(string)$row['arpa_division_location_id']]:[],
+            'duty_covering_division_ids'=>!empty($row['duty_division_conflict'])?[(string)$row['arpa_division_location_id']]:[],
+        ];
+        $typeBlocker=ArpaAppointmentReadService::appointmentTypeBlocker($availability,(string)$row['appointment_type'],(string)$row['arpa_division_location_id']);
+        if($typeBlocker!==null)return $blocked('SKIPPED_INVALID_COMBINATION',(string)$typeBlocker['code'],(string)$typeBlocker['message']);
+        return ['eligible'=>true,'classification'=>'ELIGIBLE','blocker_code'=>null,'blocker_reason'=>null];
+    }
+
+    private function lockDivision(string $divisionId):void
+    {
+        $s=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$s->execute([$divisionId]);
+        if(!$s->fetchColumn())throw new DomainException('The ARPA Division was not found.');
     }
     /** @return array<int,array<string,mixed>> */
     private function exactDuplicateNativeReservations(array $target,bool $lock=false):array

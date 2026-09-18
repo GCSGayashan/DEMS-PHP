@@ -9,6 +9,7 @@ use App\Services\ArpaAppointmentCandidateService;
 use App\Services\ArpaAppointmentFormOptionsService;
 use App\Services\ArpaAppointmentReadService;
 use App\Services\ArpaAppointmentDataIssueCorrectionService;
+use App\Services\ArpaAppointmentBulkCanonicalizationService;
 use App\Services\ArpaAppointmentAdministrationService;
 use App\Services\ArpaAdministrativePolicy;
 use App\Services\ArpaDivisionTimelineService;
@@ -262,7 +263,32 @@ final class ArpaAppointmentController extends Controller
         $key=$category==='RESOLVED_REVIEWED'?'arpa-appointment-corrections':'arpa-appointment-issues';
         $initial=$category==='RESOLVED_REVIEWED'?[]:['category'=>$category];
         $dataTable=DataTableRegistry::viewModel($key,[],$this->filterOptions(),$initial);
-        $this->render('arpa_appointments/issues/index',compact('category','categories','dataTable'));
+        $bulkReconciliationAllowed=ArpaAdministrativePolicy::isCanonicalDemsAdmin();
+        $this->render('arpa_appointments/issues/index',compact('category','categories','dataTable','bulkReconciliationAllowed'));
+    }
+
+    public function bulkLegacyCurrentReconciliation():void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $service=new ArpaAppointmentBulkCanonicalizationService(Database::pdo());
+        if(!$service->canAccess()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'the canonical dems.admin account']);return;}
+        try{
+            $preview=$service->preview((int)($_GET['page']??1),(int)($_GET['per_page']??100));
+            $this->render('arpa_appointments/issues/bulk_current',compact('preview'));
+        }catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues');}
+    }
+
+    public function executeBulkLegacyCurrentReconciliation():void
+    {
+        Auth::requirePermission('arpa.appointment.view');Csrf::validate();
+        $service=new ArpaAppointmentBulkCanonicalizationService(Database::pdo());
+        if(!$service->canAccess()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'the canonical dems.admin account']);return;}
+        try{
+            $result=$service->execute((string)Auth::user()['id']);
+            $preview=$service->preview(1,100);
+            $this->render('arpa_appointments/issues/bulk_current',compact('preview','result'));
+        }catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues/bulk-current');}
+        catch(Throwable $e){error_log('ARPA bulk canonical reconciliation request failed: '.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());$this->flash('danger','Bulk reconciliation could not be completed. No partially processed appointment was left by the failed row.');redirect('/hr/arpa-appointments/issues/bulk-current');}
     }
 
     public function dataIssueDetail(string $key):void
