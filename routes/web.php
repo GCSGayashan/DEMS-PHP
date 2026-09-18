@@ -93,6 +93,7 @@ $router->get('/hr/arpa-appointments/timeline/{id}', [ArpaAppointmentController::
 $router->get('/hr/arpa-appointments/data-issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'bulkLegacyCurrentReconciliation']);
+$router->get('/hr/arpa-appointments/issues/bulk-current/active-reservations.csv', [ArpaAppointmentController::class, 'exportBulkActiveReservationDiagnostics']);
 $router->post('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'executeBulkLegacyCurrentReconciliation']);
 $router->post('/hr/arpa-appointments/issues/bulk-current/normalize-stale-flags', [ArpaAppointmentController::class, 'executeStaleLegacyExceptionNormalization']);
 $router->get('/hr/arpa-appointments/issues/corrections/{id}', [ArpaAppointmentController::class, 'dataIssueCorrectionDetail']);

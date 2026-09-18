@@ -278,6 +278,32 @@ final class ArpaAppointmentController extends Controller
         }catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues');}
     }
 
+    public function exportBulkActiveReservationDiagnostics():never
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $service=new ArpaAppointmentBulkCanonicalizationService(Database::pdo());
+        if(!$service->canAccess()){http_response_code(403);header('Content-Type: text/plain; charset=utf-8');echo 'Forbidden';exit;}
+        try{
+            $diagnostics=$service->activeReservationDiagnostics();
+            $filename='arpa-bulk-active-workflow-reservation-diagnostics-'.date('Ymd-His').'.csv';
+            header('Content-Type: text/csv; charset=utf-8');
+            header('Content-Disposition: attachment; filename="'.$filename.'"');
+            header('Cache-Control: no-store, private');header('X-Content-Type-Options: nosniff');
+            $output=fopen('php://output','wb');if($output===false)throw new \RuntimeException('Unable to open CSV output stream.');
+            fwrite($output,"\xEF\xBB\xBF");
+            $headers=['Appointment ID','Officer DAD Number','Officer Name','NIC','Imported Appointment Type','ARPA Division','ASC','Imported Effective From','Blocker Code','Blocker Reason','Request ID','Request Type','Requested Appointment Type','Workflow Status','Requested Effective From','Requested Effective To','Request Officer ID','Request Officer DAD Number','Request ARPA Division','Record Origin','Created At','Diagnostic Relationship','Validator Blocker'];
+            fputcsv($output,$headers,',','"','');
+            foreach($diagnostics['rows'] as $row){
+                $values=[$row['appointment_id'],$row['officer_number'],$row['officer_name'],$row['nic'],$row['imported_appointment_type'],$row['arpa_division'],$row['asc'],$row['imported_effective_from'],$row['blocker_code'],$row['blocker_reason'],$row['blocking_request_id'],$row['request_type'],$row['requested_appointment_type'],$row['workflow_status'],$row['requested_effective_from'],$row['requested_effective_to'],$row['request_officer_id'],$row['request_officer_number'],$row['request_arpa_division'],$row['record_origin'],$row['created_at'],$row['relationship'],$row['validator_blocker']?'YES':'NO'];
+                fputcsv($output,array_map(static function(mixed $value):string{$value=(string)$value;return preg_match('/^[=+\-@]/',$value)===1?"'".$value:$value;},$values),',','"','');
+            }
+            fclose($output);exit;
+        }catch(Throwable $e){
+            error_log('ARPA bulk reservation diagnostic export failed: '.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());
+            if(!headers_sent()){http_response_code(500);header('Content-Type: text/plain; charset=utf-8');echo 'Unable to export diagnostics.';}exit;
+        }
+    }
+
     public function executeBulkLegacyCurrentReconciliation():void
     {
         Auth::requirePermission('arpa.appointment.view');Csrf::validate();

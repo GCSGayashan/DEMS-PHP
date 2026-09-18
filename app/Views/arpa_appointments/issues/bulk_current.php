@@ -3,6 +3,8 @@ use App\Core\Csrf;
 require BASE_PATH.'/app/Views/arpa_appointments/tabs.php';
 $summary=$preview['summary'];
 $normalization=$preview['normalization'];
+$reservationDiagnostics=$preview['active_reservation_diagnostics'];
+$reservationSummary=$reservationDiagnostics['summary'];
 $labels=[
     'ELIGIBLE'=>'Eligible',
     'SKIPPED_CONFLICTING_CURRENT_APPOINTMENT'=>'Skipped - conflicting current appointment',
@@ -40,6 +42,41 @@ $labels=[
 <div class="row g-3 mb-4">
 <?php foreach($labels as $key=>$label): ?><div class="col-md-4 col-xl-2"><div class="card h-100"><div class="card-body"><div class="small text-muted"><?= e($label) ?></div><div class="h3 mb-0"><?= e((string)($summary[$key]??0)) ?></div></div></div></div><?php endforeach; ?>
 </div>
+
+<div class="card border-warning mb-4"><div class="card-body">
+  <div class="d-flex flex-wrap gap-3 align-items-start justify-content-between mb-3">
+    <div><h2 class="h5 mb-1">Active Workflow Reservation Diagnostics</h2><p class="text-muted mb-0">Read-only request relationships for appointments whose <em>final Bulk Preview classification</em> is <code>SKIPPED_ACTIVE_WORKFLOW_RESERVATION</code>. Relationship labels are diagnostic only and do not change eligibility.</p></div>
+    <a class="btn btn-outline-secondary" href="<?= e(url('hr/arpa-appointments/issues/bulk-current/active-reservations.csv')) ?>">Export CSV</a>
+  </div>
+  <div class="row g-2 mb-3">
+    <?php foreach([
+      'distinct_blocked_appointments'=>'Distinct blocked appointments','blocking_requests'=>'Blocking requests','related_requests'=>'Related active requests',
+      'exact_duplicates'=>'Exact duplicates','same_officer_same_division_different_period'=>'Same officer / division, different period',
+      'same_division_different_officer'=>'Same division / different officer','same_officer_different_division'=>'Same officer / different division',
+      'other_reservation_relationship'=>'Other relationship','multiple_blockers_per_appointment'=>'Appointments with multiple blockers',
+    ] as $key=>$label): ?><div class="col-sm-6 col-lg-4 col-xl-3"><div class="border rounded p-2 h-100"><div class="small text-muted"><?= e($label) ?></div><div class="h4 mb-0"><?= e((string)($reservationSummary[$key]??0)) ?></div></div></div><?php endforeach; ?>
+  </div>
+  <?php if($reservationDiagnostics['rows']===[]): ?>
+    <p class="mb-0 text-muted">No candidates currently have the active-workflow-reservation Preview classification.</p>
+  <?php else: ?>
+    <div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">
+      <thead><tr><th>Imported Appointment</th><th>Officer</th><th>NIC</th><th>Imported Type</th><th>ARPA Division / ASC</th><th>Imported From</th><th>Blocker</th><th>Related Request</th><th>Request Type / Duty</th><th>Status / Period</th><th>Request Officer</th><th>Request Division</th><th>Origin / Created</th><th>Relationship</th></tr></thead>
+      <tbody><?php foreach($reservationDiagnostics['rows'] as $row): ?><tr>
+        <td><code><?= e((string)$row['appointment_id']) ?></code></td>
+        <td><?= e(trim((string)$row['officer_number'].' - '.(string)$row['officer_name'],' -')) ?></td>
+        <td><?= e((string)$row['nic']) ?></td><td><?= e(ucwords(strtolower(str_replace('_',' ',(string)$row['imported_appointment_type'])))) ?></td>
+        <td><?= e((string)$row['arpa_division']) ?><div class="small text-muted"><?= e((string)$row['asc']) ?></div></td><td><?= e((string)$row['imported_effective_from']) ?></td>
+        <td><code><?= e((string)$row['blocker_code']) ?></code><div class="small text-muted"><?= e((string)$row['blocker_reason']) ?></div></td>
+        <td><code><?= e((string)$row['blocking_request_id']) ?></code><?php if(!empty($row['validator_blocker'])): ?><div><span class="badge bg-danger">Validator blocker</span></div><?php else: ?><div><span class="badge bg-secondary">Related only</span></div><?php endif; ?></td>
+        <td><?= e((string)$row['request_type']) ?><div class="small text-muted"><?= e((string)$row['requested_appointment_type']) ?></div></td>
+        <td><?= e((string)$row['workflow_status']) ?><div class="small text-muted"><?= e((string)$row['requested_effective_from']) ?> to <?= e((string)($row['requested_effective_to']?:'Open')) ?></div></td>
+        <td><code><?= e((string)$row['request_officer_id']) ?></code><div class="small"><?= e(trim((string)$row['request_officer_number'].' - '.(string)$row['request_officer_name'],' -')) ?></div></td>
+        <td><?= e((string)$row['request_arpa_division']) ?></td><td><?= e((string)$row['record_origin']) ?><div class="small text-muted"><?= e((string)$row['created_at']) ?></div></td>
+        <td><code><?= e((string)$row['relationship']) ?></code></td>
+      </tr><?php endforeach; ?></tbody>
+    </table></div>
+  <?php endif; ?>
+</div></div>
 
 <div class="card mb-4"><div class="card-body d-flex flex-wrap gap-3 align-items-center justify-content-between">
   <div><h2 class="h5 mb-1">Preview Eligible Records</h2><p class="text-muted mb-0"><?= e((string)$preview['total']) ?> imported open candidates were assessed without changing data.</p></div>

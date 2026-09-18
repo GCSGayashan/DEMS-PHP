@@ -33,12 +33,17 @@ final class ArpaAppointmentBulkCanonicalizationTest
         $future=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),6,'PERMANENT',date('Y-m-d',strtotime('+1 day')));
         $this->same('FUTURE_APPOINTMENT',$correction->canonicalPromotionAssessment($future)['blocker_code'],'future legacy record is not promoted');
 
-        $conflict=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),7,'PERMANENT','2025-01-01');$this->canonical($this->officer('PERMANENT_IN_SERVICE'),7,'PERMANENT','2025-01-01');
+        $conflictOfficer=$this->officer('PERMANENT_IN_SERVICE');$conflict=$this->legacyCandidate($conflictOfficer,7,'PERMANENT','2025-01-01');$this->canonical($this->officer('PERMANENT_IN_SERVICE'),7,'PERMANENT','2025-01-01');
+        $this->nativeReservation($this->officer('PERMANENT_IN_SERVICE'),7,'PERMANENT','2025-02-01',false);
         $this->same('CANONICAL_TIMELINE_CONFLICT',$correction->canonicalPromotionAssessment($conflict)['blocker_code'],'conflicting authoritative Division appointment is skipped by the canonical timeline validator');
         [$invalid]=$this->dependentCandidate('ACTING',8,9,'NOT_PERMANENT_IN_SERVICE');
         $this->same('INVALID_APPOINTMENT_COMBINATION',$correction->canonicalPromotionAssessment($invalid)['blocker_code'],'incompatible Officer appointment combination is skipped');
 
-        $reservation=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),10,'PERMANENT','2025-01-01');$this->nativeReservation($this->officer('PERMANENT_IN_SERVICE'),10,'PERMANENT','2025-02-01',false);
+        $reservationOfficer=$this->officer('PERMANENT_IN_SERVICE');$reservation=$this->legacyCandidate($reservationOfficer,10,'PERMANENT','2025-01-01');
+        $reservationBlockerOne=$this->nativeReservation($this->officer('PERMANENT_IN_SERVICE'),10,'PERMANENT','2025-02-01',false);
+        $reservationBlockerTwo=$this->nativeReservation($this->officer('PERMANENT_IN_SERVICE'),10,'ACTING','2025-03-01',false);
+        $reservationExact=$this->nativeReservation($reservationOfficer,10,'PERMANENT','2025-01-01',false);
+        $reservationSameOfficerOtherDivision=$this->nativeReservation($reservationOfficer,6,'DUTY_COVERING','2025-04-01',false);
         $this->same('ACTIVE_WORKFLOW_RESERVATION',$correction->canonicalPromotionAssessment($reservation)['blocker_code'],'non-deleted competing workflow reservation blocks promotion');
 
         $exact=$this->nativeReservation($dutyOfficer,3,'DUTY_COVERING','2025-02-01',false);
@@ -78,6 +83,24 @@ final class ArpaAppointmentBulkCanonicalizationTest
         $allCandidates=$correction->canonicalPromotionCandidates();$eligibleRows=array_values(array_filter($allCandidates,static fn(array $row):bool=>!empty($row['eligible'])));
         foreach($this->stratifiedSample($eligibleRows,40) as $row)$this->same(true,$correction->validateCanonicalPromotion((string)$row['id'])['eligible'],'sampled Preview Eligible candidate agrees with the shared execution validator');
 
+        $diagnostics=$preview['active_reservation_diagnostics'];$diagnosticCounts=$this->counts();
+        $classifiedReservationIds=array_values(array_map(static fn(array $row):string=>(string)$row['id'],array_filter($allCandidates,static fn(array $row):bool=>(string)$row['classification']==='SKIPPED_ACTIVE_WORKFLOW_RESERVATION')));
+        sort($classifiedReservationIds);$diagnosticIds=$diagnostics['blocked_appointment_ids'];sort($diagnosticIds);
+        $this->same($classifiedReservationIds,$diagnosticIds,'diagnostics consume the exact final Preview active-reservation classification');
+        $this->same((int)$preview['summary']['SKIPPED_ACTIVE_WORKFLOW_RESERVATION'],(int)$diagnostics['summary']['distinct_blocked_appointments'],'diagnostic blocked appointment count equals Preview active-reservation count');
+        $this->same(false,in_array($conflict,$diagnosticIds,true),'reservation relationship does not override higher-precedence conflicting-current classification');
+        $reservationRows=array_values(array_filter($diagnostics['rows'],static fn(array $row):bool=>(string)$row['appointment_id']===$reservation));
+        $validatorRequestIds=array_values(array_map(static fn(array $row):string=>(string)$row['blocking_request_id'],array_filter($reservationRows,static fn(array $row):bool=>!empty($row['validator_blocker']))));sort($validatorRequestIds);
+        $expectedBlockerIds=[$reservationBlockerOne,$reservationBlockerTwo];sort($expectedBlockerIds);
+        $this->same($expectedBlockerIds,$validatorRequestIds,'one blocked appointment exposes both validator blocking requests while remaining one distinct appointment');
+        $exactRow=array_values(array_filter($reservationRows,static fn(array $row):bool=>(string)$row['blocking_request_id']===$reservationExact))[0]??null;
+        $this->same('EXACT_DUPLICATE',$exactRow['relationship']??null,'exact duplicate reservation relationship is detected');
+        $this->same(false,(bool)($exactRow['validator_blocker']??true),'exact duplicate is diagnostic context rather than a validator blocker');
+        $otherDivisionRow=array_values(array_filter($reservationRows,static fn(array $row):bool=>(string)$row['blocking_request_id']===$reservationSameOfficerOtherDivision))[0]??null;
+        $this->same('SAME_OFFICER_DIFFERENT_DIVISION',$otherDivisionRow['relationship']??null,'same-officer different-Division relationship is labelled without changing eligibility');
+        $this->same(true,(int)$diagnostics['summary']['multiple_blockers_per_appointment']>=1,'multiple blocker summary counts appointments rather than request rows');
+        $this->same($diagnosticCounts,$this->counts(),'active-reservation diagnostics are read-only');
+
         $this->normalization($preview);
 
         $batch='test-batch-'.$this->uuid();
@@ -99,6 +122,7 @@ final class ArpaAppointmentBulkCanonicalizationTest
 
         $routes=(string)file_get_contents(BASE_PATH.'/routes/web.php');$view=(string)file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/issues/bulk_current.php');
         $this->same(true,str_contains($routes,'issues/bulk-current')&&str_contains($view,'Execute Eligible Promotions'),'admin bulk preview/execute UI is registered');
+        $this->same(true,str_contains($routes,'active-reservations.csv')&&str_contains($view,'Active Workflow Reservation Diagnostics'),'read-only diagnostic table and CSV route are registered');
         $other=(string)$this->value("SELECT id FROM system_user WHERE username<>'dems.admin' AND enabled=1 AND account_status='ACTIVE' LIMIT 1");$_SESSION=['user_id'=>$other,'authenticated_at'=>time(),'last_activity_at'=>time()];Auth::forgetRequestCache();
         $this->same(false,(new ArpaAppointmentBulkCanonicalizationService($this->pdo))->canAccess(),'non-canonical user cannot access the bulk operation');
     }
