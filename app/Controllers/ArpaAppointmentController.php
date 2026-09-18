@@ -291,6 +291,19 @@ final class ArpaAppointmentController extends Controller
         catch(Throwable $e){error_log('ARPA bulk canonical reconciliation request failed: '.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());$this->flash('danger','Bulk reconciliation could not be completed. No partially processed appointment was left by the failed row.');redirect('/hr/arpa-appointments/issues/bulk-current');}
     }
 
+    public function executeStaleLegacyExceptionNormalization():void
+    {
+        Auth::requirePermission('arpa.appointment.view');Csrf::validate();
+        $service=new ArpaAppointmentBulkCanonicalizationService(Database::pdo());
+        if(!$service->canAccess()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'the canonical dems.admin account']);return;}
+        try{
+            $normalizationResult=$service->executeStaleExceptionNormalization((string)Auth::user()['id']);
+            $preview=$service->preview(1,100);
+            $this->render('arpa_appointments/issues/bulk_current',compact('preview','normalizationResult'));
+        }catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues/bulk-current');}
+        catch(Throwable $e){error_log('ARPA stale legacy exception normalization request failed: '.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());$this->flash('danger','Stale legacy exception normalization could not be completed.');redirect('/hr/arpa-appointments/issues/bulk-current');}
+    }
+
     public function dataIssueDetail(string $key):void
     {
         Auth::requirePermission('arpa.appointment.view');

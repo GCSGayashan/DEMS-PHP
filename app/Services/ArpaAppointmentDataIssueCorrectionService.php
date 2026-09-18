@@ -327,7 +327,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         $appointmentId=trim((string)($input['appointment_id']??$appointments[0]['id']));
         if($appointmentId!==(string)$appointments[0]['id'])throw new DomainException('The selected appointment is not part of this Data Issue.');
         $this->lockAppointments([$appointmentId]);$target=$this->appointment($appointmentId);
-        if((string)$target['record_origin']!=='LEGACY_IMPORT'||(int)$target['legacy_history_only']!==1||(int)$target['legacy_exception']!==1)throw new DomainException('Only an imported historical exception can be made authoritative through this action.');
+        if((string)$target['record_origin']!=='LEGACY_IMPORT'||(int)$target['legacy_history_only']!==1)throw new DomainException('Only an imported open history-only appointment can be made authoritative through this action.');
         if($target['closure_id']!==null||$target['effective_to']!==null)throw new DomainException('An ended historical appointment cannot be promoted as the current assignment.');
 
         $this->lockDivision((string)$target['arpa_division_location_id']);
@@ -463,7 +463,7 @@ final class ArpaAppointmentDataIssueCorrectionService
                 AND r2.asc_location_id=a.asc_location_id AND r2.arpa_division_location_id=a.arpa_division_location_id
                 AND r2.requested_effective_from=a.effective_from AND r2.requested_effective_to IS NULL
                 AND r2.request_type='APPOINTMENT' AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment exact_a WHERE exact_a.request_id=r2.id)";
-        $activeLegacyCandidate="a2.record_origin='LEGACY_IMPORT' AND a2.legacy_history_only=1 AND a2.legacy_exception=1
+        $activeLegacyCandidate="a2.record_origin='LEGACY_IMPORT' AND a2.legacy_history_only=1
                 AND c2.id IS NULL AND a2.effective_from<={$asOf}
                 AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction done2 WHERE done2.appointment_id=a2.id
                     AND done2.correction_action IN('RESOLVE_CANONICAL_ASSIGNMENT','KEEP_AS_HISTORICAL_EXCEPTION')
@@ -540,7 +540,7 @@ final class ArpaAppointmentDataIssueCorrectionService
               WHERE 1=1";
         $params=[];
         if($appointmentId!==null){$sql.=' AND a.id=?';$params[]=$appointmentId;}
-        if($onlyCandidates)$sql.=" AND a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=1 AND a.legacy_exception=1 AND c.id IS NULL AND a.effective_from<={$asOf}";
+        if($onlyCandidates)$sql.=" AND a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=1 AND c.id IS NULL AND a.effective_from<={$asOf}";
         $sql.=' ORDER BY FIELD(a.appointment_type,\'PERMANENT\',\'ACTING\',\'DUTY_COVERING\',\'ATTEND_TO_DUTY\'),a.effective_from,a.id';
         $s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchAll();
     }
@@ -549,8 +549,8 @@ final class ArpaAppointmentDataIssueCorrectionService
     private function canonicalPromotionAssessmentFromRow(array $row,bool $includeLegacyPeerConflicts=true):array
     {
         $blocked=static fn(string $classification,string $code,string $reason):array=>['eligible'=>false,'classification'=>$classification,'blocker_code'=>$code,'blocker_reason'=>$reason];
-        if((string)($row['record_origin']??'')!=='LEGACY_IMPORT'||(int)($row['legacy_history_only']??0)!==1||(int)($row['legacy_exception']??0)!==1){
-            return $blocked('SKIPPED_OTHER_DATA_ISSUE','NOT_IMPORTED_HISTORICAL_EXCEPTION','Only an imported historical exception can be promoted.');
+        if((string)($row['record_origin']??'')!=='LEGACY_IMPORT'||(int)($row['legacy_history_only']??0)!==1){
+            return $blocked('SKIPPED_OTHER_DATA_ISSUE','NOT_IMPORTED_OPEN_HISTORY','Only an imported open history-only appointment can be promoted.');
         }
         if($row['request_deleted_at']!==null)return $blocked('SKIPPED_OTHER_DATA_ISSUE','SOURCE_REQUEST_DELETED','The imported source request was administratively deleted and cannot be promoted automatically.');
         if($row['closure_id']!==null||$row['effective_to']!==null)return $blocked('SKIPPED_GENUINE_HISTORICAL_EXCEPTION','ENDED_HISTORY','The imported appointment has a documented closure and remains historical.');

@@ -94,6 +94,7 @@ $router->get('/hr/arpa-appointments/data-issues', [ArpaAppointmentController::cl
 $router->get('/hr/arpa-appointments/issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'bulkLegacyCurrentReconciliation']);
 $router->post('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'executeBulkLegacyCurrentReconciliation']);
+$router->post('/hr/arpa-appointments/issues/bulk-current/normalize-stale-flags', [ArpaAppointmentController::class, 'executeStaleLegacyExceptionNormalization']);
 $router->get('/hr/arpa-appointments/issues/corrections/{id}', [ArpaAppointmentController::class, 'dataIssueCorrectionDetail']);
 $router->get('/hr/arpa-appointments/issues/{key}', [ArpaAppointmentController::class, 'dataIssueDetail']);
 $router->post('/hr/arpa-appointments/issues/{key}/correct', [ArpaAppointmentController::class, 'correctDataIssue']);

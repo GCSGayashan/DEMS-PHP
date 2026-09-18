@@ -2,6 +2,7 @@
 use App\Core\Csrf;
 require BASE_PATH.'/app/Views/arpa_appointments/tabs.php';
 $summary=$preview['summary'];
+$normalization=$preview['normalization'];
 $labels=[
     'ELIGIBLE'=>'Eligible',
     'SKIPPED_CONFLICTING_CURRENT_APPOINTMENT'=>'Skipped - conflicting current appointment',
@@ -25,6 +26,14 @@ $labels=[
     <div class="col-md-3"><div class="border rounded p-3"><div class="text-muted">Remaining before recalculation</div><div class="h3 mb-0"><?= e((string)$result['remaining_before_recalculation']) ?></div></div></div>
   </div>
   <?php if($result['skipped']||$result['failed']): ?><details class="mt-3"><summary>View skipped/failed rows</summary><div class="table-responsive mt-2"><table class="table table-sm"><thead><tr><th>Appointment</th><th>Result</th><th>Reason</th></tr></thead><tbody><?php foreach($result['results'] as $row): if($row['result']==='PROMOTED')continue; ?><tr><td><code><?= e((string)$row['appointment_id']) ?></code></td><td><?= e((string)$row['result']) ?></td><td><?= e((string)$row['reason']) ?></td></tr><?php endforeach; ?></tbody></table></div></details><?php endif; ?>
+</div></div>
+<?php endif; ?>
+
+<?php if(isset($normalizationResult)): ?>
+<div class="card border-success mb-4"><div class="card-body">
+  <h2 class="h5">Stale Legacy Exception Normalization Result</h2>
+  <p><strong>Batch ID:</strong> <code><?= e((string)$normalizationResult['batch_id']) ?></code></p>
+  <div class="d-flex flex-wrap gap-4"><div><span class="text-muted">Normalized</span><div class="h3"><?= e((string)$normalizationResult['normalized']) ?></div></div><div><span class="text-muted">Skipped</span><div class="h3"><?= e((string)$normalizationResult['skipped']) ?></div></div><div><span class="text-muted">Failed</span><div class="h3"><?= e((string)$normalizationResult['failed']) ?></div></div></div>
 </div></div>
 <?php endif; ?>
 
@@ -58,3 +67,15 @@ $labels=[
 <?php endforeach; ?>
 </tbody></table></div></div>
 <?php if($preview['pages']>1): ?><nav class="mt-3" aria-label="Bulk preview pages"><ul class="pagination flex-wrap"><?php for($p=1;$p<=$preview['pages'];$p++): ?><li class="page-item <?= $p===$preview['page']?'active':'' ?>"><a class="page-link" href="<?= e(url('hr/arpa-appointments/issues/bulk-current?page='.$p.'&per_page='.$preview['per_page'])) ?>"><?= e((string)$p) ?></a></li><?php endfor; ?></ul></nav><?php endif; ?>
+
+<div class="card border-info mt-4"><div class="card-body">
+  <div class="d-flex flex-wrap gap-3 align-items-center justify-content-between mb-3">
+    <div><h2 class="h5 mb-1">Normalize Stale Resolved Exception Flags</h2><p class="text-muted mb-0">Preview found <?= e((string)$normalization['count']) ?> canonically resolved imported appointment(s) whose current exception flag is stale. Historical exception codes remain unchanged.</p></div>
+    <form method="post" action="<?= e(url('hr/arpa-appointments/issues/bulk-current/normalize-stale-flags')) ?>" onsubmit="return confirm('Normalize the stale legacy exception flags shown in this preview? Only the current legacy_exception flag will change.');">
+      <?= Csrf::field() ?><button class="btn btn-info" type="submit" <?= $normalization['count']<1?'disabled':'' ?>>Execute Flag Normalization</button>
+    </form>
+  </div>
+  <?php if($normalization['count']>0): ?><div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Appointment</th><th>Officer</th><th>NIC</th><th>Type</th><th>ARPA Division</th><th>ASC</th><th>Effective From</th><th>Existing Correction</th><th>Preserved Exception Codes</th></tr></thead><tbody>
+  <?php foreach(array_slice($normalization['rows'],0,100) as $row): ?><tr><td><code><?= e((string)$row['id']) ?></code></td><td><?= e(trim((string)$row['officer_number'].' - '.(string)$row['officer_name'],' -')) ?></td><td><?= e((string)($row['nic']??'')) ?></td><td><?= e(ucwords(strtolower(str_replace('_',' ',(string)$row['appointment_type'])))) ?></td><td><?= e((string)$row['arpa_division_name']) ?></td><td><?= e((string)$row['asc_name']) ?></td><td><?= e((string)$row['effective_from']) ?></td><td><code><?= e((string)$row['canonical_correction_id']) ?></code></td><td><small><?= e((string)$row['legacy_exception_codes_json']) ?></small></td></tr><?php endforeach; ?>
+  </tbody></table></div><?php endif; ?>
+</div></div>

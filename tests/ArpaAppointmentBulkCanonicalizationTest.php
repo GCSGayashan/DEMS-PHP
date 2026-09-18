@@ -65,11 +65,20 @@ final class ArpaAppointmentBulkCanonicalizationTest
         $correction->promoteCanonicalAppointmentFromBulk($supportingPermanent,$this->admin,'dependency-test');
         $this->same(true,$correction->validateCanonicalPromotion($dependentActing)['eligible'],'previously blocked dependent appointment becomes eligible after supporting Permanent is promoted');
 
+        $clearedExceptionCandidate=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),15,'PERMANENT','2025-01-01');
+        $this->pdo->prepare("UPDATE arpa_division_appointment SET legacy_exception=0,legacy_exception_codes_json=JSON_ARRAY() WHERE id=?")->execute([$clearedExceptionCandidate]);
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET legacy_exception=0,legacy_exception_codes_json=JSON_ARRAY() WHERE id=(SELECT request_id FROM arpa_division_appointment WHERE id=?)")->execute([$clearedExceptionCandidate]);
+        $allOpenHistory=$correction->canonicalPromotionCandidates();$clearedRow=$this->findById($allOpenHistory,$clearedExceptionCandidate);
+        $this->same(true,$clearedRow!==null,'open imported history-only appointment with legacy_exception=0 appears in Bulk Preview');
+        $this->same(true,$clearedRow['eligible']??false,'legacy_exception=0 candidate is classified through the shared canonical validator');
+
         $counts=$this->counts();$preview=(new ArpaAppointmentBulkCanonicalizationService($this->pdo))->preview(1,25);
         $this->same($counts,$this->counts(),'preview makes no database changes');
         $this->same(true,isset($preview['summary']['ELIGIBLE']),'preview reports grouped eligibility counts');
         $allCandidates=$correction->canonicalPromotionCandidates();$eligibleRows=array_values(array_filter($allCandidates,static fn(array $row):bool=>!empty($row['eligible'])));
         foreach($this->stratifiedSample($eligibleRows,40) as $row)$this->same(true,$correction->validateCanonicalPromotion((string)$row['id'])['eligible'],'sampled Preview Eligible candidate agrees with the shared execution validator');
+
+        $this->normalization($preview);
 
         $batch='test-batch-'.$this->uuid();
         foreach([$permanent,$acting,$duty] as $id)$correction->promoteCanonicalAppointmentFromBulk($id,$this->admin,$batch);
@@ -101,8 +110,8 @@ final class ArpaAppointmentBulkCanonicalizationTest
               WHERE rel.relationship_type='ASC_ARPA_DIVISION' AND rel.active=1 AND rel.approval_status='APPROVED'
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.arpa_division_location_id=rel.child_location_id)
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=rel.child_location_id AND r.deleted_at IS NULL)
-              LIMIT 15";
-        $this->places=$this->pdo->query($sql)->fetchAll();if(count($this->places)<15)throw new RuntimeException('Fifteen unused ARPA Divisions are required.');
+              LIMIT 20";
+        $this->places=$this->pdo->query($sql)->fetchAll();if(count($this->places)<20)throw new RuntimeException('Twenty unused ARPA Divisions are required.');
     }
 
     private function authenticateAdmin():void
@@ -145,6 +154,50 @@ final class ArpaAppointmentBulkCanonicalizationTest
     {
         $row=$this->row('SELECT * FROM arpa_division_appointment WHERE id=?',[$appointment]);$this->pdo->prepare("INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,before_json,after_json,record_origin) VALUES(UUID(),?,'LEGACY_HISTORICAL_EXCEPTION',?,?,?,JSON_ARRAY(?),?,?,'KEEP_AS_HISTORICAL_EXCEPTION','KEPT_HISTORICAL_EXCEPTION','Test confirmed historical','{}','{}','LEGACY_IMPORT')")->execute(['LEGACY_HISTORICAL_EXCEPTION:'.$appointment,$row['officer_id'],$appointment,$row['request_id'],$appointment,$row['asc_location_id'],$this->admin]);
     }
+
+    private function normalization(array $existingPreview):void
+    {
+        $service=new ArpaAppointmentBulkCanonicalizationService($this->pdo);
+        $eligible=$this->normalizationFixture(16,'RESOLVED_BY_CORRECTION',false,true);
+        $withoutCorrection=$this->normalizationFixture(17,null,false,true);
+        $unresolvedCorrection=$this->normalizationFixture(18,'REVIEWED_UNRESOLVED',false,true);
+        $closed=$this->normalizationFixture(19,'RESOLVED_BY_CORRECTION',true,true);
+        $assessment=$service->staleExceptionNormalizationAssessment($eligible);
+        $this->same(true,$assessment['eligible'],'canonically resolved open import with stale legacy_exception=1 is normalization eligible');
+        $this->same(false,$service->staleExceptionNormalizationAssessment($withoutCorrection)['eligible'],'appointment without resolved canonical correction is not normalized');
+        $this->same(false,$service->staleExceptionNormalizationAssessment($unresolvedCorrection)['eligible'],'unresolved correction status does not qualify for normalization');
+        $this->same(false,$service->staleExceptionNormalizationAssessment($closed)['eligible'],'closed appointment does not qualify for open-current normalization');
+        $counts=$this->counts();$normalizationPreview=$service->staleExceptionNormalizationPreview();
+        $this->same($counts,$this->counts(),'stale-flag Preview is read-only');
+        $this->same(true,$this->findById($normalizationPreview['rows'],$eligible)!==null,'representative production stale-flag pattern is detected in Preview');
+        $before=$this->row('SELECT record_origin,legacy_history_only,legacy_exception,legacy_exception_codes_json,effective_from FROM arpa_division_appointment WHERE id=?',[$eligible]);
+        $batch='normalization-'.$this->uuid();$result=$service->normalizeStaleExceptionFlag($eligible,$this->admin,$batch);
+        $after=$this->row('SELECT record_origin,legacy_history_only,legacy_exception,legacy_exception_codes_json,effective_from FROM arpa_division_appointment WHERE id=?',[$eligible]);
+        $this->same(0,(int)$after['legacy_exception'],'normalization clears only the stale current exception flag');
+        $this->same($before['legacy_exception_codes_json'],$after['legacy_exception_codes_json'],'historical exception codes remain byte-for-byte unchanged');
+        $this->same('LEGACY_IMPORT',$after['record_origin'],'record origin remains LEGACY_IMPORT');
+        $this->same(0,(int)$after['legacy_history_only'],'canonical history-only state remains unchanged');
+        $this->same($before['effective_from'],$after['effective_from'],'effective_from remains unchanged');
+        $this->same(0,(int)$this->value('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id=?',[$eligible]),'normalization creates no closure');
+        $this->same(1,(int)$this->value("SELECT COUNT(*) FROM audit_event WHERE id=? AND action_key='arpa.appointment.legacy-exception.normalize'",[$result['audit_id']]),'normalization creates a generic audit event');
+        $audit=(string)$this->value('SELECT details_json FROM audit_event WHERE id=?',[$result['audit_id']]);$this->same(true,str_contains($audit,$batch)&&str_contains($audit,'Normalized stale legacy exception flag after verified canonical resolution.'),'normalization audit records batch and reason');
+        $auditCount=(int)$this->value("SELECT COUNT(*) FROM audit_event WHERE target_id=? AND action_key='arpa.appointment.legacy-exception.normalize'",[$eligible]);
+        $this->throws(fn()=>$service->normalizeStaleExceptionFlag($eligible,$this->admin,$batch),'normalization execution is idempotent');
+        $this->same($auditCount,(int)$this->value("SELECT COUNT(*) FROM audit_event WHERE target_id=? AND action_key='arpa.appointment.legacy-exception.normalize'",[$eligible]),'idempotent rerun creates no second audit event');
+        $this->same(true,isset($existingPreview['normalization']),'main bulk Preview exposes stale-flag normalization preview');
+    }
+
+    private function normalizationFixture(int $place,?string $resolutionStatus,bool $closed,bool $withProvenance):string
+    {
+        $appointment=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),$place,'PERMANENT','2025-01-01');$request=(string)$this->value('SELECT request_id FROM arpa_division_appointment WHERE id=?',[$appointment]);
+        $codes=$withProvenance?'["BUSINESS_RULE","DATA_ISSUE_RESOLUTION"]':'["BUSINESS_RULE"]';
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=0,legacy_exception=1,legacy_exception_codes_json=? WHERE id=?')->execute([$codes,$appointment]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=0,legacy_exception=1,legacy_exception_codes_json=? WHERE id=?')->execute([$codes,$request]);
+        if($resolutionStatus!==null){
+            $row=$this->row('SELECT * FROM arpa_division_appointment WHERE id=?',[$appointment]);$this->pdo->prepare("INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,before_json,after_json,record_origin) VALUES(UUID(),?,'LEGACY_HISTORICAL_EXCEPTION',?,?,?,JSON_ARRAY(?),?,?,'RESOLVE_CANONICAL_ASSIGNMENT',?,'Normalization fixture','{}','{}','LEGACY_IMPORT')")->execute(['LEGACY_HISTORICAL_EXCEPTION:'.$appointment,$row['officer_id'],$appointment,$request,$appointment,$row['asc_location_id'],$this->admin,$resolutionStatus]);
+        }
+        if($closed)$this->close($appointment,'2025-12-31');return $appointment;
+    }
     private function counts():array{return ['appointment'=>(int)$this->value('SELECT COUNT(*) FROM arpa_division_appointment'),'request'=>(int)$this->value('SELECT COUNT(*) FROM arpa_division_appointment_request'),'correction'=>(int)$this->value('SELECT COUNT(*) FROM arpa_appointment_data_correction'),'audit'=>(int)$this->value('SELECT COUNT(*) FROM audit_event')];}
     /** @param array<int,array<string,mixed>> $rows @return array<int,array<string,mixed>> */
     private function stratifiedSample(array $rows,int $maximum):array
@@ -153,6 +206,8 @@ final class ArpaAppointmentBulkCanonicalizationTest
         for($i=0;$i<$maximum;$i++)$sample[]=$rows[(int)floor($i*($count-1)/max(1,$maximum-1))];
         return $sample;
     }
+    /** @param array<int,array<string,mixed>> $rows */
+    private function findById(array $rows,string $id):?array{foreach($rows as $row)if((string)($row['id']??'')===$id)return $row;return null;}
     private function value(string $sql,array $params=[]):mixed{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchColumn();}
     private function row(string $sql,array $params=[]):array{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetch()?:[];}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}

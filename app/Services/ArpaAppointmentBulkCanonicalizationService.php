@@ -33,6 +33,7 @@ final class ArpaAppointmentBulkCanonicalizationService
             'rows'=>array_slice($rows,($page-1)*$perPage,$perPage),
             'summary'=>$summary,'total'=>$total,'page'=>$page,'pages'=>$pages,'per_page'=>$perPage,
             'batch_size'=>self::BATCH_SIZE,
+            'normalization'=>$this->staleExceptionNormalizationPreview(),
         ];
     }
 
@@ -67,6 +68,112 @@ final class ArpaAppointmentBulkCanonicalizationService
             'remaining_before_recalculation'=>max(0,count($eligible)-count($selected)),'results'=>$results,
         ];
     }
+
+    /** @return array{count:int,rows:array<int,array<string,mixed>>} */
+    public function staleExceptionNormalizationPreview():array
+    {
+        $this->assertAccess();$rows=$this->normalizationRows(null,true);
+        foreach($rows as &$row)$row=array_merge($row,$this->staleExceptionNormalizationAssessmentFromRow($row));
+        unset($row);return ['count'=>count($rows),'rows'=>$rows];
+    }
+
+    /** @return array<string,mixed> */
+    public function staleExceptionNormalizationAssessment(string $appointmentId):array
+    {
+        $this->assertAccess();$rows=$this->normalizationRows($appointmentId,false);
+        if($rows===[])return ['eligible'=>false,'classification'=>'NOT_ELIGIBLE','reason'=>'Appointment was not found.'];
+        return array_merge($rows[0],$this->staleExceptionNormalizationAssessmentFromRow($rows[0]));
+    }
+
+    /** @return array<string,mixed> */
+    public function executeStaleExceptionNormalization(string $actorId):array
+    {
+        $this->assertActor($actorId);$batchId=(string)$this->pdo->query('SELECT UUID()')->fetchColumn();
+        $candidates=$this->staleExceptionNormalizationPreview()['rows'];$selected=array_slice($candidates,0,self::BATCH_SIZE);
+        $results=[];$normalized=0;$skipped=0;$failed=0;
+        foreach($selected as $row){
+            try{
+                $result=$this->normalizeStaleExceptionFlag((string)$row['id'],$actorId,$batchId);
+                $normalized++;$results[]=['appointment_id'=>$row['id'],'result'=>'NORMALIZED','audit_id'=>$result['audit_id'],'reason'=>'Normalized'];
+            }catch(DomainException $e){$skipped++;$results[]=['appointment_id'=>$row['id'],'result'=>'SKIPPED','reason'=>$e->getMessage()];}
+            catch(Throwable $e){
+                $failed++;error_log('ARPA stale legacy exception normalization failed: batch='.$batchId.' appointment='.$row['id'].' class='.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());
+                $results[]=['appointment_id'=>$row['id'],'result'=>'FAILED','reason'=>'Unexpected processing failure; see the server log.'];
+            }
+        }
+        return ['batch_id'=>$batchId,'normalized'=>$normalized,'skipped'=>$skipped,'failed'=>$failed,'processed'=>count($selected),'results'=>$results];
+    }
+
+    /** @return array{audit_id:string,appointment_id:string} */
+    public function normalizeStaleExceptionFlag(string $appointmentId,string $actorId,string $batchId):array
+    {
+        $this->assertActor($actorId);$batchId=trim($batchId);if($batchId==='')throw new DomainException('A normalization batch ID is required.');
+        return $this->transaction(function()use($appointmentId,$actorId,$batchId):array{
+            $lock=$this->pdo->prepare('SELECT id FROM arpa_division_appointment WHERE id=? FOR UPDATE');$lock->execute([$appointmentId]);
+            if(!$lock->fetchColumn())throw new DomainException('Appointment was not found.');
+            $assessment=$this->staleExceptionNormalizationAssessment($appointmentId);
+            if(empty($assessment['eligible']))throw new DomainException((string)$assessment['reason']);
+            $codes=(string)$assessment['legacy_exception_codes_json'];
+            $before=['appointment_id'=>$appointmentId,'legacy_exception'=>1,'legacy_exception_codes_json'=>$this->decodeJson($codes),'record_origin'=>$assessment['record_origin'],'legacy_history_only'=>(int)$assessment['legacy_history_only'],'effective_from'=>$assessment['effective_from']];
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_exception=0 WHERE id=? AND legacy_exception=1')->execute([$appointmentId]);
+            $after=$before;$after['legacy_exception']=0;
+            $details=['appointment_id'=>$appointmentId,'previous_legacy_exception'=>1,'resulting_legacy_exception'=>0,'existing_canonical_correction_id'=>$assessment['canonical_correction_id'],'actor_user_id'=>$actorId,'batch_id'=>$batchId,'reason'=>'Normalized stale legacy exception flag after verified canonical resolution.','before'=>$before,'after'=>$after];
+            $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,source_ip) VALUES(?,'arpa.appointment.legacy-exception.normalize','ARPA_DIVISION_APPOINTMENT',?,?,'INFO',?)")
+                ->execute([$actorId,$appointmentId,$this->json($details),$_SERVER['REMOTE_ADDR']??'CLI']);
+            $auditId=(string)$this->pdo->lastInsertId();
+            return ['audit_id'=>$auditId,'appointment_id'=>$appointmentId];
+        });
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private function normalizationRows(?string $appointmentId,bool $onlyEligible):array
+    {
+        $sql="SELECT a.id,a.record_origin,a.request_id,a.officer_id,a.appointment_type,a.asc_location_id,a.arpa_division_location_id,
+                     a.asc_name_snapshot asc_name,a.arpa_name_snapshot arpa_division_name,a.effective_from,a.legacy_history_only,
+                     a.legacy_exception,a.legacy_exception_codes_json,c.id closure_id,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,
+                     (SELECT dc.id FROM arpa_appointment_data_correction dc WHERE dc.appointment_id=a.id
+                        AND dc.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND dc.resolution_status='RESOLVED_BY_CORRECTION'
+                        ORDER BY dc.corrected_at DESC,dc.id DESC LIMIT 1) canonical_correction_id,
+                     (JSON_SEARCH(COALESCE(a.legacy_exception_codes_json,JSON_ARRAY()),'one','DATA_ISSUE_RESOLUTION') IS NOT NULL) has_resolution_provenance
+              FROM arpa_division_appointment a
+              JOIN officer o ON o.id=a.officer_id
+              LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+              WHERE 1=1";$params=[];
+        if($appointmentId!==null){$sql.=' AND a.id=?';$params[]=$appointmentId;}
+        if($onlyEligible)$sql.=" AND a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=0 AND a.legacy_exception=1 AND c.id IS NULL
+            AND JSON_SEARCH(COALESCE(a.legacy_exception_codes_json,JSON_ARRAY()),'one','DATA_ISSUE_RESOLUTION') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.appointment_id=a.id
+                AND dc.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND dc.resolution_status='RESOLVED_BY_CORRECTION')";
+        $sql.=' ORDER BY a.effective_from,a.id';$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchAll();
+    }
+
+    /** @param array<string,mixed> $row @return array{eligible:bool,classification:string,reason:?string} */
+    private function staleExceptionNormalizationAssessmentFromRow(array $row):array
+    {
+        $blocked=static fn(string $reason):array=>['eligible'=>false,'classification'=>'NOT_ELIGIBLE','reason'=>$reason];
+        if((string)$row['record_origin']!=='LEGACY_IMPORT')return $blocked('Only imported appointments can have a stale legacy exception flag normalized.');
+        if((int)$row['legacy_history_only']!==0)return $blocked('The appointment is still history-only and has not been canonically resolved.');
+        if((int)$row['legacy_exception']!==1)return $blocked('The legacy exception flag is already clear.');
+        if($row['closure_id']!==null)return $blocked('Closed appointments are not eligible for open-current flag normalization.');
+        if(empty($row['canonical_correction_id']))return $blocked('A resolved canonical-assignment correction is required.');
+        if(empty($row['has_resolution_provenance']))return $blocked('DATA_ISSUE_RESOLUTION provenance is required.');
+        return ['eligible'=>true,'classification'=>'ELIGIBLE','reason'=>null];
+    }
+
+    private function assertActor(string $actorId):void
+    {
+        $this->assertAccess();if((string)(Auth::user()['id']??'')!==$actorId)throw new DomainException('The authenticated administrator does not match the reconciliation actor.');
+    }
+
+    private function transaction(callable $work):mixed
+    {
+        $owned=!$this->pdo->inTransaction();if($owned)$this->pdo->beginTransaction();
+        try{$result=$work();if($owned)$this->pdo->commit();return $result;}
+        catch(Throwable $e){if($owned&&$this->pdo->inTransaction())$this->pdo->rollBack();throw $e;}
+    }
+
+    private function decodeJson(?string $json):array{$value=json_decode((string)$json,true);return is_array($value)?$value:[];}
+    private function json(mixed $value):string{return json_encode($value,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);}
 
     private function assertAccess():void
     {
