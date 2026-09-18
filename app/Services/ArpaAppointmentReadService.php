@@ -407,6 +407,110 @@ final class ArpaAppointmentReadService
                  FROM ({$issues}) issue_rows)";
     }
 
+    /**
+     * Lightweight division mapping for timeline summaries.
+     *
+     * This intentionally returns only the canonical issue key and affected
+     * Division IDs. The full issueSource() remains the source for issue/detail
+     * screens, but summary queries do not need its descriptive GROUP_CONCAT
+     * payload or a FIND_IN_SET join back across every appointment row.
+     */
+    public static function divisionIssueMapSource():string
+    {
+        $locationValidationDate=ArpaAppointmentLocationPolicy::validationDateSql('a.effective_from');
+        $arpaAscRelationship=ArpaAppointmentLocationPolicy::relationshipAtSql('lr',$locationValidationDate);
+        $unions=[];
+        $unions[]="SELECT a.arpa_division_location_id division_id,CONCAT('DIVISION_MULTIPLE_OPEN:',a.arpa_division_location_id) row_key
+                   FROM arpa_division_appointment a
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.legacy_history_only=0
+                   GROUP BY a.arpa_division_location_id HAVING COUNT(*)>1";
+        foreach(['PERMANENT','ACTING','ATTEND_TO_DUTY'] as $type){
+            $key=$type==='ATTEND_TO_DUTY'?'OFFICER_MULTIPLE_ATTEND_TO_DUTY':'OFFICER_MULTIPLE_'.$type;
+            $unions[]="SELECT DISTINCT a.arpa_division_location_id,CONCAT('{$key}:',a.officer_id)
+                       FROM arpa_division_appointment a
+                       LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                       JOIN (
+                         SELECT flagged.officer_id
+                         FROM arpa_division_appointment flagged
+                         LEFT JOIN arpa_division_appointment_closure flagged_c ON flagged_c.appointment_id=flagged.id
+                         WHERE flagged_c.id IS NULL AND flagged.legacy_history_only=0 AND flagged.appointment_type='{$type}'
+                         GROUP BY flagged.officer_id HAVING COUNT(*)>1
+                       ) duplicate_officer ON duplicate_officer.officer_id=a.officer_id
+                       WHERE c.id IS NULL AND a.legacy_history_only=0 AND a.appointment_type='{$type}'";
+        }
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('DEPENDENT_WITHOUT_PERMANENT:',a.id)
+                   FROM arpa_division_appointment a
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.legacy_history_only=0 AND a.appointment_type<>'PERMANENT'
+                     AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment p
+                       LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=p.id
+                       WHERE p.officer_id=a.officer_id AND p.appointment_type='PERMANENT'
+                         AND p.legacy_history_only=0 AND p.effective_from<=a.effective_from
+                         AND (pc.effective_to IS NULL OR pc.effective_to>=a.effective_from))";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('PERMANENT_SERVICE_WITH_ATTEND_TO_DUTY:',a.id)
+                   FROM arpa_division_appointment a JOIN officer o ON o.id=a.officer_id
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.legacy_history_only=0 AND a.appointment_type='ATTEND_TO_DUTY'
+                     AND o.arpa_service_permanency='PERMANENT_IN_SERVICE'";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('NON_PERMANENT_SERVICE_WITH_ACTING:',a.id)
+                   FROM arpa_division_appointment a JOIN officer o ON o.id=a.officer_id
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.legacy_history_only=0 AND a.appointment_type='ACTING'
+                     AND o.arpa_service_permanency='NOT_PERMANENT_IN_SERVICE'";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('MISSING_ASC_OFFICE_ASSIGNMENT:D:',a.id)
+                   FROM arpa_division_appointment a
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.legacy_history_only=0
+                     AND NOT EXISTS(SELECT 1 FROM officer_office_assignment oa
+                       JOIN office ofc ON ofc.id=oa.office_id
+                       JOIN office_type ot ON ot.id=ofc.office_type_id AND ot.system_key='ASC_OFFICE'
+                       WHERE oa.officer_id=a.officer_id AND ofc.linked_location_id=a.asc_location_id
+                         AND oa.active=1 AND oa.approval_status='APPROVED' AND oa.effective_from<=CURRENT_DATE()
+                         AND (oa.effective_to IS NULL OR oa.effective_to>=CURRENT_DATE()))";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('APPOINTMENT_OUTSIDE_ASC:',a.id)
+                   FROM arpa_division_appointment a
+                   WHERE NOT EXISTS(SELECT 1 FROM location_relationship lr
+                     WHERE lr.parent_location_id=a.asc_location_id AND lr.child_location_id=a.arpa_division_location_id
+                       AND lr.relationship_type='ASC_ARPA_DIVISION' AND {$arpaAscRelationship})";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('INVALID_DATE_RANGE:',a.id)
+                   FROM arpa_division_appointment a
+                   JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.effective_to<a.effective_from";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('ENDED_APPOINTMENT_WITHOUT_END_REASON:',a.id)
+                   FROM arpa_division_appointment a
+                   JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.end_reason_id IS NULL AND NULLIF(TRIM(c.legacy_reason_text),'') IS NULL";
+        $unions[]="SELECT r.arpa_division_location_id,CONCAT('OPEN_APPOINTMENT_WITH_END_REASON:',r.id)
+                   FROM arpa_division_appointment_request r
+                   WHERE r.deleted_at IS NULL AND r.requested_effective_to IS NULL AND r.end_reason_id IS NOT NULL
+                     AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment materialized WHERE materialized.request_id=r.id)";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('FUTURE_OVERLAP_CONFLICT:',a.arpa_division_location_id)
+                   FROM arpa_division_appointment a
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.legacy_history_only=0
+                   GROUP BY a.arpa_division_location_id HAVING COUNT(*)>1 AND MAX(a.effective_from>CURRENT_DATE())=1";
+        $unions[]="SELECT a.arpa_division_location_id,CONCAT('LEGACY_HISTORICAL_EXCEPTION:',a.id)
+                   FROM arpa_division_appointment a
+                   LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                   WHERE c.id IS NULL AND a.record_origin='LEGACY_IMPORT'
+                     AND a.legacy_history_only=1 AND a.legacy_exception=1
+                     AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
+                       WHERE dc.appointment_id=a.id AND dc.correction_action IN('RESOLVE_CANONICAL_ASSIGNMENT','KEEP_AS_HISTORICAL_EXCEPTION')
+                         AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+        $unions[]="SELECT r.arpa_division_location_id,CONCAT('LEGACY_HISTORICAL_EXCEPTION:',r.id)
+                   FROM arpa_division_appointment_request r
+                   WHERE r.deleted_at IS NULL AND r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1
+                     AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id)";
+        $issues=implode(' UNION ALL ',$unions);
+        return "(SELECT DISTINCT issue_rows.division_id,issue_rows.row_key
+                 FROM ({$issues}) issue_rows
+                 WHERE issue_rows.division_id IS NOT NULL
+                   AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
+                     WHERE dc.issue_row_key=issue_rows.row_key
+                       AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION')))";
+    }
+
     public static function currentActionIssuePredicate(string $alias='q'):string
     {
         if(preg_match('/^[A-Za-z][A-Za-z0-9_]*$/',$alias)!==1)throw new DomainException('Invalid diagnostic alias.');

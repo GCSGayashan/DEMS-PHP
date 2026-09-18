@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database};
 use App\Controllers\ArpaAppointmentController;
-use App\Services\{ArpaDivisionTimelineService,UserContextService};
+use App\Services\{ArpaAppointmentReadService,ArpaDivisionTimelineService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -148,6 +148,7 @@ final class ArpaDivisionAppointmentTimelineTest
         $districtSummary=(new DataTableQuery($this->pdo,$districtSummaryDefinition,new DataTableRequest(['length'=>10])))->response();
         $this->same(1,$districtSummary['recordsFiltered'],'National District summary returns the selected District once');
         $this->same(true,(int)$districtSummary['data'][0]['total_divisions']>0,'District summary aggregates Division counts without loading timelines');
+        $this->optimizedSummarySemantics($district,$districtSummaryDefinition);
         $nationalAscDefinition=DataTableRegistry::definition('arpa-division-timeline-asc-summary',['district_id'=>$district,'drill_level'=>'NATIONAL']);$nationalAscDefinition['baseWhere'][]='d.asc_location_id=?';$nationalAscDefinition['baseParams'][]=$this->asc;
         $nationalAsc=(new DataTableQuery($this->pdo,$nationalAscDefinition,new DataTableRequest(['length'=>10])))->response();
         $this->same(true,str_contains((string)$nationalAsc['data'][0]['actions'],'/timeline/district/'.$district.'/asc/'),'National District summary drills to ASC through the explicit District route');
@@ -179,6 +180,51 @@ final class ArpaDivisionAppointmentTimelineTest
             ->execute([$appointment,$request,$this->officer,$this->asc,$division,$location['asc_dad'],$location['asc_name'],$location['arpa_dad'],$location['arpa_name'],$from,$this->actor,$historyOnly]);
         if($to!==null){$reason=$withReason?(string)$this->value('SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1'):null;$this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,end_reason_id,closure_kind,context_snapshot_json,approved_by,approved_at,approval_timestamp_provenance) VALUES(?,'LEGACY_IMPORT',?,?,?,?,'DIRECT','{}',?,NULL,'UNAVAILABLE_FROM_LEGACY_SOURCE')")->execute([$this->uuid(),$appointment,$request,$to,$reason,$this->actor]);}
         return $appointment;
+    }
+
+    private function optimizedSummarySemantics(string $district,array $districtDefinition):void
+    {
+        $source=ArpaAppointmentReadService::divisionIssueMapSource();
+        $this->same(false,str_contains($source,'FIND_IN_SET'),'summary issue mapping does not remap full diagnostics through a per-row FIND_IN_SET join');
+        $this->same(true,isset($districtDefinition['countFrom'])&&str_contains($districtDefinition['countFrom'],'ARPA_DIVISION'),'District summary counts use the lightweight Division inventory');
+
+        $this->officer=$this->officer('Timeline Canonical Resolution Officer');
+        $legacyDivision=$this->division($this->asc,'Timeline Legacy Resolution');
+        $legacyAppointment=$this->appointment($legacyDivision,'2025-01-01',null,true);
+        $legacyRequest=(string)$this->value('SELECT request_id FROM arpa_division_appointment WHERE id=?',[$legacyAppointment]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=1,legacy_exception=1 WHERE id=?')->execute([$legacyAppointment]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=1,legacy_exception=1 WHERE id=?')->execute([$legacyRequest]);
+        $rowKey='LEGACY_HISTORICAL_EXCEPTION:'.$legacyAppointment;
+        $this->same(1,(int)$this->value("SELECT COUNT(*) FROM {$source} issue_map WHERE issue_map.division_id=? AND issue_map.row_key=?",[$legacyDivision,$rowKey]),'unresolved materialized legacy exception is counted for its Division');
+        $legacyRow=$this->row('SELECT d.timeline_status,d.vacancy_occupancy_count,d.data_issue_count FROM '.ArpaDivisionTimelineService::divisionListSource().' d WHERE d.id=?',[$legacyDivision]);
+        $this->same('DATA_ISSUE',$legacyRow['timeline_status'],'legacy historical-only exception remains a Data Issue and not current coverage');
+        $this->same(0,(int)$legacyRow['vacancy_occupancy_count'],'legacy historical-only appointment does not fabricate current occupancy');
+
+        $correction=$this->uuid();
+        $this->pdo->prepare("INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,before_json,after_json,record_origin) VALUES(?,?,?,?,?,?,JSON_ARRAY(?),?,?,'RESOLVE_CANONICAL_ASSIGNMENT','RESOLVED_BY_CORRECTION','Timeline summary regression','{}','{}','LEGACY_IMPORT')")
+            ->execute([$correction,$rowKey,'LEGACY_HISTORICAL_EXCEPTION',$this->officer,$legacyAppointment,$legacyRequest,$legacyAppointment,$this->asc,$this->actor]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=0,legacy_exception=0 WHERE id=?')->execute([$legacyAppointment]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=0,legacy_exception=0 WHERE id=?')->execute([$legacyRequest]);
+        $this->same(0,(int)$this->value("SELECT COUNT(*) FROM {$source} issue_map WHERE issue_map.division_id=? AND issue_map.row_key=?",[$legacyDivision,$rowKey]),'resolved correction is not counted as an unresolved summary issue');
+        $canonicalRow=$this->row('SELECT d.timeline_status,d.vacancy_occupancy_count,d.data_issue_count FROM '.ArpaDivisionTimelineService::divisionListSource().' d WHERE d.id=?',[$legacyDivision]);
+        $this->same('COMPLETE',$canonicalRow['timeline_status'],'canonical-resolved imported appointment becomes authoritative complete coverage');
+        $this->same(1,(int)$canonicalRow['vacancy_occupancy_count'],'canonical-resolved imported appointment supplies current occupancy');
+
+        $deletedDivision=$this->division($this->asc,'Timeline Deleted Reservation');$deletedRequest=$this->uuid();
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'PERMANENT',?,?,'2025-01-01','SUBMITTED',0,?)")
+            ->execute([$deletedRequest,$this->officer,$this->asc,$deletedDivision,$this->actor]);
+        $reserved=$this->row('SELECT d.vacancy_occupancy_count FROM '.ArpaDivisionTimelineService::divisionListSource().' d WHERE d.id=?',[$deletedDivision]);
+        $this->same(1,(int)$reserved['vacancy_occupancy_count'],'active submitted request reserves its Division in summary coverage');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NOW(),deleted_by=?,delete_reason='Superseded test reservation' WHERE id=?")->execute([$this->actor,$deletedRequest]);
+        $deleted=$this->row('SELECT d.timeline_status,d.vacancy_occupancy_count FROM '.ArpaDivisionTimelineService::divisionListSource().' d WHERE d.id=?',[$deletedDivision]);
+        $this->same('MISSING_BASELINE_PERIOD',$deleted['timeline_status'],'deleted or superseded request is excluded from the timeline summary');
+        $this->same(0,(int)$deleted['vacancy_occupancy_count'],'deleted request no longer reserves Division occupancy');
+
+        $searchDefinition=DataTableRegistry::definition('arpa-division-timeline-district-summary');
+        $searchDefinition['baseWhere'][]='d.district_location_id=?';$searchDefinition['baseParams'][]=$district;
+        $districtName=(string)$this->value('SELECT name_en FROM location WHERE id=?',[$district]);
+        $searched=(new DataTableQuery($this->pdo,$searchDefinition,new DataTableRequest(['length'=>10,'search'=>['value'=>$districtName],'order'=>[['column'=>1,'dir'=>'desc']]])))->response();
+        $this->same(1,$searched['recordsFiltered'],'optimized District summary preserves server-side search, ordering, and pagination');
     }
 
     private function officer(string $name):string

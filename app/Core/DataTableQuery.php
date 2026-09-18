@@ -64,7 +64,8 @@ final class DataTableQuery
 
     private function count(array $where, array $params): int
     {
-        $sql = ($this->config['with'] ?? '') . 'SELECT COUNT(DISTINCT ' . $this->config['count'] . ') FROM ' . $this->config['from'] . $this->whereSql($where);
+        $from=$this->config['countFrom']??$this->config['from'];
+        $sql = ($this->config['with'] ?? '') . 'SELECT COUNT(DISTINCT ' . $this->config['count'] . ') FROM ' . $from . $this->whereSql($where);
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
         return (int)$stmt->fetchColumn();

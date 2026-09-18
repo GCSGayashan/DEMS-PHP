@@ -1375,6 +1375,7 @@ final class DataTableRegistry
         return [
             'permission'=>'arpa.appointment.view','export'=>false,'with'=>$geo['with'],
             'from'=>ArpaDivisionTimelineService::divisionListSource().' d '.$geo['joinExpression'],
+            'countFrom'=>ArpaDivisionTimelineService::divisionInventorySource().' d '.$geo['joinExpression'],
             'select'=>[
                 'd.asc_location_id asc_id','d.asc_dad_number asc_dad','d.asc_name',
                 'COUNT(DISTINCT d.id) total_divisions',
@@ -1406,6 +1407,7 @@ final class DataTableRegistry
         return [
             'permission'=>'arpa.appointment.view','export'=>false,'with'=>$geo['with'],
             'from'=>ArpaDivisionTimelineService::divisionListSource().' d '.$geo['joinExpression'],
+            'countFrom'=>ArpaDivisionTimelineService::divisionInventorySource().' d '.$geo['joinExpression'],
             'select'=>[
                 'd.district_location_id district_id','MAX(d.district_name) district_name','MAX(d.district_dad_number) district_dad',
                 'COUNT(DISTINCT d.asc_location_id) total_ascs','COUNT(DISTINCT d.id) total_divisions',

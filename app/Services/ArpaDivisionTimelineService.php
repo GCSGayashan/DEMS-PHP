@@ -24,24 +24,40 @@ final class ArpaDivisionTimelineService
 
     public function __construct(private readonly PDO $pdo){}
 
+    /** Current approved Division/ASC/District inventory without timeline diagnostics. */
+    public static function divisionInventorySource():string
+    {
+        return "(SELECT arpa.id,arpa.dad_number,arpa.name_en,
+                        asc_l.id asc_location_id,asc_l.dad_number asc_dad_number,asc_l.name_en asc_name,
+                        district.id district_location_id,district.dad_number district_dad_number,district.name_en district_name
+                 FROM location arpa
+                 JOIN location_type arpa_t ON arpa_t.id=arpa.location_type_id AND arpa_t.system_key='ARPA_DIVISION'
+                 JOIN location_relationship asc_rel ON asc_rel.child_location_id=arpa.id
+                   AND asc_rel.relationship_type='ASC_ARPA_DIVISION'
+                   AND asc_rel.active=1 AND asc_rel.approval_status='APPROVED'
+                   AND asc_rel.effective_from<=CURRENT_DATE()
+                   AND (asc_rel.effective_to IS NULL OR asc_rel.effective_to>=CURRENT_DATE())
+                 JOIN location asc_l ON asc_l.id=asc_rel.parent_location_id
+                 LEFT JOIN location_relationship district_rel ON district_rel.child_location_id=asc_l.id
+                   AND district_rel.relationship_type='DISTRICT_ASC'
+                   AND district_rel.active=1 AND district_rel.approval_status='APPROVED'
+                   AND district_rel.effective_from<=CURRENT_DATE()
+                   AND (district_rel.effective_to IS NULL OR district_rel.effective_to>=CURRENT_DATE())
+                 LEFT JOIN location district ON district.id=district_rel.parent_location_id
+                 WHERE arpa.approval_status='APPROVED' AND arpa.operational_status='ACTIVE'
+                   AND arpa.effective_from<=CURRENT_DATE()
+                   AND (arpa.effective_to IS NULL OR arpa.effective_to>=CURRENT_DATE()))";
+    }
+
     public static function divisionListSource():string
     {
         $baseline=ArpaDivisionContinuityService::BASELINE;
         $periodSummary=ArpaDivisionContinuityService::summarySource();
 
-        $issueSource=ArpaAppointmentReadService::issueSource();
-        $terminal="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
-                              WHERE dc.issue_row_key=q.row_key
-                                AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
         $issueMap="SELECT mapped.division_id,COUNT(DISTINCT mapped.row_key) data_issue_count
                    FROM (
-                     SELECT COALESCE(a.arpa_division_location_id,r.arpa_division_location_id) division_id,q.row_key
-                     FROM {$issueSource} q
-                     LEFT JOIN arpa_division_appointment a ON FIND_IN_SET(a.id,q.related_ids)>0
-                     LEFT JOIN arpa_division_appointment_request r ON FIND_IN_SET(r.id,q.related_ids)>0
-                       AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment materialized WHERE materialized.request_id=r.id)
-                     WHERE COALESCE(a.arpa_division_location_id,r.arpa_division_location_id) IS NOT NULL
-                       AND {$terminal}
+                     SELECT q.division_id,q.row_key
+                     FROM ".ArpaAppointmentReadService::divisionIssueMapSource()." q
                      UNION ALL
                      SELECT COALESCE(res.selected_target_arpa_id,i.candidate_arpa_id,p.arpa_location_id),CONCAT('LEGACY_RECONCILIATION:',i.id)
                      FROM legacy_arpa_reconciliation_item i
