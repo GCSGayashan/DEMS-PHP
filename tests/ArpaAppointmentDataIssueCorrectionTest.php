@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 use App\Core\{Auth,DataTableQuery,DataTableRegistry,DataTableRequest,Database,LegacyDatabase};
-use App\Services\{ArpaAppointmentDataIssueCorrectionService,ArpaAppointmentReadService,OfficerProfileService,UserContextService};
+use App\Services\{ArpaAppointmentDataIssueCorrectionService,ArpaAppointmentReadService,ArpaDivisionTimelineService,ArpaOfficerTimelineService,OfficerProfileService,UserContextService};
 
 require dirname(__DIR__).'/bootstrap.php';
 
@@ -17,7 +17,7 @@ final class ArpaAppointmentDataIssueCorrectionTest
         if($this->actor==='')throw new RuntimeException('Operational asctest fixture is required.');
         $context=$this->pdo->query("SELECT uar.id role_assignment_id,uas.id scope_assignment_id FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id AND r.role_code='ASC_SUBJECT_OFFICER' JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id JOIN location l ON l.id=uas.location_id AND l.dad_number='70004-0000389' WHERE uar.user_id='{$this->actor}' AND uar.active=1 AND uar.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' LIMIT 1")->fetch();if(!$context)throw new RuntimeException('asctest ASC Subject Officer context is required.');$_SESSION=['user_id'=>$this->actor,'authenticated_at'=>time(),'last_activity_at'=>time()];(new UserContextService($this->pdo))->select($this->actor,(string)$context['role_assignment_id'],(string)$context['scope_assignment_id']);Auth::forgetRequestCache();
         $this->pdo->beginTransaction();
-        try{$this->fixtures();$this->authorization();$this->multipleOpenCorrection();$this->dependentCorrection();$this->historicalReview();$this->crossAscGroupIsReadOnly();$this->rollbackAndWorkflowBoundary();$this->staticCoverage();}
+        try{$this->fixtures();$this->authorization();$this->multipleOpenCorrection();$this->dependentCorrection();$this->historicalReview();$this->canonicalPromotion();$this->crossAscGroupIsReadOnly();$this->rollbackAndWorkflowBoundary();$this->staticCoverage();}
         finally{$this->pdo->rollBack();}
         $this->same($before,$this->state(),'correction test leaves target appointment, access, and audit state unchanged');
         $this->same($legacyBefore,$this->legacyState(),'correction test never modifies the legacy source database');
@@ -27,8 +27,8 @@ final class ArpaAppointmentDataIssueCorrectionTest
     private function fixtures():void
     {
         $this->asc=(string)$this->scalar("SELECT uas.location_id FROM user_account_scope uas JOIN location l ON l.id=uas.location_id JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ASC' WHERE uas.user_id=? AND uas.scope_type='ASC' AND uas.scope_mode='EXACT' AND uas.active=1 AND uas.approval_status='APPROVED' LIMIT 1",[$this->actor]);
-        $read=new ArpaAppointmentReadService($this->pdo);$this->divisions=array_column($read->vacantDivisionsForAsc($this->actor,$this->asc,date('Y-m-d')),'id');
-        if(count($this->divisions)<4)throw new RuntimeException('Four vacant ARPA Divisions are required for correction tests.');
+        $read=new ArpaAppointmentReadService($this->pdo);$this->divisions=[];foreach($read->vacantDivisionsForAsc($this->actor,$this->asc,date('Y-m-d')) as $division){$unresolved=(int)$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1 AND r.arpa_division_location_id=? AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id)",[$division['id']]);if($unresolved===0)$this->divisions[]=$division['id'];}
+        if(count($this->divisions)<5)throw new RuntimeException('Five vacant ARPA Divisions without unresolved imported requests are required for correction tests.');
         $this->officer=$this->newOfficer();
     }
 
@@ -82,6 +82,57 @@ final class ArpaAppointmentDataIssueCorrectionTest
         $resolved=DataTableRegistry::definition('arpa-appointment-corrections');$resolved['baseWhere'][]='c.id=?';$resolved['baseParams'][]=$result['correction_id'];$this->same(1,(new DataTableQuery($this->pdo,$resolved,new DataTableRequest(['length'=>10])))->response()['recordsFiltered'],'reviewed exception remains visible in resolved/reviewed audit list');
     }
 
+    private function canonicalPromotion():void
+    {
+        $this->officer=$this->newOfficer();
+        $this->legacyAppointment($this->divisions[1],'PERMANENT','2025-01-01',['source_table'=>'tbl_officer_apoint','source_row_id'=>950000]);
+        $ended=$this->legacyAppointment($this->divisions[4],'ACTING','2025-01-01',['source_table'=>'tbl_officer_apoint','source_row_id'=>950001]);
+        $endedRequest=(string)$this->scalar('SELECT request_id FROM arpa_division_appointment WHERE id=?',[$ended]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=1 WHERE id=?')->execute([$ended]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=1 WHERE id=?')->execute([$endedRequest]);
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,closure_kind,context_snapshot_json,approval_timestamp_provenance) VALUES(UUID(),'LEGACY_IMPORT',?,?,'2025-12-31','DIRECT','{}','UNAVAILABLE_FROM_LEGACY_SOURCE')")->execute([$ended,$endedRequest]);
+
+        $current=$this->legacyAppointment($this->divisions[4],'ACTING','2026-01-01',['source_table'=>'tbl_officer_apoint_2026','source_row_id'=>950002]);
+        $currentRequest=(string)$this->scalar('SELECT request_id FROM arpa_division_appointment WHERE id=?',[$current]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=1 WHERE id=?')->execute([$current]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=1 WHERE id=?')->execute([$currentRequest]);
+        $genuine=$this->legacyAppointment($this->divisions[4],'DUTY_COVERING','2026-02-01',['source_table'=>'tbl_officer_apoint_2026','source_row_id'=>950003]);
+        $genuineRequest=(string)$this->scalar('SELECT request_id FROM arpa_division_appointment WHERE id=?',[$genuine]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=1 WHERE id=?')->execute([$genuine]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=1 WHERE id=?')->execute([$genuineRequest]);
+
+        $duplicate=$this->uuid();
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'ACTING',?,?,'2026-01-01','ASC_APPROVED',?)")->execute([$duplicate,$this->officer,$this->asc,$this->divisions[4],$this->actor]);
+        $this->pdo->prepare("INSERT INTO arpa_appointment_workflow_action(request_id,action,stage,user_id,previous_status,new_status,comments) VALUES(?,'VERIFY','ASC',?,'SUBMITTED','ASC_VERIFIED','Verified duplicate fixture'),(?,'APPROVE','ASC',?,'ASC_VERIFIED','ASC_APPROVED','Approved duplicate fixture')")->execute([$duplicate,$this->actor,$duplicate,$this->actor]);
+
+        $rowKey='LEGACY_HISTORICAL_EXCEPTION:'.$current;$service=new ArpaAppointmentDataIssueCorrectionService($this->pdo);
+        $this->same($current,$service->issue($rowKey)['related_ids']??null,'materialized open historical exception is exposed through the existing Data Issue model');
+        $result=$service->correct($rowKey,['correction_action'=>'RESOLVE_CANONICAL_ASSIGNMENT','appointment_id'=>$current,'correction_reason'=>'Confirmed current imported Acting assignment','evidence_reference'=>'Regression evidence'],$this->actor);
+        $this->same('RESOLVED_BY_CORRECTION',$result['resolution_status'],'imported open appointment is promoted through audited Data Issue correction');
+        $this->same(0,(int)$this->scalar('SELECT legacy_history_only FROM arpa_division_appointment WHERE id=?',[$current]),'promoted appointment is no longer history-only');
+        $this->same(0,(int)$this->scalar('SELECT legacy_exception FROM arpa_division_appointment WHERE id=?',[$current]),'resolved migration exception no longer controls canonical status');
+        $this->same(0,(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id=?',[$current]),'promotion creates no fake closure or end date');
+        $this->same(1,(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_request WHERE id=? AND deleted_at IS NOT NULL',[$duplicate]),'exact duplicate native reservation is safely superseded');
+        $this->same(2,(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id=?',[$duplicate]),'duplicate workflow history is preserved');
+        $ledger=$this->row('SELECT before_json,after_json FROM arpa_appointment_data_correction WHERE id=?',[$result['correction_id']]);
+        $this->same(true,str_contains($ledger['before_json'],$duplicate)&&str_contains($ledger['after_json'],$duplicate)&&str_contains($ledger['before_json'],'workflow_actions'),'correction audit retains the duplicate request and its workflow history before and after correction');
+
+        $profile=(new OfficerProfileService($this->pdo))->profile($this->officer,[],[$this->asc]);
+        $this->same(true,in_array($current,array_column($profile['current_appointments'],'id'),true),'promoted appointment appears in Current ARPA Assignments');
+        $this->same(false,in_array($current,array_column($profile['previous_appointments'],'id'),true),'promoted appointment leaves the historical-only grouping');
+        $this->same('Historical Ended',(string)$this->appointmentValue($profile['previous_appointments'],$ended,'display_status'),'closed 2025 record remains Historical Ended');
+        $this->same('Historical Exception',(string)$this->appointmentValue($profile['previous_appointments'],$genuine,'display_status'),'unrelated genuine historical exception remains historical');
+        $officerTimeline=(new ArpaOfficerTimelineService($this->pdo))->timeline($this->officer,$this->actor);
+        $divisionTimeline=(new ArpaDivisionTimelineService($this->pdo))->timeline($this->divisions[4],$this->actor);
+        $this->same('Current / Open',(string)$this->appointmentValue($officerTimeline['appointments'],$current,'display_status'),'Officer Timeline agrees that the promoted appointment is current');
+        $divisionEntries=array_values(array_filter($divisionTimeline['entries'],fn(array $row):bool=>($row['entry_kind']??null)==='APPOINTMENT'));
+        $this->same('Current / Open',(string)$this->appointmentValue($divisionEntries,$current,'display_status'),'Division Timeline agrees that the promoted appointment is current');
+        $kept=$service->correct('LEGACY_HISTORICAL_EXCEPTION:'.$genuine,['correction_action'=>'KEEP_AS_HISTORICAL_EXCEPTION','appointment_id'=>$genuine,'correction_reason'=>'Confirmed genuine historical exception'],$this->actor);
+        $this->same('KEPT_HISTORICAL_EXCEPTION',$kept['resolution_status'],'genuine imported exception can be terminally retained as history');
+        $this->same(1,(int)$this->scalar('SELECT legacy_history_only FROM arpa_division_appointment WHERE id=?',[$genuine]),'keeping a genuine exception does not promote it');
+        $this->same(null,$service->issue('LEGACY_HISTORICAL_EXCEPTION:'.$genuine),'reviewed genuine exception leaves the active issue queue without changing its historical state');
+    }
+
     private function rollbackAndWorkflowBoundary():void
     {
         $first=$this->legacyAppointment($this->divisions[3],'ACTING','2025-05-10',['source_table'=>'tbl_officer_apoint','source_row_id'=>940001]);$this->legacyAppointment($this->divisions[3],'DUTY_COVERING','2025-05-10',['source_table'=>'tbl_officer_apoint','source_row_id'=>940002]);$rowKey='DIVISION_MULTIPLE_OPEN:'.$this->divisions[3];$service=new ArpaAppointmentDataIssueCorrectionService($this->pdo);$ledgerBefore=(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_data_correction');$closureBefore=(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure');
@@ -102,7 +153,7 @@ final class ArpaAppointmentDataIssueCorrectionTest
     {
         $routes=(string)file_get_contents(BASE_PATH.'/routes/web.php');foreach(['/hr/arpa-appointments/issues','/hr/arpa-appointments/issues/{key}/correct'] as $route)$this->same(true,str_contains($routes,$route),"{$route} route is registered");
         $migration=(string)file_get_contents(BASE_PATH.'/database/migrations/043_arpa_appointment_data_issue_corrections.sql');foreach(['arpa.appointment.data-issue.correct','ASC_SUBJECT_OFFICER','arpa_appointment_data_correction'] as $value)$this->same(true,str_contains($migration,$value),"migration contains {$value}");
-        $service=(string)file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentDataIssueCorrectionService.php');$this->same(false,str_contains($service,'arpa_appointment_workflow_action')||str_contains($service,'ArpaAppointmentService'),'correction service is structurally isolated from normal appointment workflow');
+        $service=(string)file_get_contents(BASE_PATH.'/app/Services/ArpaAppointmentDataIssueCorrectionService.php');$this->same(false,str_contains($service,'INSERT INTO arpa_appointment_workflow_action')||str_contains($service,'UPDATE arpa_appointment_workflow_action')||str_contains($service,'ArpaAppointmentService'),'correction service may read preserved workflow history but never mutates or advances normal appointment workflow');
         $profile=(string)file_get_contents(BASE_PATH.'/app/Views/officers/show.php');$this->same(true,str_contains($profile,'Appointment Data Correction History'),'Officer Profile renders correction history');
     }
 
@@ -128,6 +179,7 @@ final class ArpaAppointmentDataIssueCorrectionTest
     private function scalar(string $sql,array $params=[]):mixed{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchColumn();}
     private function row(string $sql,array $params=[]):array{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetch()?:[];}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
+    private function appointmentValue(array $rows,string $appointmentId,string $field):mixed{foreach($rows as $row)if((string)($row['id']??$row['appointment_id']??'')===$appointmentId)return $row[$field]??null;return null;}
     private function throws(callable $fn,string $message):void{$this->assertions++;try{$fn();}catch(DomainException){return;}throw new RuntimeException($message.': expected DomainException');}
     private function same(mixed $expected,mixed $actual,string $message):void{$this->assertions++;if($expected!==$actual)throw new RuntimeException($message.': expected '.var_export($expected,true).', got '.var_export($actual,true));}
 }

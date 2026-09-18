@@ -65,7 +65,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         }
         if(!ScopeService::canAccessLocation($viewerId,(string)$issue['asc_location_id'],date('Y-m-d')))throw new DomainException('You cannot view issues outside your assigned location.');
         $ids=$this->relatedIds((string)$issue['related_ids']);$appointments=$this->appointments($ids);
-        $historicalRequest=$issue['issue_type']==='LEGACY_HISTORICAL_EXCEPTION'?$this->historicalRequest((string)$issue['related_ids']):null;
+        $historicalRequest=$issue['issue_type']==='LEGACY_HISTORICAL_EXCEPTION'&&$appointments===[]?$this->historicalRequest((string)$issue['related_ids']):null;
         $singleAsc=$appointments!==[]?$this->allAppointmentsBelongToAsc($appointments,(string)$issue['asc_location_id']):($historicalRequest!==null&&(string)$historicalRequest['asc_location_id']===(string)$issue['asc_location_id']);
         $presentation=ArpaAppointmentIssuePresentation::for((string)$issue['issue_type']);
         $hierarchyContexts=[];
@@ -108,8 +108,15 @@ final class ArpaAppointmentDataIssueCorrectionService
             }
             if(!in_array($issue['issue_type'],self::CORRECTABLE_ISSUES,true))throw new DomainException('This record cannot be corrected on this page. Use the normal appointment process.');
             if(!$this->canCorrect($actorId,(string)$issue['asc_location_id']))throw new DomainException('Only the assigned ASC Subject Officer can correct this issue.');
-            if($action==='RESOLVE_CANONICAL_ASSIGNMENT')return $this->resolveHistoricalRequest($rowKey,$issue,$input,$actorId,$reason);
-            if($issue['issue_type']==='LEGACY_HISTORICAL_EXCEPTION'&&$action==='KEEP_AS_HISTORICAL_EXCEPTION')return $this->keepHistoricalRequest($rowKey,$issue,$input,$actorId,$reason);
+            if($issue['issue_type']==='LEGACY_HISTORICAL_EXCEPTION'&&in_array($action,['RESOLVE_CANONICAL_ASSIGNMENT','KEEP_AS_HISTORICAL_EXCEPTION'],true)){
+                $related=$this->relatedIds((string)$issue['related_ids']);$materialized=$this->appointments($related);
+                if($materialized!==[])return $action==='RESOLVE_CANONICAL_ASSIGNMENT'
+                    ?$this->promoteHistoricalAppointment($rowKey,$issue,$input,$actorId,$reason,$materialized)
+                    :$this->keepMaterializedHistoricalAppointment($rowKey,$issue,$input,$actorId,$reason,$materialized);
+                return $action==='RESOLVE_CANONICAL_ASSIGNMENT'
+                    ?$this->resolveHistoricalRequest($rowKey,$issue,$input,$actorId,$reason)
+                    :$this->keepHistoricalRequest($rowKey,$issue,$input,$actorId,$reason);
+            }
             $related=$this->relatedIds((string)$issue['related_ids']);
             if($related===[])throw new DomainException('No appointment record is linked to this issue.');
             $this->lockAppointments($related);
@@ -260,12 +267,56 @@ final class ArpaAppointmentDataIssueCorrectionService
         return ['correction_id'=>$correctionId,'resolution_status'=>'KEPT_HISTORICAL_EXCEPTION','issue_remaining'=>false];
     }
 
-    private function writeCorrection(string $id,string $rowKey,string $issueType,array $target,string $actorId,string $action,string $reason,array $input,array $before,array $after):void
+    /** @param array<int,array<string,mixed>> $appointments @return array<string,mixed> */
+    private function promoteHistoricalAppointment(string $rowKey,array $issue,array $input,string $actorId,string $reason,array $appointments):array
     {
-        $this->pdo->prepare('INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,remarks,evidence_reference,before_json,after_json,record_origin,legacy_source_references_json) VALUES(?,?,?,?,?,?,?,?,?,?,\'RESOLVED_BY_CORRECTION\',?,?,?,?,?,?,?)')
-            ->execute([$id,$rowKey,$issueType,$target['officer_id'],$target['id'],$target['request_id'],$this->json([$target['id']]),$target['asc_location_id'],$actorId,$action,$reason,$this->nullText($input['remarks']??null),$this->nullText($input['evidence_reference']??null),$this->json($before),$this->json($after),'LEGACY_IMPORT',$this->json($this->sourceReferencesForRequest((string)$target['request_id']))]);
+        if(count($appointments)!==1)throw new DomainException('Select one imported appointment to make authoritative.');
+        $appointmentId=trim((string)($input['appointment_id']??$appointments[0]['id']));
+        if($appointmentId!==(string)$appointments[0]['id'])throw new DomainException('The selected appointment is not part of this Data Issue.');
+        $this->lockAppointments([$appointmentId]);$target=$this->appointment($appointmentId);
+        if((string)$target['record_origin']!=='LEGACY_IMPORT'||(int)$target['legacy_history_only']!==1||(int)$target['legacy_exception']!==1)throw new DomainException('Only an imported historical exception can be made authoritative through this action.');
+        if($target['closure_id']!==null||$target['effective_to']!==null)throw new DomainException('An ended historical appointment cannot be promoted as the current assignment.');
+
+        $request=$this->requestRecord((string)$target['request_id'],true);
+        $duplicates=$this->exactDuplicateNativeReservations($target,true);
+        $correctionId=$this->uuid();$deleteReason='Superseded by canonical imported appointment '.$appointmentId.' through Data Issue correction '.$correctionId.'.';
+        foreach($duplicates as $duplicate){
+            $this->pdo->prepare('UPDATE arpa_division_appointment_request SET deleted_at=NOW(),deleted_by=?,delete_reason=?,version=version+1 WHERE id=? AND deleted_at IS NULL')->execute([$actorId,$deleteReason,$duplicate['id']]);
+            (new WorkflowNotificationService($this->pdo))->resolveAll('ARPA_DIVISION_REQUEST',(string)$duplicate['id'],$actorId,'Superseded by the corrected canonical imported appointment.','CANCELLED');
+            $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,source_ip) VALUES(?,'arpa.appointment.workflow-request.superseded','ARPA_DIVISION_APPOINTMENT_REQUEST',?,?,'WARNING',?)")
+                ->execute([$actorId,$duplicate['id'],$this->json(['canonical_appointment_id'=>$appointmentId,'correction_id'=>$correctionId,'previous_values'=>$duplicate,'reason'=>$reason]),$_SERVER['REMOTE_ADDR']??'CLI']);
+        }
+
+        $this->assertHistoricalPeriodAvailable((string)$target['arpa_division_location_id'],(string)$target['effective_from'],null,$appointmentId,(string)$target['request_id']);
+        (new ArpaAppointmentReadService($this->pdo))->assertAppointmentTypeAvailable((string)$target['officer_id'],(string)$target['appointment_type'],(string)$target['arpa_division_location_id'],(string)$target['effective_from'],null,(string)$target['request_id'],$appointmentId);
+
+        $metadata=$this->decode((string)$target['origin_metadata_json']);
+        $metadata['data_issue_resolution']=['correction_id'=>$correctionId,'issue_row_key'=>$rowKey,'resolved_by'=>$actorId,'resolved_at'=>date(DATE_ATOM),'authority'=>'APPOINTMENT_DATA_ISSUE','previous_legacy_history_only'=>(int)$target['legacy_history_only'],'previous_legacy_exception'=>(int)$target['legacy_exception'],'superseded_native_request_ids'=>array_column($duplicates,'id')];
+        $before=['appointment'=>$target,'request'=>$request,'duplicate_requests'=>$duplicates];
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=0,legacy_exception=0,origin_metadata_json=? WHERE id=?')->execute([$this->json($metadata),$appointmentId]);
+        $this->pdo->prepare('UPDATE arpa_division_appointment_request SET legacy_history_only=0,legacy_exception=0,origin_metadata_json=?,updated_by=?,updated_at=NOW(),version=version+1 WHERE id=?')->execute([$this->json($metadata),$actorId,$target['request_id']]);
+        $afterTarget=$this->appointment($appointmentId);$afterRequest=$this->requestRecord((string)$target['request_id']);
+        $afterDuplicates=[];foreach($duplicates as $duplicate){$after=$this->requestRecord((string)$duplicate['id']);$after['workflow_actions']=$this->workflowActions((string)$duplicate['id']);$afterDuplicates[]=$after;}
+        $after=['appointment'=>$afterTarget,'request'=>$afterRequest,'duplicate_requests'=>$afterDuplicates];
+        $this->writeCorrection($correctionId,$rowKey,(string)$issue['issue_type'],$afterTarget,$actorId,'RESOLVE_CANONICAL_ASSIGNMENT',$reason,$input,$before,$after);
+        return ['correction_id'=>$correctionId,'appointment_id'=>$appointmentId,'resolution_status'=>'RESOLVED_BY_CORRECTION','issue_remaining'=>false,'appointment_status'=>'OPEN','superseded_request_ids'=>array_column($duplicates,'id')];
+    }
+
+    /** @param array<int,array<string,mixed>> $appointments @return array<string,mixed> */
+    private function keepMaterializedHistoricalAppointment(string $rowKey,array $issue,array $input,string $actorId,string $reason,array $appointments):array
+    {
+        if(count($appointments)!==1)throw new DomainException('Select one imported appointment to keep as historical.');
+        $target=$appointments[0];$this->assertLegacyCorrection($target);$correctionId=$this->uuid();
+        $this->writeCorrection($correctionId,$rowKey,(string)$issue['issue_type'],$target,$actorId,'KEEP_AS_HISTORICAL_EXCEPTION',$reason,$input,[$target],[$target],'KEPT_HISTORICAL_EXCEPTION');
+        return ['correction_id'=>$correctionId,'appointment_id'=>$target['id'],'resolution_status'=>'KEPT_HISTORICAL_EXCEPTION','issue_remaining'=>false,'appointment_status'=>'HISTORICAL_EXCEPTION'];
+    }
+
+    private function writeCorrection(string $id,string $rowKey,string $issueType,array $target,string $actorId,string $action,string $reason,array $input,array $before,array $after,string $resolutionStatus='RESOLVED_BY_CORRECTION'):void
+    {
+        $this->pdo->prepare('INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,remarks,evidence_reference,before_json,after_json,record_origin,legacy_source_references_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            ->execute([$id,$rowKey,$issueType,$target['officer_id'],$target['id'],$target['request_id'],$this->json([$target['id']]),$target['asc_location_id'],$actorId,$action,$resolutionStatus,$reason,$this->nullText($input['remarks']??null),$this->nullText($input['evidence_reference']??null),$this->json($before),$this->json($after),'LEGACY_IMPORT',$this->json($this->sourceReferencesForRequest((string)$target['request_id']))]);
         $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,source_ip) VALUES(?,'arpa.appointment.data-issue.correct','ARPA_APPOINTMENT_DATA_ISSUE',?,?,'WARNING',?)")
-            ->execute([$actorId,$id,$this->json(['issue_row_key'=>$rowKey,'issue_type'=>$issueType,'action'=>$action,'resolution_status'=>'RESOLVED_BY_CORRECTION','reason'=>$reason,'appointment_id'=>$target['id'],'before'=>$before,'after'=>$after]),$_SERVER['REMOTE_ADDR']??'CLI']);
+            ->execute([$actorId,$id,$this->json(['issue_row_key'=>$rowKey,'issue_type'=>$issueType,'action'=>$action,'resolution_status'=>$resolutionStatus,'reason'=>$reason,'appointment_id'=>$target['id'],'before'=>$before,'after'=>$after]),$_SERVER['REMOTE_ADDR']??'CLI']);
     }
 
     private function apply(string $action,array $target,array $all,array $input,string $correctionId):void
@@ -336,6 +387,26 @@ final class ArpaAppointmentDataIssueCorrectionService
               WHERE r.id=? AND r.record_origin='LEGACY_IMPORT'".($lock?' FOR UPDATE':'');
         $s=$this->pdo->prepare($sql);$s->execute([$id]);$row=$s->fetch();return $row?:null;
     }
+    private function requestRecord(string $id,bool $lock=false):array
+    {
+        $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=?'.($lock?' FOR UPDATE':''));$s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('Appointment request was not found.');return $row;
+    }
+    /** @return array<int,array<string,mixed>> */
+    private function exactDuplicateNativeReservations(array $target,bool $lock=false):array
+    {
+        $statuses="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
+        $sql="SELECT r.* FROM arpa_division_appointment_request r
+              WHERE r.deleted_at IS NULL AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+                AND r.request_type='APPOINTMENT' AND r.officer_id=? AND r.appointment_type=?
+                AND r.asc_location_id=? AND r.arpa_division_location_id=?
+                AND r.requested_effective_from=? AND r.requested_effective_to IS NULL
+                AND r.workflow_status IN({$statuses})
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id)
+              ORDER BY r.created_at,r.id".($lock?' FOR UPDATE':'');
+        $s=$this->pdo->prepare($sql);$s->execute([$target['officer_id'],$target['appointment_type'],$target['asc_location_id'],$target['arpa_division_location_id'],$target['effective_from']]);$rows=$s->fetchAll();foreach($rows as &$row)$row['workflow_actions']=$this->workflowActions((string)$row['id']);unset($row);return $rows;
+    }
+    /** @return array<int,array<string,mixed>> */
+    private function workflowActions(string $requestId):array{$s=$this->pdo->prepare('SELECT id,action,stage,user_id,previous_status,new_status,comments,action_at,record_origin FROM arpa_appointment_workflow_action WHERE request_id=? ORDER BY id');$s->execute([$requestId]);return $s->fetchAll();}
     private function arpaOfficers(string $ascId,string $selectedOfficerId):array
     {
         $sql="SELECT DISTINCT o.id,o.dad_number,o.name_with_initials,o.nic
