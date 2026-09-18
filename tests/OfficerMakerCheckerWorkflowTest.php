@@ -140,7 +140,7 @@ final class OfficerMakerCheckerWorkflowTest
         $this->useContext($systemChecker);$service->approve($systemOfficer,$systemChecker['user']);
         $this->same('APPROVED',$this->value('SELECT approval_status FROM officer WHERE id=?',[$systemOfficer]),'SYSTEM_ADMIN legacy Officer approval behavior remains available');
         $this->same('APPROVED',$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$systemAssignment]),'SYSTEM_ADMIN initial Office follows the existing Officer approval path');
-        $optional=$this->officer($systemMaker['user'],null,null,'SUBMITTED');$service->approve($optional,$systemChecker['user']);$this->same(0,(int)$this->value('SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=?',[$optional]),'Officer creation remains valid without an initial Office');
+        $missingInitial=$this->officer($systemMaker['user'],null,null,'SUBMITTED');$this->throws(fn()=>$service->approve($missingInitial,$systemChecker['user']),'normal Officer approval fails closed when the workflow-linked initial Office assignment is missing');$this->same('SUBMITTED',$this->value('SELECT approval_status FROM officer WHERE id=?',[$missingInitial]),'failed approval leaves the Officer submitted');
     }
 
     private function testCodeContracts():void

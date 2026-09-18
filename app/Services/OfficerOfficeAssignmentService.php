@@ -62,7 +62,9 @@ final class OfficerOfficeAssignmentService
 
     public function approveInitialForOfficer(string $officerId,string $actorId):void
     {
-        $assignment=$this->initialForOfficer($officerId);if(!$assignment)return;$this->approve((string)$assignment['id'],$actorId);
+        $assignment=$this->initialForOfficer($officerId);
+        if(!$assignment)throw new DomainException('The submitted Officer does not have a valid initial Office assignment.');
+        $this->approve((string)$assignment['id'],$actorId);
     }
 
     public function create(array $data,string $actorId):string
