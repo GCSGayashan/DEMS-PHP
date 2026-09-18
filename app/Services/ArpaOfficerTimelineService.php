@@ -13,20 +13,22 @@ final class ArpaOfficerTimelineService
 
     public function __construct(private readonly PDO $pdo){}
 
-    public static function periodSource():string
+    public static function periodSource(bool $includeOpenHistorical=false):string
     {
         $statuses="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
+        $historyFilter=$includeOpenHistorical?'':' AND (a.legacy_history_only=0 OR c.id IS NOT NULL)';
         return "(SELECT a.id source_id,a.id appointment_id,a.request_id,a.officer_id,a.appointment_type,
                         a.asc_location_id,a.arpa_division_location_id,a.asc_dad_snapshot asc_dad,
                         a.asc_name_snapshot asc_name,a.district_dad_snapshot district_dad,
                         a.district_name_snapshot district_name,a.arpa_dad_snapshot arpa_dad,
                         a.arpa_name_snapshot arpa_name,a.effective_from,c.effective_to,
                         r.workflow_status,a.record_origin,a.legacy_history_only,a.legacy_exception,
+                        a.legacy_exception_codes_json,c.id closure_id,
                         'OPERATIONAL' source_kind
                  FROM arpa_division_appointment a
                  JOIN arpa_division_appointment_request r ON r.id=a.request_id
                  LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
-                 WHERE a.effective_from IS NOT NULL AND (a.legacy_history_only=0 OR c.id IS NOT NULL)
+                 WHERE a.effective_from IS NOT NULL{$historyFilter}
                  UNION ALL
                  SELECT r.id,NULL,r.id,r.officer_id,r.appointment_type,r.asc_location_id,
                         r.arpa_division_location_id,asc_l.dad_number,asc_l.name_en,
@@ -34,6 +36,7 @@ final class ArpaOfficerTimelineService
                         r.requested_effective_from,
                         CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,
                         r.workflow_status,r.record_origin,r.legacy_history_only,r.legacy_exception,
+                        r.legacy_exception_codes_json,NULL,
                         'RESERVATION'
                  FROM arpa_division_appointment_request r
                  LEFT JOIN location asc_l ON asc_l.id=r.asc_location_id
@@ -87,7 +90,8 @@ final class ArpaOfficerTimelineService
         $officer=$this->officer($officerId);
         $issues=$this->existingIssues($officerId,$viewerId);
         $known=[];$knownTypes=[];foreach($issues as $issue){$known[(string)$issue['row_key']]=true;$knownTypes[(string)$issue['issue_type']]=true;}
-        foreach($this->derivedConflicts($appointments,(string)($officer['arpa_service_permanency']??'')) as $issue){
+        $conflictRows=array_values(array_filter($appointments,static fn(array $row):bool=>(int)$row['legacy_history_only']===0||!empty($row['closure_id'])));
+        foreach($this->derivedConflicts($conflictRows,(string)($officer['arpa_service_permanency']??'')) as $issue){
             if(!isset($known[(string)$issue['row_key']])&&!isset($knownTypes[(string)$issue['issue_type']]))$issues[]=$issue;
         }
         usort($issues,static fn(array $a,array $b):int=>[(string)($a['issue_from']??''),(string)$a['row_key']]<=>[(string)($b['issue_from']??''),(string)$b['row_key']]);
@@ -101,7 +105,7 @@ final class ArpaOfficerTimelineService
         return ['officer'=>$officer,'appointments'=>$appointments,'issues'=>$issues,'can_correct'=>$canCorrect,'summary'=>[
             'total_appointments'=>count($appointments),'permanent'=>$counts['PERMANENT'],'acting'=>$counts['ACTING'],
             'attend_to_duty'=>$counts['ATTEND_TO_DUTY'],'duty_covering'=>$counts['DUTY_COVERING'],
-            'current_open'=>count(array_filter($appointments,static fn(array $r):bool=>$r['effective_to']===null)),'data_issues'=>count($issues),
+            'current_open'=>count(array_filter($appointments,static fn(array $r):bool=>$r['display_status']==='Current / Open')),'data_issues'=>count($issues),
         ]];
     }
 
@@ -120,9 +124,9 @@ final class ArpaOfficerTimelineService
         $restricted=ScopeService::requiresGeographicRestriction($viewerId);
         $with=$restricted?ScopeService::visibleLocationsCte($viewerId):'';
         $scope=$restricted?'JOIN visible_locations vl ON vl.id=p.asc_location_id':'';
-        $sql=($with!==''?$with.' ':'')."SELECT p.* FROM ".self::periodSource()." p {$scope} WHERE p.officer_id=? ORDER BY p.effective_from,p.effective_to,p.source_id";
+        $sql=($with!==''?$with.' ':'')."SELECT p.* FROM ".self::periodSource(true)." p {$scope} WHERE p.officer_id=? ORDER BY p.effective_from,p.effective_to,p.source_id";
         $params=$restricted?ScopeService::visibleLocationParams($viewerId):[];$params[]=$officerId;
-        $stmt=$this->pdo->prepare($sql);$stmt->execute($params);return $stmt->fetchAll();
+        $stmt=$this->pdo->prepare($sql);$stmt->execute($params);$rows=$stmt->fetchAll();foreach($rows as &$row)$row=array_merge($row,ArpaAppointmentDisplayPresentation::decorate($row));unset($row);return $rows;
     }
 
     /** @return array<int,array<string,mixed>> */

@@ -62,16 +62,13 @@ $hasTimelineConflict=array_intersect((array)($diagnostic['timeline_statuses']??[
           <td><a class="btn btn-sm btn-outline-danger" href="<?= e(url($reconciliation?'hr/arpa-appointments/legacy-review/items/'.$entry['reconciliation_item_id']:'hr/arpa-appointments/issues/'.rawurlencode((string)$entry['row_key']))) ?>"><?= $correctable?'Review / Correct Data':'View Issue' ?></a></td>
         </tr>
       <?php else:
-        $isReservation=$entry['source_kind']==='RESERVATION';
-        $isFuture=$entry['effective_from']>date('Y-m-d');
-        $isEnded=$entry['effective_to']!==null&&$entry['effective_to']<date('Y-m-d');
-        $state=$isReservation?'Reserved / '.$typeLabel($entry['workflow_status']):($isEnded?'Historical / Ended':($isFuture?'Scheduled':'Current'));
+        $state=$entry['display_status'];
       ?>
         <tr class="<?= !empty($entry['overlap'])?'table-warning':'' ?>">
-          <td><strong><?= $date($entry['effective_from'],$dash) ?></strong> to <strong><?= $date($entry['effective_to'],'Open') ?></strong></td>
+          <td><strong><?= $date($entry['effective_from'],$dash) ?></strong> to <strong><?= $date($entry['effective_to'],$dash) ?></strong></td>
           <td><div class="fw-semibold"><?= e($entry['officer_number'].' - '.$entry['officer_name']) ?></div><div class="small text-muted"><?= e($entry['nic']?:$dash) ?></div><span class="badge text-bg-secondary mt-1"><?= e($typeLabel($entry['appointment_type'])) ?></span></td>
-          <td><?= DataTableFormat::badge($state) ?><?= !empty($entry['overlap'])?' '.DataTableFormat::badge('Overlap'):'' ?><?= !empty($entry['legacy_exception'])?' '.DataTableFormat::badge('Legacy Exception'):'' ?></td>
-          <td><div><?= e($entry['workflow_status']?$typeLabel($entry['workflow_status']):'Operational') ?></div><div class="small text-muted"><?= e($typeLabel($entry['record_origin']).' / '.$typeLabel($entry['source_kind'])) ?></div><?php if($entry['end_reason']): ?><div class="small">End reason: <?= e($entry['end_reason']) ?></div><?php endif; ?></td>
+          <td><?= DataTableFormat::badge($state) ?><?= !empty($entry['overlap'])?' '.DataTableFormat::badge('Overlap'):'' ?><?php foreach($entry['exception_labels'] as $exceptionLabel): ?><div class="small text-warning"><?= e($exceptionLabel) ?></div><?php endforeach; ?></td>
+          <td><div><?= e($entry['workflow_status']?$typeLabel($entry['workflow_status']):'Operational') ?></div><div class="small text-muted"><?= e($entry['display_origin'].' / '.$typeLabel($entry['source_kind'])) ?></div><?php if($entry['end_reason']): ?><div class="small">End reason: <?= e($entry['end_reason']) ?></div><?php endif; ?></td>
           <td><?php if($entry['appointment_id']): ?><a class="btn btn-sm btn-outline-primary" href="<?= e(url('hr/arpa-appointments/divisions/'.$entry['appointment_id'])) ?>">View Appointment</a><?php else: ?><a class="btn btn-sm btn-outline-primary" href="<?= e(url('hr/arpa-appointments/requests/division/'.$entry['request_id'])) ?>">View Request</a><?php endif; ?></td>
         </tr>
       <?php endif; ?>

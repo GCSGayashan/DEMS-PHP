@@ -130,8 +130,8 @@ final class ArpaDivisionTimelineService
             'can_add_historical'=>$canAddHistorical,'can_correct'=>$canCorrect,
             'summary'=>[
                 'total_appointments'=>count($actual),
-                'historical_appointments'=>count(array_filter($actual,static fn(array $row):bool=>$row['effective_to']!==null)),
-                'current_open_appointments'=>count(array_filter($actual,static fn(array $row):bool=>$row['effective_to']===null)),
+                'historical_appointments'=>count(array_filter($actual,static fn(array $row):bool=>in_array($row['display_status'],['Historical','Historical Exception','Historical Ended','Ended'],true))),
+                'current_open_appointments'=>count(array_filter($actual,static fn(array $row):bool=>$row['display_status']==='Current / Open')),
                 'missing_periods'=>count((array)$diagnostic['gaps']),
                 'data_issues'=>count($issues),
             ],
@@ -167,19 +167,19 @@ final class ArpaDivisionTimelineService
         $sql="SELECT a.id source_id,a.id appointment_id,a.request_id,a.officer_id,o.dad_number officer_number,
                      o.name_with_initials officer_name,o.nic,a.appointment_type,a.effective_from,c.effective_to,
                      r.workflow_status,a.record_origin,a.legacy_history_only,a.legacy_exception,
-                     er.name_en end_reason,'OPERATIONAL' source_kind
+                     a.legacy_exception_codes_json,c.id closure_id,er.name_en end_reason,'OPERATIONAL' source_kind
               FROM arpa_division_appointment a
               JOIN officer o ON o.id=a.officer_id
               LEFT JOIN arpa_division_appointment_request r ON r.id=a.request_id
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               LEFT JOIN arpa_appointment_end_reason er ON er.id=c.end_reason_id
               WHERE a.arpa_division_location_id=? AND a.effective_from IS NOT NULL
-                AND (a.legacy_history_only=0 OR c.id IS NOT NULL)
                 AND (c.effective_to IS NULL OR c.effective_to>=?)
               UNION ALL
               SELECT r.id,NULL,r.id,r.officer_id,o.dad_number,o.name_with_initials,o.nic,r.appointment_type,
                      r.requested_effective_from,CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,
-                     r.workflow_status,r.record_origin,r.legacy_history_only,r.legacy_exception,NULL,'RESERVATION'
+                     r.workflow_status,r.record_origin,r.legacy_history_only,r.legacy_exception,
+                     r.legacy_exception_codes_json,NULL,NULL,'RESERVATION'
               FROM arpa_division_appointment_request r
               JOIN officer o ON o.id=r.officer_id
               WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.record_origin='NATIVE' AND r.legacy_history_only=0
@@ -188,6 +188,6 @@ final class ArpaDivisionTimelineService
                 AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id)
               ORDER BY effective_from,effective_to,source_id";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute([$divisionId,ArpaDivisionContinuityService::BASELINE,$divisionId,ArpaDivisionContinuityService::BASELINE]);return $stmt->fetchAll();
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$divisionId,ArpaDivisionContinuityService::BASELINE,$divisionId,ArpaDivisionContinuityService::BASELINE]);$rows=$stmt->fetchAll();foreach($rows as &$row)$row=array_merge($row,ArpaAppointmentDisplayPresentation::decorate($row));unset($row);return $rows;
     }
 }
