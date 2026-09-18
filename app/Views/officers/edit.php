@@ -29,7 +29,7 @@ $v = static fn(string $key, mixed $default = '') =>
 <?php if(!empty($directAdminEdit)): ?>
 <div class="alert alert-warning">
 <strong>Direct administrative correction</strong><br>
-Changes are applied immediately to this approved Officer and recorded in the audit history. Officer workflow and assignments are not changed.
+Changes are applied immediately and recorded in the audit history. This Officer remains <?= e($officer['approval_status']) ?>; workflow status, submission details, and assignments are not changed.
 </div>
 <?php endif; ?>
 

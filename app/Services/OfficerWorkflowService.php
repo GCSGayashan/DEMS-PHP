@@ -49,7 +49,7 @@ final class OfficerWorkflowService
     public function assertEditable(string $officerId,string $actorId):void
     {
         $row=$this->requiredRow($officerId);
-        if($row['approval_status']==='APPROVED'){
+        if(OfficerAdminDirectEditPolicy::supportsStatus((string)$row['approval_status'])){
             OfficerAdminDirectEditPolicy::assert($actorId);
             return;
         }
@@ -185,8 +185,8 @@ final class OfficerWorkflowService
         $row=$this->requiredRow($officerId);$context=$this->context($actorId,false);
         $maker=$context!==null&&(string)$row['created_by']===$actorId&&$this->makerContextMatches($row,$context);
         $checker=$context!==null&&($this->checkerContextMatches($row,$context)||($row['workflow_origin_role_code']===null&&Auth::can('officer.approve')))&&(string)$row['created_by']!==$actorId&&(string)$row['submitted_by']!==$actorId;
-        $approvedEdit=$row['approval_status']==='APPROVED'&&OfficerAdminDirectEditPolicy::allowed();
-        return ['can_edit'=>Auth::can('officer.edit')&&(($row['approval_status']==='DRAFT'&&$maker)||$approvedEdit),'can_submit'=>$row['approval_status']==='DRAFT'&&$maker&&Auth::can('officer.submit'),'can_approve'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.approve'),'can_return'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.return')];
+        $adminDirectEdit=OfficerAdminDirectEditPolicy::supportsStatus((string)$row['approval_status'])&&OfficerAdminDirectEditPolicy::allowed();
+        return ['can_edit'=>Auth::can('officer.edit')&&(($row['approval_status']==='DRAFT'&&$maker)||$adminDirectEdit),'admin_direct_edit'=>$adminDirectEdit,'can_submit'=>$row['approval_status']==='DRAFT'&&$maker&&Auth::can('officer.submit'),'can_approve'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.approve'),'can_return'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.return')];
     }
 
     public function notifyExistingSubmission(string $officerId,string $actorId):void

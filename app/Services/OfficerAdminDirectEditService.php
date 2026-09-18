@@ -33,13 +33,14 @@ final class OfficerAdminDirectEditService
         try{
             $stmt=$this->pdo->prepare('SELECT * FROM officer WHERE id=? FOR UPDATE');$stmt->execute([$officerId]);$before=$stmt->fetch();
             if(!$before)throw new DomainException('Officer record was not found.');
-            if((string)$before['approval_status']!=='APPROVED')throw new DomainException('Direct administrative editing is limited to approved Officers.');
+            $preservedStatus=(string)$before['approval_status'];
+            if(!OfficerAdminDirectEditPolicy::supportsStatus($preservedStatus))throw new DomainException('Direct administrative editing is limited to approved or submitted Officers.');
             if((int)$before['version']!==$expectedVersion)throw new DomainException('The Officer changed after this edit form was opened. Reload the profile and try again.');
 
             $this->validate($officerId,$data);
             $set=[];foreach(array_keys($data) as $column)$set[]=$column.'=?';
-            $params=array_values($data);$params[]=$actorId;$params[]=$officerId;$params[]=$expectedVersion;
-            $update=$this->pdo->prepare('UPDATE officer SET '.implode(',',$set).',updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=? AND approval_status=\'APPROVED\'');
+            $params=array_values($data);$params[]=$actorId;$params[]=$officerId;$params[]=$expectedVersion;$params[]=$preservedStatus;
+            $update=$this->pdo->prepare('UPDATE officer SET '.implode(',',$set).',updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=? AND approval_status=?');
             $update->execute($params);
             if($update->rowCount()!==1)throw new DomainException('The Officer changed while it was being updated. Reload the profile and try again.');
 
@@ -54,6 +55,8 @@ final class OfficerAdminDirectEditService
                 'officer_id'=>$officerId,'actor_user_id'=>$actorId,'canonical_username'=>'dems.admin',
                 'active_context'=>OfficerAdminDirectEditPolicy::auditContext($context),
                 'changed_fields'=>$changes,'before'=>$old,'after'=>$new,
+                'previous_approval_status'=>$preservedStatus,
+                'workflow_status_preserved'=>$preservedStatus,
             ]);
             if($own)$this->pdo->commit();
             return $after;

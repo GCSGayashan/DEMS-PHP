@@ -100,13 +100,61 @@ final class OfficerAdminDirectEditTest
         $dadInjection=$this->data($this->row('SELECT * FROM officer WHERE id=?',[$id]));$dadInjection['dad_number']='FORGED-DAD';
         $this->throws(fn()=>$service->update($id,$dadInjection,(int)$this->value('SELECT version FROM officer WHERE id=?',[$id]),$admin),'DAD Number cannot be submitted as a directly editable field');
 
-        $pending=$this->uuid();$pendingDad='PENDING-'.substr(str_replace('-','',$pending),0,12);
-        $this->pdo->prepare("INSERT INTO officer(id,dad_number,name_with_initials,officer_status_id,effective_from,operational_status,approval_status) VALUES(?,?,?,?,CURRENT_DATE(),'INACTIVE','SUBMITTED')")->execute([$pending,$pendingDad,'Pending Direct Edit Fixture',$target['officer_status_id']]);
-        $this->throws(fn()=>$service->update($pending,$data,0,$admin),'pending Officer cannot be directly approved or edited through the administrative facility');
+        $office=(string)$this->value("SELECT id FROM office WHERE approval_status='APPROVED' AND operational_status='ACTIVE' ORDER BY id LIMIT 1");
+        if($office==='')throw new RuntimeException('An approved active Office fixture is required.');
+        [$submitted,$existingAssignment]=$this->submittedOfficer($target,$otherSystem,$office);
+        $submittedBefore=$this->row('SELECT * FROM officer WHERE id=?',[$submitted]);$assignmentBefore=$this->row('SELECT * FROM officer_office_assignment WHERE id=?',[$existingAssignment]);$assignmentCount=$this->count('SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=?',[$submitted]);
+        $candidateBefore=$workflow->initialOfficeReconciliationCandidate($submitted,$admin);$this->same($existingAssignment,$candidateBefore['id']??null,'submitted Officer begins with the existing approved Primary Office reconciliation candidate');
+
+        $this->useContext($otherSystem,'SYSTEM_ADMIN');
+        $this->same(false,$workflow->actions($submitted,$otherSystem)['can_edit'],'another SYSTEM_ADMIN does not see Edit Officer for a submitted Officer');
+        $this->throws(fn()=>$service->update($submitted,$this->data($submittedBefore),(int)$submittedBefore['version'],$otherSystem),'another SYSTEM_ADMIN cannot forge a submitted Officer direct edit');
+        $this->useContext($nationalAdmin,'NATIONAL_ADMIN');
+        $this->same(false,$workflow->actions($submitted,$nationalAdmin)['can_edit'],'National Admin does not see Edit Officer for a submitted Officer');
+        $this->throws(fn()=>$service->update($submitted,$this->data($submittedBefore),(int)$submittedBefore['version'],$nationalAdmin),'National Admin cannot forge a submitted Officer direct edit');
+
+        $this->useContext($admin,'SYSTEM_ADMIN');
+        $this->same(true,$workflow->actions($submitted,$admin)['can_edit'],'dems.admin sees Edit Officer for a submitted Officer');
+        $workflow->assertEditable($submitted,$admin);$this->assertions++;
+        $permanentWithoutDate=$this->data($submittedBefore);$permanentWithoutDate['arpa_service_permanency']='PERMANENT_IN_SERVICE';$permanentWithoutDate['service_permanented_date']=null;
+        $this->throws(fn()=>$service->update($submitted,$permanentWithoutDate,(int)$submittedBefore['version'],$admin),'Permanent In Service still requires Permanented Date during submitted direct edit');
+
+        $notificationsBefore=$this->count('SELECT COUNT(*) FROM system_notification');
+        $nonPermanent=$this->data($submittedBefore);$nonPermanent['arpa_service_permanency']='NOT_PERMANENT_IN_SERVICE';$nonPermanent['service_permanented_date']=null;
+        $nonPermanentResult=$service->update($submitted,$nonPermanent,(int)$submittedBefore['version'],$admin);
+        $this->same('NOT_PERMANENT_IN_SERVICE',$nonPermanentResult['arpa_service_permanency'],'submitted direct edit accepts Not Permanent In Service without a date');
+        $this->same(null,$nonPermanentResult['service_permanented_date'],'non-permanent submitted correction keeps Permanented Date null');
+
+        $permanent=$this->data($nonPermanentResult);$permanent['arpa_service_permanency']='PERMANENT_IN_SERVICE';$permanent['service_permanented_date']='2020-05-06';
+        $submittedAfter=$service->update($submitted,$permanent,(int)$nonPermanentResult['version'],$admin);
+        $this->same('SUBMITTED',$submittedAfter['approval_status'],'submitted direct edit preserves workflow status');
+        $this->same($submittedBefore['submitted_by'],$submittedAfter['submitted_by'],'submitted_by is unchanged');
+        $this->same($submittedBefore['submitted_at'],$submittedAfter['submitted_at'],'submitted_at is unchanged');
+        $this->same($submittedBefore['workflow_origin_role_code'],$submittedAfter['workflow_origin_role_code'],'workflow origin role is unchanged');
+        $this->same($submittedBefore['workflow_scope_location_id'],$submittedAfter['workflow_scope_location_id'],'workflow scope is unchanged');
+        $this->same(null,$submittedAfter['approved_by'],'submitted direct edit does not set approved_by');
+        $this->same(null,$submittedAfter['approved_at'],'submitted direct edit does not set approved_at');
+        $this->same($notificationsBefore,$this->count('SELECT COUNT(*) FROM system_notification'),'submitted direct edit creates no approval notification');
+        $submittedProfile=(new OfficerProfileService($this->pdo))->profile($submitted);
+        $this->same('PERMANENT_IN_SERVICE',$submittedProfile['officer']['arpa_service_permanency'],'corrected Service Permanency appears immediately on the submitted Officer profile');
+        $this->same('2020-05-06',$submittedProfile['officer']['service_permanented_date'],'corrected Permanented Date appears immediately on profile');
+        $candidateAfter=$workflow->initialOfficeReconciliationCandidate($submitted,$admin);$this->same($existingAssignment,$candidateAfter['id']??null,'reconciliation candidate remains available after direct edit');
+        $submittedAudit=$this->row("SELECT details_json FROM audit_event WHERE target_id=? AND action_key='officer.admin-direct-edit' ORDER BY id DESC LIMIT 1",[$submitted]);$submittedDetails=json_decode((string)$submittedAudit['details_json'],true);
+        $this->same('SUBMITTED',$submittedDetails['previous_approval_status']??null,'direct-edit audit records the previous submitted status');
+        $this->same('SUBMITTED',$submittedDetails['workflow_status_preserved']??null,'direct-edit audit records the preserved submitted status');
+
+        $workflow->reconcileInitialOfficeAndApprove($submitted,$admin);
+        $this->same('APPROVED',$this->value('SELECT approval_status FROM officer WHERE id=?',[$submitted]),'reconciliation approval succeeds after invalid master data is corrected');
+        $this->same($assignmentBefore,$this->row('SELECT * FROM officer_office_assignment WHERE id=?',[$existingAssignment]),'existing approved Primary Office assignment remains unchanged through edit and reconciliation');
+        $this->same($assignmentCount,$this->count('SELECT COUNT(*) FROM officer_office_assignment WHERE officer_id=?',[$submitted]),'submitted edit and reconciliation create no duplicate Office assignment');
+
+        $draft=$this->uuid();$draftDad='DRAFT-'.substr(str_replace('-','',$draft),0,12);
+        $this->pdo->prepare("INSERT INTO officer(id,dad_number,name_with_initials,officer_status_id,effective_from,operational_status,approval_status) VALUES(?,?,?,?,CURRENT_DATE(),'INACTIVE','DRAFT')")->execute([$draft,$draftDad,'Draft Direct Edit Fixture',$target['officer_status_id']]);
+        $this->throws(fn()=>$service->update($draft,$data,0,$admin),'direct administrative editing remains unavailable for Draft Officers');
 
         $view=(string)file_get_contents(BASE_PATH.'/app/Views/officers/show.php');$form=(string)file_get_contents(BASE_PATH.'/app/Views/officers/edit.php');
-        $this->same(true,str_contains($view,"?'Edit Officer':'Edit'"),'approved canonical profile action is labelled Edit Officer');
-        $this->same(true,str_contains($form,'name="version"')&&str_contains($form,'Direct administrative correction'),'edit form carries optimistic version and explains immediate correction');
+        $this->same(true,str_contains($view,"['admin_direct_edit'])?'Edit Officer':'Edit'"),'canonical approved and submitted profile actions are labelled Edit Officer');
+        $this->same(true,str_contains($form,'name="version"')&&str_contains($form,'Direct administrative correction')&&str_contains($form,'workflow status, submission details, and assignments are not changed'),'edit form carries optimistic version and explains workflow preservation');
     }
 
     /** @return array<string,mixed> */
@@ -114,6 +162,17 @@ final class OfficerAdminDirectEditTest
     {
         $sql="SELECT * FROM officer WHERE approval_status='APPROVED' AND nic IS NOT NULL AND title_id IS NOT NULL AND full_name_en IS NOT NULL AND date_of_birth IS NOT NULL AND permanent_address IS NOT NULL AND initial_appointment_date IS NOT NULL AND appointment_nature_id IS NOT NULL AND primary_designation_id IS NOT NULL AND class_id IS NOT NULL AND officer_status_id IS NOT NULL AND effective_from IS NOT NULL AND arpa_service_permanency='PERMANENT_IN_SERVICE' AND service_permanented_date IS NOT NULL AND (primary_mobile IS NOT NULL OR alternative_mobile IS NOT NULL) ORDER BY id LIMIT 1";
         $row=$this->pdo->query($sql)->fetch();if(!$row)throw new RuntimeException('Complete approved Officer fixture is required.');return $row;
+    }
+
+    /** @param array<string,mixed> $source @return array{0:string,1:string} */
+    private function submittedOfficer(array $source,string $creator,string $office):array
+    {
+        $id=$this->uuid();$nic='8'.str_pad((string)random_int(0,99999999),8,'0',STR_PAD_LEFT).'V';$data=$this->data($source);
+        $data['nic']=$nic;$data['nic_normalized']=$nic;$data['nic_match_key']=NicNormalizer::matchKey($nic);$data['employee_number']='SUB-'.substr(str_replace('-','',$id),0,12);$data['personal_email']=null;$data['official_email']=null;$data['arpa_service_permanency']=null;$data['service_permanented_date']=null;
+        $row=array_merge($data,['id'=>$id,'dad_number'=>'SUB-'.substr(str_replace('-','',$id),0,16),'primary_office_id'=>$office,'operational_status'=>'INACTIVE','approval_status'=>'SUBMITTED','created_by'=>$creator,'submitted_by'=>$creator,'submitted_at'=>'2026-09-11 14:40:42','workflow_origin_role_code'=>'DISTRICT_SUBJECT_OFFICER','workflow_scope_location_id'=>(string)$this->value("SELECT l.id FROM location l JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='DISTRICT' ORDER BY l.id LIMIT 1")]);
+        $columns=array_keys($row);$this->pdo->prepare('INSERT INTO officer('.implode(',',$columns).') VALUES('.implode(',',array_fill(0,count($columns),'?')).')')->execute(array_values($row));
+        $assignment=$this->uuid();$this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,is_primary,active,approval_status,reason,created_by,submitted_by,submitted_at,approved_by,approved_at) VALUES(?,?,?,'2025-01-01',1,1,'APPROVED','Re Assignment',?,?,NOW(),?,NOW())")->execute([$assignment,$id,$office,$creator,$creator,$creator]);
+        return [$id,$assignment];
     }
 
     /** @param array<string,mixed> $row @return array<string,mixed> */

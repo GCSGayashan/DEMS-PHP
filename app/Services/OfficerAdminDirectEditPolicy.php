@@ -8,6 +8,8 @@ use DomainException;
 
 final class OfficerAdminDirectEditPolicy
 {
+    private const EDITABLE_STATUSES=['APPROVED','SUBMITTED'];
+
     public static function allowed():bool
     {
         if(!ArpaAdministrativePolicy::isCanonicalDemsAdmin())return false;
@@ -21,9 +23,14 @@ final class OfficerAdminDirectEditPolicy
     public static function assert(string $actorId):array
     {
         if(!Auth::isCurrentUser($actorId)||!self::allowed()){
-            throw new DomainException('Only the canonical dems.admin account in its System Administrator context may directly edit an approved Officer.');
+            throw new DomainException('Only the canonical dems.admin account in its System Administrator context may directly edit an approved or submitted Officer.');
         }
         return Auth::activeContext(false)??throw new DomainException('Select an Active Working Context.');
+    }
+
+    public static function supportsStatus(?string $status):bool
+    {
+        return in_array((string)$status,self::EDITABLE_STATUSES,true);
     }
 
     /** @return array<string,mixed> */

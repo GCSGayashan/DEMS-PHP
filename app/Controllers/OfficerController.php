@@ -142,7 +142,7 @@ final class OfficerController extends Controller
         $availableOffices=ScopeService::scopedOffices($userId);
         $initialOfficeAssignment=(new OfficerOfficeAssignmentService($pdo))
             ->initialForOfficer($id);
-        $directAdminEdit=(string)$officer['approval_status']==='APPROVED'&&OfficerAdminDirectEditPolicy::allowed();
+        $directAdminEdit=OfficerAdminDirectEditPolicy::supportsStatus((string)$officer['approval_status'])&&OfficerAdminDirectEditPolicy::allowed();
 
         $this->render(
             'officers/edit',
@@ -524,7 +524,7 @@ final class OfficerController extends Controller
         $ownTransaction=!$pdo->inTransaction();
         if($ownTransaction)$pdo->beginTransaction();
         try{
-            if((string)$current['approval_status']==='APPROVED'){
+            if(OfficerAdminDirectEditPolicy::supportsStatus((string)$current['approval_status'])&&OfficerAdminDirectEditPolicy::allowed()){
                 (new OfficerAdminDirectEditService($pdo))->update($id,$data,$expectedVersion,$userId);
             }else{
                 $params[]=$userId;
@@ -583,7 +583,7 @@ final class OfficerController extends Controller
             }
         }
 
-        $this->flash('success',(string)$current['approval_status']==='APPROVED'?'Officer updated successfully.':'Officer details updated successfully.');
+        $this->flash('success',OfficerAdminDirectEditPolicy::supportsStatus((string)$current['approval_status'])&&OfficerAdminDirectEditPolicy::allowed()?'Officer updated successfully.':'Officer details updated successfully.');
 
         redirect('/hr/officers/'.$id);
     }
