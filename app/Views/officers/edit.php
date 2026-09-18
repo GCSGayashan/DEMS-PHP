@@ -24,6 +24,14 @@ $v = static fn(string $key, mixed $default = '') =>
     action="<?= e(url('hr/officers/'.$officer['id'].'/edit')) ?>"
 >
 <?= Csrf::field() ?>
+<input type="hidden" name="version" value="<?= e($v('version')) ?>">
+
+<?php if(!empty($directAdminEdit)): ?>
+<div class="alert alert-warning">
+<strong>Direct administrative correction</strong><br>
+Changes are applied immediately to this approved Officer and recorded in the audit history. Officer workflow and assignments are not changed.
+</div>
+<?php endif; ?>
 
 <div class="form-section">
 <h5>Identity</h5>

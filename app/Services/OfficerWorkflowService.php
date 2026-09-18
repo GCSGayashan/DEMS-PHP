@@ -50,9 +50,7 @@ final class OfficerWorkflowService
     {
         $row=$this->requiredRow($officerId);
         if($row['approval_status']==='APPROVED'){
-            $context=$this->context($actorId);
-            if($context['role_code']==='NATIONAL_SUBJECT_OFFICER')throw new DomainException('National Subject Officers may edit only their returned Officer submissions.');
-            if(!ScopeService::canAccessOfficer($actorId,$officerId))throw new DomainException('The Officer is outside your current scope.');
+            OfficerAdminDirectEditPolicy::assert($actorId);
             return;
         }
         $context=$this->context($actorId);
@@ -134,7 +132,7 @@ final class OfficerWorkflowService
         $row=$this->requiredRow($officerId);$context=$this->context($actorId,false);
         $maker=$context!==null&&(string)$row['created_by']===$actorId&&$this->makerContextMatches($row,$context);
         $checker=$context!==null&&($this->checkerContextMatches($row,$context)||($row['workflow_origin_role_code']===null&&Auth::can('officer.approve')))&&(string)$row['created_by']!==$actorId&&(string)$row['submitted_by']!==$actorId;
-        $approvedEdit=$row['approval_status']==='APPROVED'&&$context!==null&&$context['role_code']!=='NATIONAL_SUBJECT_OFFICER'&&ScopeService::canAccessOfficer($actorId,$officerId);
+        $approvedEdit=$row['approval_status']==='APPROVED'&&OfficerAdminDirectEditPolicy::allowed();
         return ['can_edit'=>Auth::can('officer.edit')&&(($row['approval_status']==='DRAFT'&&$maker)||$approvedEdit),'can_submit'=>$row['approval_status']==='DRAFT'&&$maker&&Auth::can('officer.submit'),'can_approve'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.approve'),'can_return'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.return')];
     }
 

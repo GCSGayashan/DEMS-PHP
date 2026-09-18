@@ -3,7 +3,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,DataTableRegistry,NicNormalizer,ScopeService};
-use App\Services\{ArpaAdministrativePolicy,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
+use App\Services\{ArpaAdministrativePolicy,OfficerAdminDirectEditPolicy,OfficerAdminDirectEditService,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
 
 final class OfficerController extends Controller
 {
@@ -142,6 +142,7 @@ final class OfficerController extends Controller
         $availableOffices=ScopeService::scopedOffices($userId);
         $initialOfficeAssignment=(new OfficerOfficeAssignmentService($pdo))
             ->initialForOfficer($id);
+        $directAdminEdit=(string)$officer['approval_status']==='APPROVED'&&OfficerAdminDirectEditPolicy::allowed();
 
         $this->render(
             'officers/edit',
@@ -154,7 +155,8 @@ final class OfficerController extends Controller
                 'statuses',
                 'civilStatuses',
                 'availableOffices',
-                'initialOfficeAssignment'
+                'initialOfficeAssignment',
+                'directAdminEdit'
             )
         );
     }
@@ -175,9 +177,7 @@ final class OfficerController extends Controller
 
         $pdo=Database::pdo();
 
-        $stmt=$pdo->prepare(
-            'SELECT id,photograph_path,approval_status FROM officer WHERE id=?'
-        );
+        $stmt=$pdo->prepare('SELECT * FROM officer WHERE id=?');
         $stmt->execute([$id]);
         $current=$stmt->fetch();
 
@@ -193,6 +193,10 @@ final class OfficerController extends Controller
             $this->flash('danger',$message);
             redirect('/hr/officers/'.$id.'/edit');
         };
+
+        $version=trim((string)($_POST['version']??''));
+        if($version===''||!ctype_digit($version))$fail('The Officer edit form is stale or invalid. Reload it and try again.');
+        $expectedVersion=(int)$version;
 
         $nic=NicNormalizer::normalize(
             (string)($_POST['nic']??'')
@@ -516,35 +520,35 @@ final class OfficerController extends Controller
         }
 
         $params=array_values($data);
-        $params[]=$id;
 
         $ownTransaction=!$pdo->inTransaction();
         if($ownTransaction)$pdo->beginTransaction();
         try{
-            $update=$pdo->prepare(
-                'UPDATE officer SET '.
-                implode(',',$set).
-                ' WHERE id=?'
-            );
-
-            $update->execute($params);
-            if((string)$current['approval_status']==='DRAFT'){
+            if((string)$current['approval_status']==='APPROVED'){
+                (new OfficerAdminDirectEditService($pdo))->update($id,$data,$expectedVersion,$userId);
+            }else{
+                $params[]=$userId;
+                $params[]=$id;
+                $params[]=$expectedVersion;
+                $update=$pdo->prepare('UPDATE officer SET '.implode(',',$set).',updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?');
+                $update->execute($params);
+                if($update->rowCount()!==1)throw new \DomainException('The Officer changed after this edit form was opened. Reload the profile and try again.');
                 (new OfficerOfficeAssignmentService($pdo))->saveInitialForOfficer(
                     $id,
                     ($_POST['initial_office_id']??'') ?: null,
                     ($_POST['office_effective_from']??'') ?: (string)$_POST['effective_from'],
                     $userId
                 );
+                Audit::record(
+                    'officer.edit',
+                    'OFFICER',
+                    $id,
+                    [
+                        'scope_checked'=>true,
+                        'edited_fields'=>array_keys($data)
+                    ]
+                );
             }
-            Audit::record(
-                'officer.edit',
-                'OFFICER',
-                $id,
-                [
-                    'scope_checked'=>true,
-                    'edited_fields'=>array_keys($data)
-                ]
-            );
             if($ownTransaction)$pdo->commit();
         }catch(\Throwable $e){
             if($ownTransaction&&$pdo->inTransaction())$pdo->rollBack();
@@ -579,10 +583,7 @@ final class OfficerController extends Controller
             }
         }
 
-        $this->flash(
-            'success',
-            'Officer details updated successfully.'
-        );
+        $this->flash('success',(string)$current['approval_status']==='APPROVED'?'Officer updated successfully.':'Officer details updated successfully.');
 
         redirect('/hr/officers/'.$id);
     }
