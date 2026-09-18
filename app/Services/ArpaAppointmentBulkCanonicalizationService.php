@@ -48,7 +48,7 @@ final class ArpaAppointmentBulkCanonicalizationService
         foreach($selected as $row){
             $appointmentId=(string)$row['id'];
             try{
-                $fresh=$correction->canonicalPromotionAssessment($appointmentId);
+                $fresh=$correction->validateCanonicalPromotion($appointmentId);
                 if(empty($fresh['eligible'])){
                     $skipped++;$results[]=['appointment_id'=>$appointmentId,'result'=>'SKIPPED','reason'=>$fresh['blocker_reason']??'Eligibility changed before execution.'];continue;
                 }

@@ -34,7 +34,7 @@ final class ArpaAppointmentBulkCanonicalizationTest
         $this->same('FUTURE_APPOINTMENT',$correction->canonicalPromotionAssessment($future)['blocker_code'],'future legacy record is not promoted');
 
         $conflict=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),7,'PERMANENT','2025-01-01');$this->canonical($this->officer('PERMANENT_IN_SERVICE'),7,'PERMANENT','2025-01-01');
-        $this->same('DIVISION_CURRENT_CONFLICT',$correction->canonicalPromotionAssessment($conflict)['blocker_code'],'conflicting authoritative Division appointment is skipped');
+        $this->same('CANONICAL_TIMELINE_CONFLICT',$correction->canonicalPromotionAssessment($conflict)['blocker_code'],'conflicting authoritative Division appointment is skipped by the canonical timeline validator');
         [$invalid]=$this->dependentCandidate('ACTING',8,9,'NOT_PERMANENT_IN_SERVICE');
         $this->same('INVALID_APPOINTMENT_COMBINATION',$correction->canonicalPromotionAssessment($invalid)['blocker_code'],'incompatible Officer appointment combination is skipped');
 
@@ -49,9 +49,27 @@ final class ArpaAppointmentBulkCanonicalizationTest
         $genuine=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),11,'PERMANENT','2025-01-01');$this->keptCorrection($genuine);
         $this->same('CONFIRMED_HISTORICAL',$correction->canonicalPromotionAssessment($genuine)['blocker_code'],'confirmed genuine historical exception remains historical');
 
+        $timelineOfficer=$this->officer('PERMANENT_IN_SERVICE');$timelineCandidate=$this->legacyCandidate($timelineOfficer,12,'PERMANENT','2025-01-01');
+        $laterHistory=$this->legacyCandidate($this->officer('PERMANENT_IN_SERVICE'),12,'ACTING','2025-06-01');$this->close($laterHistory,'2025-12-31');
+        $timelineAssessment=$correction->validateCanonicalPromotion($timelineCandidate);
+        $this->same(false,$timelineAssessment['eligible'],'legacy open appointment with a later authoritative historical period is not Preview eligible');
+        $this->same('SKIPPED_CONFLICTING_CURRENT_APPOINTMENT',$timelineAssessment['classification'],'canonical timeline conflict uses the conflicting-current Preview category');
+        $this->same('CANONICAL_TIMELINE_CONFLICT',$timelineAssessment['blocker_code'],'canonical timeline conflict has a stable structured blocker code');
+        $expectedReason='This assignment cannot be reopened because another assignment already starts on 01 Jun 2025.';
+        $this->same($expectedReason,$timelineAssessment['blocker_reason'],'Preview uses the canonical reopen-conflict reason');
+        $this->throwsMessage(fn()=>$correction->promoteCanonicalAppointmentFromBulk($timelineCandidate,$this->admin,'timeline-conflict-test'),$expectedReason,'direct execution rejects the same timeline conflict with the same reason');
+        $this->same(false,$correction->validateCanonicalPromotion($timelineCandidate)['eligible'],'execution-rejected deterministic conflict does not return to Eligible after recalculation');
+
+        $dependentOfficer=$this->officer('PERMANENT_IN_SERVICE');$supportingPermanent=$this->legacyCandidate($dependentOfficer,13,'PERMANENT','2025-01-01');$dependentActing=$this->legacyCandidate($dependentOfficer,14,'ACTING','2025-02-01');
+        $this->same(false,$correction->validateCanonicalPromotion($dependentActing)['eligible'],'dependent appointment is initially blocked without canonical Permanent support');
+        $correction->promoteCanonicalAppointmentFromBulk($supportingPermanent,$this->admin,'dependency-test');
+        $this->same(true,$correction->validateCanonicalPromotion($dependentActing)['eligible'],'previously blocked dependent appointment becomes eligible after supporting Permanent is promoted');
+
         $counts=$this->counts();$preview=(new ArpaAppointmentBulkCanonicalizationService($this->pdo))->preview(1,25);
         $this->same($counts,$this->counts(),'preview makes no database changes');
         $this->same(true,isset($preview['summary']['ELIGIBLE']),'preview reports grouped eligibility counts');
+        $allCandidates=$correction->canonicalPromotionCandidates();$eligibleRows=array_values(array_filter($allCandidates,static fn(array $row):bool=>!empty($row['eligible'])));
+        foreach($this->stratifiedSample($eligibleRows,40) as $row)$this->same(true,$correction->validateCanonicalPromotion((string)$row['id'])['eligible'],'sampled Preview Eligible candidate agrees with the shared execution validator');
 
         $batch='test-batch-'.$this->uuid();
         foreach([$permanent,$acting,$duty] as $id)$correction->promoteCanonicalAppointmentFromBulk($id,$this->admin,$batch);
@@ -83,8 +101,8 @@ final class ArpaAppointmentBulkCanonicalizationTest
               WHERE rel.relationship_type='ASC_ARPA_DIVISION' AND rel.active=1 AND rel.approval_status='APPROVED'
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.arpa_division_location_id=rel.child_location_id)
                 AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request r WHERE r.arpa_division_location_id=rel.child_location_id AND r.deleted_at IS NULL)
-              LIMIT 12";
-        $this->places=$this->pdo->query($sql)->fetchAll();if(count($this->places)<12)throw new RuntimeException('Twelve unused ARPA Divisions are required.');
+              LIMIT 15";
+        $this->places=$this->pdo->query($sql)->fetchAll();if(count($this->places)<15)throw new RuntimeException('Fifteen unused ARPA Divisions are required.');
     }
 
     private function authenticateAdmin():void
@@ -128,11 +146,19 @@ final class ArpaAppointmentBulkCanonicalizationTest
         $row=$this->row('SELECT * FROM arpa_division_appointment WHERE id=?',[$appointment]);$this->pdo->prepare("INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,before_json,after_json,record_origin) VALUES(UUID(),?,'LEGACY_HISTORICAL_EXCEPTION',?,?,?,JSON_ARRAY(?),?,?,'KEEP_AS_HISTORICAL_EXCEPTION','KEPT_HISTORICAL_EXCEPTION','Test confirmed historical','{}','{}','LEGACY_IMPORT')")->execute(['LEGACY_HISTORICAL_EXCEPTION:'.$appointment,$row['officer_id'],$appointment,$row['request_id'],$appointment,$row['asc_location_id'],$this->admin]);
     }
     private function counts():array{return ['appointment'=>(int)$this->value('SELECT COUNT(*) FROM arpa_division_appointment'),'request'=>(int)$this->value('SELECT COUNT(*) FROM arpa_division_appointment_request'),'correction'=>(int)$this->value('SELECT COUNT(*) FROM arpa_appointment_data_correction'),'audit'=>(int)$this->value('SELECT COUNT(*) FROM audit_event')];}
+    /** @param array<int,array<string,mixed>> $rows @return array<int,array<string,mixed>> */
+    private function stratifiedSample(array $rows,int $maximum):array
+    {
+        $count=count($rows);if($count<=$maximum)return $rows;$sample=[];
+        for($i=0;$i<$maximum;$i++)$sample[]=$rows[(int)floor($i*($count-1)/max(1,$maximum-1))];
+        return $sample;
+    }
     private function value(string $sql,array $params=[]):mixed{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchColumn();}
     private function row(string $sql,array $params=[]):array{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetch()?:[];}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
     private function same(mixed $expected,mixed $actual,string $message):void{$this->assertions++;if($expected!==$actual)throw new RuntimeException($message.': expected '.var_export($expected,true).', got '.var_export($actual,true));}
     private function throws(callable $fn,string $message):void{$this->assertions++;try{$fn();}catch(DomainException){return;}throw new RuntimeException($message.': expected DomainException');}
+    private function throwsMessage(callable $fn,string $expected,string $message):void{$this->assertions++;try{$fn();}catch(DomainException $e){if($e->getMessage()===$expected)return;throw new RuntimeException($message.': expected '.var_export($expected,true).', got '.var_export($e->getMessage(),true));}throw new RuntimeException($message.': expected DomainException');}
 }
 
 exit((new ArpaAppointmentBulkCanonicalizationTest())->run());

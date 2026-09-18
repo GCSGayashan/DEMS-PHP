@@ -37,11 +37,17 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
 
     /** @return array<string,mixed> */
-    public function canonicalPromotionAssessment(string $appointmentId,?string $businessDate=null,bool $includeLegacyPeerConflicts=true):array
+    public function validateCanonicalPromotion(string $appointmentId,?string $businessDate=null,bool $includeLegacyPeerConflicts=true):array
     {
         $rows=$this->canonicalPromotionRows($appointmentId,$businessDate,false);
         if($rows===[])return ['eligible'=>false,'classification'=>'SKIPPED_OTHER_DATA_ISSUE','blocker_code'=>'APPOINTMENT_NOT_FOUND','blocker_reason'=>'The imported appointment was not found.'];
         return array_merge($rows[0],$this->canonicalPromotionAssessmentFromRow($rows[0],$includeLegacyPeerConflicts));
+    }
+
+    /** @return array<string,mixed> Backwards-compatible name for existing callers/tests. */
+    public function canonicalPromotionAssessment(string $appointmentId,?string $businessDate=null,bool $includeLegacyPeerConflicts=true):array
+    {
+        return $this->validateCanonicalPromotion($appointmentId,$businessDate,$includeLegacyPeerConflicts);
     }
 
     /**
@@ -61,7 +67,7 @@ final class ArpaAppointmentDataIssueCorrectionService
             $this->lockAppointments([$appointmentId]);
             $target=$this->appointment($appointmentId);
             $this->lockDivision((string)$target['arpa_division_location_id']);
-            $assessment=$this->canonicalPromotionAssessment($appointmentId);
+            $assessment=$this->validateCanonicalPromotion($appointmentId);
             if(!$assessment['eligible'])throw new DomainException((string)$assessment['blocker_reason']);
             $rowKey='LEGACY_HISTORICAL_EXCEPTION:'.$appointmentId;
             $issue=['issue_type'=>'LEGACY_HISTORICAL_EXCEPTION','related_ids'=>$appointmentId,'asc_location_id'=>$target['asc_location_id']];
@@ -327,7 +333,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         $this->lockDivision((string)$target['arpa_division_location_id']);
         // A human single-record correction may explicitly choose between legacy
         // peers. Bulk preview/execution is stricter and skips every ambiguous peer.
-        $assessment=$this->canonicalPromotionAssessment($appointmentId,null,false);
+        $assessment=$this->validateCanonicalPromotion($appointmentId,null,false);
         if(!$assessment['eligible'])throw new DomainException((string)$assessment['blocker_reason']);
 
         $request=$this->requestRecord((string)$target['request_id'],true);
@@ -452,6 +458,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         $reserving="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
         $availabilityStatuses="'".implode("','",array_values(array_unique(array_merge(ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES,ArpaAppointmentReadService::QUALIFYING_PERMANENT_REQUEST_STATUSES))))."'";
         $qualifying="'".implode("','",ArpaAppointmentReadService::QUALIFYING_PERMANENT_REQUEST_STATUSES)."'";
+        $authoritativePeriod=$this->canonicalAuthoritativePeriodPredicate('a2','c2');
         $exact="r2.officer_id=a.officer_id AND r2.appointment_type=a.appointment_type
                 AND r2.asc_location_id=a.asc_location_id AND r2.arpa_division_location_id=a.arpa_division_location_id
                 AND r2.requested_effective_from=a.effective_from AND r2.requested_effective_to IS NULL
@@ -469,10 +476,10 @@ final class ArpaAppointmentDataIssueCorrectionService
                        AND kept.correction_action='KEEP_AS_HISTORICAL_EXCEPTION' AND kept.resolution_status='KEPT_HISTORICAL_EXCEPTION') kept_historical,
                      EXISTS(SELECT 1 FROM arpa_appointment_data_correction resolved WHERE resolved.appointment_id=a.id
                        AND resolved.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND resolved.resolution_status='RESOLVED_BY_CORRECTION') already_resolved,
-                     EXISTS(SELECT 1 FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
+                     (SELECT MIN(a2.effective_from) FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
                        WHERE a2.id<>a.id AND a2.arpa_division_location_id=a.arpa_division_location_id
-                         AND a2.legacy_history_only=0 AND a2.effective_from<='9999-12-31'
-                         AND COALESCE(c2.effective_to,'9999-12-31')>=a.effective_from) authoritative_division_conflict,
+                         AND {$authoritativePeriod} AND a2.effective_from<='9999-12-31'
+                         AND COALESCE(c2.effective_to,'9999-12-31')>=a.effective_from) authoritative_conflict_start,
                      EXISTS(SELECT 1 FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
                        WHERE a2.id<>a.id AND a2.arpa_division_location_id=a.arpa_division_location_id AND {$activeLegacyCandidate}) peer_legacy_division_conflict,
                      EXISTS(SELECT 1 FROM arpa_division_appointment_request r2
@@ -550,7 +557,11 @@ final class ArpaAppointmentDataIssueCorrectionService
         if((string)$row['effective_from']>(string)($row['business_date']??date('Y-m-d')))return $blocked('SKIPPED_GENUINE_HISTORICAL_EXCEPTION','FUTURE_APPOINTMENT','The imported appointment has not reached its effective date.');
         if(!empty($row['kept_historical']))return $blocked('SKIPPED_GENUINE_HISTORICAL_EXCEPTION','CONFIRMED_HISTORICAL','This appointment was explicitly confirmed as a genuine historical exception.');
         if(!empty($row['already_resolved']))return $blocked('SKIPPED_OTHER_DATA_ISSUE','ALREADY_RESOLVED','This appointment has already been made authoritative.');
-        if(!empty($row['authoritative_division_conflict'])||($includeLegacyPeerConflicts&&!empty($row['peer_legacy_division_conflict'])))return $blocked('SKIPPED_CONFLICTING_CURRENT_APPOINTMENT','DIVISION_CURRENT_CONFLICT','Another open assignment can occupy this ARPA Division. Manual reconciliation is required.');
+        if(!empty($row['authoritative_conflict_start'])){
+            $timeline=$this->canonicalTimelineConflict((string)$row['authoritative_conflict_start'],true);
+            return $blocked($timeline['classification'],$timeline['code'],$timeline['message']);
+        }
+        if($includeLegacyPeerConflicts&&!empty($row['peer_legacy_division_conflict']))return $blocked('SKIPPED_CONFLICTING_CURRENT_APPOINTMENT','DIVISION_CURRENT_CONFLICT','Another open imported assignment can occupy this ARPA Division. Manual reconciliation is required.');
         if(!empty($row['active_workflow_reservation']))return $blocked('SKIPPED_ACTIVE_WORKFLOW_RESERVATION','ACTIVE_WORKFLOW_RESERVATION','A non-deleted workflow request reserves the same ARPA Division or period.');
         if(!empty($row['unresolved_legacy_record']))return $blocked('SKIPPED_OTHER_DATA_ISSUE','UNRESOLVED_LEGACY_RECORD','Another unresolved imported record overlaps this ARPA Division period.');
         $availability=[
@@ -569,6 +580,23 @@ final class ArpaAppointmentDataIssueCorrectionService
     {
         $s=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$s->execute([$divisionId]);
         if(!$s->fetchColumn())throw new DomainException('The ARPA Division was not found.');
+    }
+
+    private function canonicalAuthoritativePeriodPredicate(string $appointmentAlias,string $closureAlias):string
+    {
+        return "({$appointmentAlias}.legacy_history_only=0 OR {$closureAlias}.id IS NOT NULL)";
+    }
+
+    /** @return array{classification:string,code:string,message:string} */
+    private function canonicalTimelineConflict(string $conflictingStart,bool $reopening):array
+    {
+        return [
+            'classification'=>'SKIPPED_CONFLICTING_CURRENT_APPOINTMENT',
+            'code'=>'CANONICAL_TIMELINE_CONFLICT',
+            'message'=>$reopening
+                ?'This assignment cannot be reopened because another assignment already starts on '.$this->displayDate($conflictingStart).'.'
+                :'The corrected appointment period overlaps another canonical assignment for this ARPA Division.',
+        ];
     }
     /** @return array<int,array<string,mixed>> */
     private function exactDuplicateNativeReservations(array $target,bool $lock=false):array
@@ -610,15 +638,24 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
     private function assertHistoricalPeriodAvailable(string $divisionId,string $from,?string $to,?string $excludeAppointmentId,?string $excludeRequestId):void
     {
+        $blocker=$this->canonicalHistoricalPeriodBlocker($divisionId,$from,$to,$excludeAppointmentId,$excludeRequestId);
+        if($blocker!==null)throw new DomainException($blocker['message']);
+    }
+
+    /** @return array{classification:string,code:string,message:string}|null */
+    private function canonicalHistoricalPeriodBlocker(string $divisionId,string $from,?string $to,?string $excludeAppointmentId,?string $excludeRequestId):?array
+    {
         $end=$to??'9999-12-31';
-        $s=$this->pdo->prepare("SELECT MIN(a.effective_from) FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id WHERE a.arpa_division_location_id=? AND a.id<>COALESCE(?,'') AND (a.legacy_history_only=0 OR c.id IS NOT NULL) AND a.effective_from<=? AND COALESCE(c.effective_to,'9999-12-31')>=?");
+        $authoritative=$this->canonicalAuthoritativePeriodPredicate('a','c');
+        $s=$this->pdo->prepare("SELECT MIN(a.effective_from) FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id WHERE a.arpa_division_location_id=? AND a.id<>COALESCE(?,'') AND {$authoritative} AND a.effective_from<=? AND COALESCE(c.effective_to,'9999-12-31')>=?");
         $s->execute([$divisionId,$excludeAppointmentId,$end,$from]);$overlap=$s->fetchColumn();
-        if($overlap){if($to===null)throw new DomainException('This assignment cannot be reopened because another assignment already starts on '.$this->displayDate((string)$overlap).'.');throw new DomainException('The corrected appointment period overlaps another canonical assignment for this ARPA Division.');}
+        if($overlap)return $this->canonicalTimelineConflict((string)$overlap,$to===null);
         $statuses="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
         $s=$this->pdo->prepare("SELECT MIN(r.requested_effective_from) FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.workflow_status IN({$statuses}) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=?");
-        $s->execute([$divisionId,$excludeRequestId,$end,$from]);$reservation=$s->fetchColumn();if($reservation)throw new DomainException('The corrected appointment period overlaps a submitted or scheduled assignment starting on '.$this->displayDate((string)$reservation).'.');
+        $s->execute([$divisionId,$excludeRequestId,$end,$from]);$reservation=$s->fetchColumn();if($reservation)return ['classification'=>'SKIPPED_ACTIVE_WORKFLOW_RESERVATION','code'=>'ACTIVE_WORKFLOW_RESERVATION','message'=>'The corrected appointment period overlaps a submitted or scheduled assignment starting on '.$this->displayDate((string)$reservation).'.'];
         $s=$this->pdo->prepare("SELECT r.id FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1 AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=? LIMIT 1");
-        $s->execute([$divisionId,$excludeRequestId,$end,$from]);if($s->fetchColumn())throw new DomainException('This ARPA Division has another unresolved historical appointment record for the corrected period. Resolve that Appointment Data Issue first.');
+        $s->execute([$divisionId,$excludeRequestId,$end,$from]);if($s->fetchColumn())return ['classification'=>'SKIPPED_OTHER_DATA_ISSUE','code'=>'UNRESOLVED_LEGACY_RECORD','message'=>'This ARPA Division has another unresolved historical appointment record for the corrected period. Resolve that Appointment Data Issue first.'];
+        return null;
     }
     private function assertFollowingContinuity(string $appointmentId,string $divisionId,string $from,?string $to,string $requestId):void
     {
