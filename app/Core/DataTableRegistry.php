@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,NotificationService,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -1744,11 +1744,12 @@ final class DataTableRegistry
     {
         $user=(string)(Auth::user()['id']??'');$view=(string)($input['view']??'action');
         $condition=match($view){'unread'=>'n.read_at IS NULL','completed'=>"n.action_status IN('COMPLETED','RESOLVED_BY_OTHER','CANCELLED','EXPIRED')",'all'=>'1=1',default=>"n.notification_type='ACTION_REQUIRED' AND n.action_status='PENDING'"};
-        return ['permission'=>'notification.view','authenticatedOnly'=>true,'export'=>false,'filename'=>'notifications','from'=>'system_notification n','select'=>['n.*'],'count'=>'n.id','baseWhere'=>['n.recipient_user_id=?',$condition],'baseParams'=>[$user],'searchable'=>['n.title','n.message','n.module_code','n.entity_type','n.entity_id','n.workflow_stage'],'filters'=>['type'=>['column'=>'n.notification_type','allowed'=>['ACTION_REQUIRED','INFORMATION','WARNING'],'ui'=>['label'=>'Type','options'=>['ACTION_REQUIRED'=>'Action Required','INFORMATION'=>'Information','WARNING'=>'Warning']]],'priority'=>['column'=>'n.priority','allowed'=>['NORMAL','HIGH','URGENT'],'ui'=>['label'=>'Priority','options'=>['NORMAL'=>'Normal','HIGH'=>'High','URGENT'=>'Urgent']]]],'columns'=>[
+        $context=NotificationService::contextQueryParts('n');
+        return ['permission'=>'notification.view','authenticatedOnly'=>true,'export'=>false,'filename'=>'notifications','from'=>'system_notification n '.$context['joins'],'select'=>array_merge(['n.*'],$context['select']),'count'=>'n.id','baseWhere'=>['n.recipient_user_id=?',$condition],'baseParams'=>[$user],'searchable'=>array_merge(['n.title','n.message','n.module_code','n.entity_type','n.entity_id','n.workflow_stage'],$context['searchable']),'filters'=>['type'=>['column'=>'n.notification_type','allowed'=>['ACTION_REQUIRED','INFORMATION','WARNING'],'ui'=>['label'=>'Type','options'=>['ACTION_REQUIRED'=>'Action Required','INFORMATION'=>'Information','WARNING'=>'Warning']]],'priority'=>['column'=>'n.priority','allowed'=>['NORMAL','HIGH','URGENT'],'ui'=>['label'=>'Priority','options'=>['NORMAL'=>'Normal','HIGH'=>'High','URGENT'=>'Urgent']]]],'columns'=>[
             self::col('Type','notification_type','n.notification_type',fn($r)=>DataTableFormat::badge($r['notification_type'])),
             self::col('Module','module_code','n.module_code',fn($r)=>DataTableFormat::enumText($r['module_code'])),
-            self::col('Notification','title','n.title',fn($r)=>'<strong>'.e($r['title']).'</strong><div class="small text-muted">'.e($r['message']).'</div>'),
-            self::col('Reference / Entity','entity_id','n.entity_id',fn($r)=>DataTableFormat::text(trim((string)$r['entity_type'].' '.(string)$r['entity_id']))),
+            self::col('Notification','title','n.title',function($r){$display=NotificationService::displayContext($r);$context='';if($display['officer']!==null)$context.='<div class="fw-semibold notification-content-wrap">Officer: '.e($display['officer']).'</div>';if($display['office']!==null)$context.='<div class="small notification-content-wrap">Office: '.e($display['office']).'</div>';return $context.'<strong class="notification-content-wrap d-block">'.e($r['title']).'</strong><div class="small text-muted notification-content-wrap">'.e($r['message']).'</div>'; }),
+            self::col('Related Record','entity_type','n.entity_type',fn($r)=>DataTableFormat::enumText($r['entity_type'])),
             self::col('Workflow Stage','workflow_stage','n.workflow_stage',fn($r)=>DataTableFormat::enumText($r['workflow_stage'])),
             self::col('Priority','priority','n.priority',fn($r)=>DataTableFormat::badge($r['priority'])),
             self::col('Created At','created_at','n.created_at',fn($r)=>DataTableFormat::dateTime($r['created_at'])),

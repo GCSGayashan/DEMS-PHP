@@ -113,11 +113,18 @@ function activePath(string $needle,string $path):string{return str_contains($pat
   <button class="btn btn-link text-white position-relative p-1" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Notifications">
     <i class="bi bi-bell-fill fs-5"></i><?php if($notificationCount>0): ?><span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"><?= e((string)min(99,$notificationCount)) ?><?= $notificationCount>99?'+':'' ?></span><?php endif; ?>
   </button>
-  <div class="dropdown-menu dropdown-menu-end p-0" style="width:min(92vw,390px)">
+  <div class="dropdown-menu dropdown-menu-end p-0 notification-dropdown">
     <div class="px-3 py-2 border-bottom fw-semibold">Notifications<?php if($notificationCount): ?><span class="badge bg-danger float-end"><?= e((string)$notificationCount) ?> action required</span><?php endif; ?></div>
-    <?php if($recentNotifications===[]): ?><div class="px-3 py-4 text-center text-muted">No actionable or unread notifications.</div><?php else: foreach($recentNotifications as $notice): ?>
-      <a class="dropdown-item py-2 border-bottom text-wrap" href="<?= e(url('notifications/'.$notice['id'].'/open')) ?>"><div class="d-flex justify-content-between gap-2"><strong class="small"><?= e($notice['title']) ?></strong><span class="badge <?= $notice['notification_type']==='ACTION_REQUIRED'?'bg-warning text-dark':'bg-info text-dark' ?>"><?= e(str_replace('_',' ',$notice['notification_type'])) ?></span></div><div class="small text-muted text-truncate"><?= e($notice['message']) ?></div><div class="small text-muted"><?= e(substr((string)$notice['created_at'],0,16)) ?><?php if($notice['priority']!=='NORMAL'): ?> · <?= e($notice['priority']) ?><?php endif; ?></div></a>
+    <div class="notification-dropdown-list">
+    <?php if($recentNotifications===[]): ?><div class="px-3 py-4 text-center text-muted">No actionable or unread notifications.</div><?php else: foreach($recentNotifications as $notice): $notificationContext=App\Services\NotificationService::displayContext($notice); ?>
+      <a class="dropdown-item py-2 border-bottom text-wrap notification-content-wrap" href="<?= e(url('notifications/'.$notice['id'].'/open')) ?>">
+        <?php if($notificationContext['officer']!==null): ?><div class="fw-semibold small notification-content-wrap"><?= e($notificationContext['officer']) ?></div><?php endif; ?>
+        <?php if($notificationContext['office']!==null): ?><div class="small notification-content-wrap"><?= e($notificationContext['office']) ?></div><?php endif; ?>
+        <div class="d-flex justify-content-between gap-2 mt-1"><strong class="small notification-content-wrap"><?= e($notice['title']) ?></strong><span class="badge flex-shrink-0 <?= $notice['notification_type']==='ACTION_REQUIRED'?'bg-warning text-dark':'bg-info text-dark' ?>"><?= e(str_replace('_',' ',$notice['notification_type'])) ?></span></div>
+        <div class="small text-muted notification-content-wrap"><?= e($notice['message']) ?></div><div class="small text-muted"><?= e(substr((string)$notice['created_at'],0,16)) ?><?php if($notice['priority']!=='NORMAL'): ?> · <?= e($notice['priority']) ?><?php endif; ?></div>
+      </a>
     <?php endforeach; endif; ?>
+    </div>
     <a class="dropdown-item text-center py-2 fw-semibold" href="<?= e(url('notifications')) ?>">View All Notifications</a>
   </div>
 </div>
