@@ -162,12 +162,13 @@ final class ArpaAppointmentManagementTest
             $service->workflow('division',$request,'VERIFY','DISTRICT','District verification remarks',$verify);
             $this->same('DISTRICT_VERIFIED',(string)$this->value("SELECT workflow_status FROM arpa_division_appointment_request WHERE id='{$request}'"),'District verification succeeds without a prior District Review record');
             $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id='{$request}' AND action='VERIFY' AND stage='DISTRICT' AND comments='District verification remarks'"),'District Verify retains its workflow history and optional remarks');
-            $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','DISTRICT',null,$verify),'District review maker/verifier cannot District approve');
+            $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','DISTRICT',null,$verify),'District verifier cannot District approve');
             $service->workflow('division',$request,'APPROVE','DISTRICT',null,$approve);
-            $this->throws(fn()=>$service->workflow('division',$request,'VERIFY','NATIONAL',null,$verify),'National verification still requires National review information');
-            $service->saveStageReview('division',$request,'NATIONAL','National lifecycle review',null,$verify);
-            $service->workflow('division',$request,'VERIFY','NATIONAL',null,$verify);
-            $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','NATIONAL',null,$verify),'National review maker/verifier cannot final approve');
+            $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE request_id='{$request}' AND review_stage='NATIONAL'"),'Division request has no obsolete National Review record');
+            $service->workflow('division',$request,'VERIFY','NATIONAL','National verification remarks',$verify);
+            $this->same('NATIONAL_VERIFIED',(string)$this->value("SELECT workflow_status FROM arpa_division_appointment_request WHERE id='{$request}'"),'National verification succeeds without a prior National Review record');
+            $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id='{$request}' AND action='VERIFY' AND stage='NATIONAL' AND comments='National verification remarks'"),'National Verify retains its workflow history and optional remarks');
+            $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','NATIONAL',null,$verify),'National verifier cannot final approve');
             $service->workflow('division',$request,'APPROVE','NATIONAL',null,$approve);
             $appointment=(string)$this->value("SELECT id FROM arpa_division_appointment WHERE request_id='{$request}'");
             $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment WHERE id='{$appointment}'"),'final approval creates one operational appointment');
@@ -221,15 +222,13 @@ final class ArpaAppointmentManagementTest
         $service->workflow($entity,$id,'SUBMIT','CREATOR',null,$creator);
         $service->workflow($entity,$id,'VERIFY','ASC',null,$verify);
         $service->workflow($entity,$id,'APPROVE','ASC',null,$approve);
-        if($entity!=='division'){
-            $this->throws(fn()=>$service->workflow($entity,$id,'VERIFY','DISTRICT',null,$verify),'Subject District verification still requires District review information');
-            $service->saveStageReview($entity,$id,'DISTRICT','District fixture review',null,$verify);
-        }
-        $service->workflow($entity,$id,'VERIFY','DISTRICT',null,$verify);
-        $service->workflow($entity,$id,'APPROVE','DISTRICT',null,$approve);
-        $service->saveStageReview($entity,$id,'NATIONAL','National fixture review',null,$verify);
-        $service->workflow($entity,$id,'VERIFY','NATIONAL',null,$verify);
-        $service->workflow($entity,$id,'APPROVE','NATIONAL',null,$approve);
+        $entityType=strtoupper($entity);
+        $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE entity_type='{$entityType}' AND request_id='{$id}'"),"{$entity} workflow starts without Stage Review records");
+        $this->same('DISTRICT_VERIFIED',$service->workflow($entity,$id,'VERIFY','DISTRICT','Direct District verification',$verify),"{$entity} District Verify is directly executable");
+        $this->same('DISTRICT_APPROVED',$service->workflow($entity,$id,'APPROVE','DISTRICT','Direct District approval',$approve),"{$entity} District Approve is directly executable");
+        $this->same('NATIONAL_VERIFIED',$service->workflow($entity,$id,'VERIFY','NATIONAL','Direct National verification',$verify),"{$entity} National Verify is directly executable");
+        $this->same('NATIONAL_APPROVED',$service->workflow($entity,$id,'APPROVE','NATIONAL','Direct National approval',$approve),"{$entity} National Approve is directly executable");
+        $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE entity_type='{$entityType}' AND request_id='{$id}'"),"{$entity} workflow completes without creating Stage Review records");
     }
 
     private function anotherDivision(string $ascId,string $exclude,bool $third=false):string

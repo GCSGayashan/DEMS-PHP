@@ -40,6 +40,7 @@ final class ArpaAppointmentReadService
                      request_office.office_dad_number,request_office.office_name,
                      asc_location.dad_number asc_number,asc_location.name_en asc_name,
                      arpa_location.dad_number arpa_number,arpa_location.official_code arpa_official_code,arpa_location.name_en arpa_name,
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.location_snapshot_json,'$.province.name_en')),'null') province_name,
                      NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.location_snapshot_json,'$.district.name_en')),'null') district_name,
                      COALESCE(NULLIF(submitted_user.display_name,''),submitted_user.username,NULLIF(creator.display_name,''),creator.username) submitted_by_name,
                      submitted_action.action_at submitted_at

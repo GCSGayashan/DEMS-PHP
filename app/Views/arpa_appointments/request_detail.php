@@ -21,40 +21,40 @@ $reviewStage=ArpaAppointmentRules::isReviewStatus($status)?ArpaAppointmentRules:
 $stageRolePermission=match($status){'SUBMITTED'=>'arpa.appointment.asc-verify','ASC_VERIFIED'=>'arpa.appointment.asc-approve','ASC_APPROVED'=>'arpa.appointment.district-verify','DISTRICT_VERIFIED'=>'arpa.appointment.district-approve','DISTRICT_APPROVED'=>'arpa.appointment.national-verify','NATIONAL_VERIFIED'=>'arpa.appointment.national-approve',default=>null};
 $canReturn=$stageRolePermission!==null&&Auth::can('arpa.appointment.return')&&Auth::can($stageRolePermission);
 $canReject=$stageRolePermission!==null&&Auth::can('arpa.appointment.reject')&&Auth::can($stageRolePermission);
-$districtVerifyPage=$entity==='division'&&$status==='ASC_APPROVED';
-$reviewEditStage=$districtVerifyPage?null:($status==='ASC_APPROVED'&&Auth::can('arpa.appointment.district-review-edit')?'DISTRICT':($status==='DISTRICT_APPROVED'&&Auth::can('arpa.appointment.national-review-edit')?'NATIONAL':null));
+$expandedDivisionReviewPage=$entity==='division'&&in_array($status,['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'],true);
+$workflowPanelTitle=match($status){'SUBMITTED'=>'ASC Verification','ASC_VERIFIED'=>'ASC Approval','ASC_APPROVED'=>'District Verification','DISTRICT_VERIFIED'=>'District Approval','DISTRICT_APPROVED'=>'National Verification','NATIONAL_VERIFIED'=>'National Approval',default=>'Workflow action'};
 $editPermission=$entity==='subject'?'arpa.subject.create':'arpa.appointment.edit';
-if($administrativelyDeleted){$canPrimary=false;$canReturn=false;$canReject=false;$reviewEditStage=null;$canCorrectReturned=false;$canEditSubmitted=false;}
+if($administrativelyDeleted){$canPrimary=false;$canReturn=false;$canReject=false;$canCorrectReturned=false;$canEditSubmitted=false;}
 $lastReturn=null;for($i=count($workflowHistory)-1;$i>=0;$i--){if(in_array($workflowHistory[$i]['action'],['RETURN_FOR_CORRECTION','REJECT'],true)){$lastReturn=$workflowHistory[$i];break;}}
 ?>
 <div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Review</div><h1><?= e(ucwords($entity).' '.ucwords(strtolower(str_replace('_',' ',$request['request_type'])))) ?> Request</h1><p>Check the officer, location, dates, and other assignment information.</p></div><div><?= DataTableFormat::badge($status) ?></div></div>
 <?php if($administrativelyDeleted): ?><div class="alert alert-secondary"><strong>ADMINISTRATIVELY DELETED</strong><br>This request is retained for audit visibility and is no longer actionable. Reason: <?= e($request['delete_reason']?:'Not recorded') ?></div><?php endif; ?>
 <?php if($status==='RETURNED'&&$lastReturn): ?><div class="alert alert-warning"><div class="d-flex flex-wrap justify-content-between gap-2"><strong>RETURNED FOR CORRECTION</strong><span><?= $lastReturn['action_at']?e(substr((string)$lastReturn['action_at'],0,16)):'Unavailable from legacy source' ?></span></div><div class="mt-2"><strong>Returned by:</strong> <?= e($lastReturn['performed_by']) ?> &middot; <strong>Level:</strong> <?= e($lastReturn['stage']) ?></div><div class="mt-1"><strong>Reason:</strong> <?= nl2br(e($lastReturn['comments'])) ?></div></div><?php endif; ?>
-<div class="row g-3"><div class="<?= $districtVerifyPage?'col-lg-8':'col-lg-7' ?>"><div class="form-section"><h2 class="h5">Original Agrarian Service Center Request</h2>
-<?php if($districtVerifyPage): ?>
+<div class="row g-3"><div class="<?= $expandedDivisionReviewPage?'col-lg-8':'col-lg-7' ?>"><div class="form-section"><h2 class="h5">Original Agrarian Service Center Request</h2>
+<?php if($expandedDivisionReviewPage): ?>
 <h3 class="h6 mt-3">Officer Information</h3><dl class="row mb-0">
 <dt class="col-sm-4">Officer</dt><dd class="col-sm-8"><?= e($request['officer_number'].' - '.($request['officer_name']?:'Unnamed')) ?></dd>
-<dt class="col-sm-4">NIC</dt><dd class="col-sm-8"><?= e($request['officer_nic']?:'—') ?></dd>
-<dt class="col-sm-4">Designation</dt><dd class="col-sm-8"><?= e($request['designation_name']?:'—') ?></dd>
-<dt class="col-sm-4">Class</dt><dd class="col-sm-8"><?= e($request['class_name']?:'—') ?></dd>
-<dt class="col-sm-4">Officer Status / Service Status</dt><dd class="col-sm-8"><?= e($request['officer_status_name']?:$request['officer_operational_status']?:'—') ?></dd>
+<dt class="col-sm-4">NIC</dt><dd class="col-sm-8"><?= e($request['officer_nic']?:'-') ?></dd>
+<dt class="col-sm-4">Designation</dt><dd class="col-sm-8"><?= e($request['designation_name']?:'-') ?></dd>
+<dt class="col-sm-4">Class</dt><dd class="col-sm-8"><?= e($request['class_name']?:'-') ?></dd>
+<dt class="col-sm-4">Officer Status / Service Status</dt><dd class="col-sm-8"><?= e($request['officer_status_name']?:$request['officer_operational_status']?:'-') ?></dd>
 <dt class="col-sm-4">Officer Office</dt><dd class="col-sm-8"><?= e($request['office_name']?trim(($request['office_dad_number']?$request['office_dad_number'].' - ':'').$request['office_name']):'-') ?></dd>
 </dl><h3 class="h6 mt-4">Assignment Information</h3><dl class="row mb-0">
-<dt class="col-sm-4">District</dt><dd class="col-sm-8"><?= e($request['district_name']?:'—') ?></dd>
-<dt class="col-sm-4">Agrarian Service Center</dt><dd class="col-sm-8"><?= e($request['asc_name']?trim(($request['asc_number']?$request['asc_number'].' - ':'').$request['asc_name']):'—') ?></dd>
-<dt class="col-sm-4">ARPA Division</dt><dd class="col-sm-8"><?= e($request['arpa_name']?trim((($request['arpa_number']?:$request['arpa_official_code'])?($request['arpa_number']?:$request['arpa_official_code']).' - ':'').$request['arpa_name']):'—') ?></dd>
+<dt class="col-sm-4">Province</dt><dd class="col-sm-8"><?= e($request['province_name']?:'-') ?></dd>
+<dt class="col-sm-4">District</dt><dd class="col-sm-8"><?= e($request['district_name']?:'-') ?></dd>
+<dt class="col-sm-4">Agrarian Service Center</dt><dd class="col-sm-8"><?= e($request['asc_name']?trim(($request['asc_number']?$request['asc_number'].' - ':'').$request['asc_name']):'-') ?></dd>
+<dt class="col-sm-4">ARPA Division</dt><dd class="col-sm-8"><?= e($request['arpa_name']?trim((($request['arpa_number']?:$request['arpa_official_code'])?($request['arpa_number']?:$request['arpa_official_code']).' - ':'').$request['arpa_name']):'-') ?></dd>
 <dt class="col-sm-4">Request Type</dt><dd class="col-sm-8"><?= e(ucwords(strtolower(str_replace('_',' ',$request['request_type'])))) ?></dd>
-<dt class="col-sm-4">Assignment Type</dt><dd class="col-sm-8"><?= e(ucwords(strtolower(str_replace('_',' ',$request['appointment_type']?:'—')))) ?></dd>
-<dt class="col-sm-4">Start Date</dt><dd class="col-sm-8"><?= e($request['requested_effective_from']?:'—') ?></dd>
+<dt class="col-sm-4">Assignment Type</dt><dd class="col-sm-8"><?= e(ucwords(strtolower(str_replace('_',' ',$request['appointment_type']?:'-')))) ?></dd>
+<dt class="col-sm-4">Start Date</dt><dd class="col-sm-8"><?= e($request['requested_effective_from']?:'-') ?></dd>
 <dt class="col-sm-4">End Date</dt><dd class="col-sm-8"><?= e($request['requested_effective_to']?:'Current') ?></dd>
-<dt class="col-sm-4">Remarks</dt><dd class="col-sm-8"><?= $request['request_remarks']?nl2br(e($request['request_remarks'])):'—' ?></dd>
-<dt class="col-sm-4">Submitted By</dt><dd class="col-sm-8"><?= e($request['submitted_by_name']?:'—') ?></dd>
-<dt class="col-sm-4">Submitted Date</dt><dd class="col-sm-8"><?= e($request['submitted_at']?substr((string)$request['submitted_at'],0,16):'—') ?></dd>
+<dt class="col-sm-4">Remarks</dt><dd class="col-sm-8"><?= $request['request_remarks']?nl2br(e($request['request_remarks'])):'-' ?></dd>
+<dt class="col-sm-4">Submitted By</dt><dd class="col-sm-8"><?= e($request['submitted_by_name']?:'-') ?></dd>
+<dt class="col-sm-4">Submitted Date</dt><dd class="col-sm-8"><?= e($request['submitted_at']?substr((string)$request['submitted_at'],0,16):'-') ?></dd>
 </dl>
 <?php else: ?><dl class="row mb-0"><dt class="col-sm-4">Officer</dt><dd class="col-sm-8"><?= e($request['officer_number'].' - '.($request['officer_name']?:'Unnamed')) ?></dd><dt class="col-sm-4">Request Type</dt><dd class="col-sm-8"><?= e(ucwords(strtolower(str_replace('_',' ',$request['request_type'])))) ?></dd><?php if(isset($request['appointment_type'])): ?><dt class="col-sm-4">Assignment Type</dt><dd class="col-sm-8"><?= e(ucwords(strtolower(str_replace('_',' ',$request['appointment_type']?:'—')))) ?></dd><?php endif; ?><dt class="col-sm-4">Start Date</dt><dd class="col-sm-8"><?= e($request['requested_effective_from']?:'—') ?></dd><dt class="col-sm-4">End Date</dt><dd class="col-sm-8"><?= e($request['requested_effective_to']?:'Current') ?></dd><dt class="col-sm-4">Remarks</dt><dd class="col-sm-8"><?= e($request['request_remarks']?:'—') ?></dd></dl><?php endif; ?></div>
 <?php if($impact): ?><div class="alert alert-warning"><h2 class="h6">Transfer / Permanent closure impact</h2><p class="mb-2">Final approval will create <?= count($impact) ?> separate dependent closure event<?= count($impact)===1?'':'s' ?>. No dependent assignment is carried forward silently.</p><ul class="mb-0"><?php foreach($impact as $row): ?><li><?= e(($row['appointment_type']??'Assignment').' — '.($row['arpa_name_snapshot']??$row['id']??'Unknown')) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
-</div><div class="<?= $districtVerifyPage?'col-lg-4':'col-lg-5' ?>"><div class="form-section"><h2 class="h5"><?= $districtVerifyPage?'District Verification':'Workflow action' ?></h2>
-<?php if($reviewEditStage): ?><a class="btn btn-outline-primary mb-3" href="<?= e(url('hr/arpa-appointments/requests/'.$entity.'/'.$request['id'].'/review/'.strtolower($reviewEditStage))) ?>">Enter <?= e(ucfirst(strtolower($reviewEditStage))) ?> Review</a><?php endif; ?>
+</div><div class="<?= $expandedDivisionReviewPage?'col-lg-4':'col-lg-5' ?>"><div class="form-section"><h2 class="h5"><?= e($workflowPanelTitle) ?></h2>
 <?php if($canPrimary): ?><form method="post" action="<?= e(url('hr/arpa-appointments/workflow/'.$entity.'/'.$request['id'].'/'.strtolower($step[0]).'?stage='.$step[1])) ?>"><?= Csrf::field() ?><label class="form-label" for="primary-comments">Comments / remarks</label><textarea class="form-control mb-3" id="primary-comments" name="comments" rows="3"></textarea><button class="btn btn-primary"><?= e($step[3]) ?></button></form><?php else: ?><p class="text-muted">No primary workflow action is available to your account at this stage.</p><?php endif; ?>
 <?php if($canReturn||$canReject): ?><hr><div class="row g-2"><?php if($canReturn): ?><div class="col-12"><form method="post" action="<?= e(url('hr/arpa-appointments/workflow/'.$entity.'/'.$request['id'].'/return_for_correction?stage='.$reviewStage)) ?>"><?= Csrf::field() ?><label class="form-label">Correction comments</label><textarea class="form-control mb-2" name="comments" rows="2" required></textarea><button class="btn btn-outline-warning">Return for Correction</button></form></div><?php endif; ?><?php if($canReject): ?><div class="col-12 mt-3"><form method="post" action="<?= e(url('hr/arpa-appointments/workflow/'.$entity.'/'.$request['id'].'/reject?stage='.$reviewStage)) ?>"><?= Csrf::field() ?><label class="form-label">Rejection reason</label><textarea class="form-control mb-2" name="comments" rows="2" required></textarea><button class="btn btn-outline-danger">Reject</button></form></div><?php endif; ?></div><?php endif; ?>
 <?php if((($status==='CREATED'&&$actor===(string)$request['created_by'])||$canCorrectReturned||$canEditSubmitted)&&Auth::can($editPermission)): ?><hr><a class="btn btn-outline-secondary" href="<?= e(url('hr/arpa-appointments/requests/'.$entity.'/'.$request['id'].'/edit')) ?>"><?= $canEditSubmitted?'Edit Submitted Appointment':'Edit / Correct Request' ?></a><?php endif; ?>
