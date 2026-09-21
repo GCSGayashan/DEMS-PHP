@@ -251,6 +251,35 @@ final class ArpaAppointmentReadService
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Division is outside the ASC, inactive, or the proposed assignment period overlaps an authoritative assignment.');
     }
 
+    public function assertDivisionPeriodDoesNotOverlap(
+        string $divisionId,
+        string $effectiveFrom,
+        ?string $effectiveTo=null,
+        bool $lock=false,
+        ?string $excludeRequestId=null,
+        ?string $excludeAppointmentId=null
+    ):void {
+        if($lock){$lockStmt=$this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');$lockStmt->execute([$divisionId]);if(!$lockStmt->fetchColumn())throw new DomainException('The selected ARPA Division was not found.');}
+        $periodEnd=$effectiveTo??'9999-12-31';$statuses=$this->reservingStatusSql();
+        $sql="SELECT
+                EXISTS(SELECT 1 FROM arpa_division_appointment a
+                  LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                  WHERE a.arpa_division_location_id=? AND a.id<>COALESCE(?, '')
+                    AND (a.legacy_history_only=0 OR c.id IS NOT NULL)
+                    AND a.effective_from<=? AND COALESCE(c.effective_to,'9999-12-31')>=?)
+                OR EXISTS(SELECT 1 FROM arpa_division_appointment_request r
+                  WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.id<>COALESCE(?, '')
+                    AND r.record_origin='NATIVE' AND r.legacy_history_only=0
+                    AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?
+                    AND COALESCE(CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'9999-12-31')>=?)";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([
+            $divisionId,$excludeAppointmentId,$periodEnd,$effectiveFrom,
+            $divisionId,$excludeRequestId,$periodEnd,$effectiveFrom,
+        ]);
+        if((int)$stmt->fetchColumn()!==0)throw new DomainException('The proposed assignment period overlaps an authoritative assignment.');
+    }
+
     /** @return array<string,mixed> */
     public function appointmentTypeAvailability(
         string $officerId,

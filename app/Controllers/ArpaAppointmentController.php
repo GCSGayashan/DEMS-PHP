@@ -704,7 +704,7 @@ final class ArpaAppointmentController extends Controller
 
     public function updateAppointmentDates(string $id):void
     {
-        if(!ArpaAdministrativePolicy::canCorrectDates()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'an authorized National or System ARPA date-correction context']);return;}
+        if(!ArpaAdministrativePolicy::canCorrectDates()){http_response_code(403);$this->render('partials/forbidden',['permission'=>'the canonical dems.admin ARPA date-correction authority']);return;}
         Csrf::validate();
         try{(new ArpaAppointmentAdministrationService(Database::pdo()))->correctDates($id,$_POST,(string)Auth::user()['id']);$this->flash('success','ARPA appointment updated successfully.');redirect('/hr/arpa-appointments/divisions/'.$id);}
         catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/divisions/'.$id.'/edit-dates');}

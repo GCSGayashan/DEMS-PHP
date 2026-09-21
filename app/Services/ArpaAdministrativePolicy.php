@@ -8,8 +8,6 @@ use DomainException;
 
 final class ArpaAdministrativePolicy
 {
-    private const DATE_CORRECTION_ROLES=['NATIONAL_SUBJECT_OFFICER','NATIONAL_ADMIN','SYSTEM_ADMIN'];
-
     public static function isCanonicalDemsAdmin():bool
     {
         $user=Auth::user();
@@ -22,19 +20,13 @@ final class ArpaAdministrativePolicy
     public static function canCorrectDates():bool
     {
         $context=Auth::activeContext(false);
-        if($context===null||!Auth::can('arpa.appointment.view'))return false;
-        $role=(string)($context['role_code']??'');
-        if(!in_array($role,self::DATE_CORRECTION_ROLES,true))return false;
-        if($role==='SYSTEM_ADMIN')return (string)($context['role_level']??'')==='SYSTEM';
-        return (string)($context['role_level']??'')==='NATIONAL'
-            && (string)($context['scope_type']??'')==='NATIONAL'
-            && (string)($context['scope_mode']??'')==='NATIONAL';
+        return $context!==null&&Auth::can('arpa.appointment.view')&&self::isCanonicalDemsAdmin();
     }
 
     /** @return array<string,mixed> */
     public static function assertDateCorrection():array
     {
-        if(!self::canCorrectDates())throw new DomainException('Direct ARPA appointment date correction requires an authorized National or System working context.');
+        if(!self::canCorrectDates())throw new DomainException('Only the canonical dems.admin account may directly correct ARPA appointment dates.');
         return Auth::activeContext(false)??throw new DomainException('Select an Active Working Context.');
     }
 

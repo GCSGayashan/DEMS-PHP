@@ -65,7 +65,6 @@ final class ArpaAppointmentAdministrationService
             if(!$lock->fetchColumn())throw new DomainException('ARPA Division appointment was not found.');
             $before=$this->appointmentForCorrection($appointmentId);
             $from=$this->date($input['effective_from']??null,'Appointment Effective From');
-            ArpaAppointmentRules::assertNativeEffectiveDate($from);
             $to=null;
             if($before['closure_id']!==null){
                 $to=$this->date($input['effective_to']??null,'Appointment Effective To');
@@ -74,8 +73,10 @@ final class ArpaAppointmentAdministrationService
             $hierarchy=(new ArpaAppointmentLocationPolicy())->hierarchyContext($this->pdo,(string)$before['arpa_division_location_id'],(string)$before['asc_location_id'],$from);
             if(!$hierarchy['matches'])throw new DomainException('The ARPA Division does not belong to the recorded Agrarian Service Center on the corrected date.');
             $read=new ArpaAppointmentReadService($this->pdo);
-            $read->assertDivisionPeriodAvailable((string)$before['asc_location_id'],(string)$before['arpa_division_location_id'],$from,$to,true,(string)$before['request_id'],$appointmentId);
-            (new ArpaDivisionContinuityService($this->pdo))->assertCanStart((string)$before['arpa_division_location_id'],$from,(string)$before['request_id'],$appointmentId,false,false);
+            $read->assertDivisionPeriodDoesNotOverlap((string)$before['arpa_division_location_id'],$from,$to,true,(string)$before['request_id'],$appointmentId);
+            if($from>=ArpaDivisionContinuityService::BASELINE){
+                (new ArpaDivisionContinuityService($this->pdo))->assertCanStart((string)$before['arpa_division_location_id'],$from,(string)$before['request_id'],$appointmentId,false,false);
+            }
             if((string)$before['effective_from']===$from&&($before['closure_id']===null||((string)$before['effective_to']===$to)))throw new DomainException('No appointment date change was provided.');
 
             $this->pdo->prepare('UPDATE arpa_division_appointment SET effective_from=? WHERE id=?')->execute([$from,$appointmentId]);
