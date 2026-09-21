@@ -120,7 +120,7 @@ function activePath(string $needle,string $path):string{return str_contains($pat
       <a class="dropdown-item py-2 border-bottom text-wrap notification-content-wrap" href="<?= e(url('notifications/'.$notice['id'].'/open')) ?>">
         <?php if($notificationContext['officer']!==null): ?><div class="fw-semibold small notification-content-wrap"><?= e($notificationContext['officer']) ?></div><?php endif; ?>
         <?php if($notificationContext['office']!==null): ?><div class="small notification-content-wrap"><?= e($notificationContext['office']) ?></div><?php endif; ?>
-        <div class="d-flex justify-content-between gap-2 mt-1"><strong class="small notification-content-wrap"><?= e($notice['title']) ?></strong><span class="badge flex-shrink-0 <?= $notice['notification_type']==='ACTION_REQUIRED'?'bg-warning text-dark':'bg-info text-dark' ?>"><?= e(str_replace('_',' ',$notice['notification_type'])) ?></span></div>
+        <div class="notification-title-row mt-1"><strong class="small notification-title notification-content-wrap"><?= e($notice['title']) ?></strong><span class="badge notification-type-badge <?= $notice['notification_type']==='ACTION_REQUIRED'?'bg-warning text-dark':'bg-info text-dark' ?>"><?= e(str_replace('_',' ',$notice['notification_type'])) ?></span></div>
         <div class="small text-muted notification-content-wrap"><?= e($notice['message']) ?></div><div class="small text-muted"><?= e(substr((string)$notice['created_at'],0,16)) ?><?php if($notice['priority']!=='NORMAL'): ?> · <?= e($notice['priority']) ?><?php endif; ?></div>
       </a>
     <?php endforeach; endif; ?>
