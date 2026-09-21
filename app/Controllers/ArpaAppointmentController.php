@@ -771,8 +771,8 @@ final class ArpaAppointmentController extends Controller
 
     public function requestDetail(string $entity,string $id):void
     {
-        Auth::requirePermission('arpa.appointment.view');$division=$entity==='division';$table=$division?'arpa_division_appointment_request':'arpa_subject_assignment_request';$history=$division?'arpa_appointment_workflow_action':'arpa_subject_workflow_action';
-        $s=Database::pdo()->prepare("SELECT r.*,o.dad_number officer_number,o.name_with_initials officer_name FROM {$table} r JOIN officer o ON o.id=r.officer_id WHERE r.id=?");$s->execute([$id]);$request=$s->fetch();if(!$request||($division&&$request['deleted_at']!==null&&!ArpaAdministrativePolicy::isCanonicalDemsAdmin())){http_response_code(404);$this->flash('danger','Request was not found.');redirect('/hr/arpa-appointments/pending');}
+        Auth::requirePermission('arpa.appointment.view');$division=$entity==='division';$history=$division?'arpa_appointment_workflow_action':'arpa_subject_workflow_action';
+        $request=(new ArpaAppointmentReadService(Database::pdo()))->workflowRequestDetail($entity,$id);if(!$request||($division&&$request['deleted_at']!==null&&!ArpaAdministrativePolicy::isCanonicalDemsAdmin())){http_response_code(404);$this->flash('danger','Request was not found.');redirect('/hr/arpa-appointments/pending');}
         $location=$this->requestLocation($entity,$id);if($location&&!ArpaAdministrativePolicy::isCanonicalDemsAdmin())$this->assertLocationScope($location);
         $s=Database::pdo()->prepare("SELECT w.*,COALESCE(NULLIF(u.display_name,''),u.username) performed_by,u.username FROM {$history} w JOIN system_user u ON u.id=w.user_id WHERE w.request_id=? ORDER BY w.id");$s->execute([$id]);$workflowHistory=$s->fetchAll();
         $s=Database::pdo()->prepare('SELECT sr.*,u.username updated_by_name FROM arpa_appointment_stage_review sr JOIN system_user u ON u.id=sr.updated_by WHERE sr.entity_type=? AND sr.request_id=? ORDER BY FIELD(sr.review_stage,\'DISTRICT\',\'NATIONAL\')');$s->execute([strtoupper($entity),$id]);$stageReviews=$s->fetchAll();

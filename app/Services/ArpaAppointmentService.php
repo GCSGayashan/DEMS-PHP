@@ -322,7 +322,8 @@ final class ArpaAppointmentService
                     }
                 }
             }
-            if (strtoupper($action) === 'VERIFY' && in_array(strtoupper($stage), ['DISTRICT','NATIONAL'], true)) {
+            if (strtoupper($action) === 'VERIFY'
+                && (strtoupper($stage) === 'NATIONAL' || (strtoupper($stage) === 'DISTRICT' && $entity !== 'division'))) {
                 $review=$this->pdo->prepare('SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE entity_type=? AND request_id=? AND review_stage=?');
                 $review->execute([strtoupper($entity),$requestId,strtoupper($stage)]);
                 if ((int)$review->fetchColumn()===0) throw new DomainException(ucfirst(strtolower($stage)).' review information must be recorded before verification.');

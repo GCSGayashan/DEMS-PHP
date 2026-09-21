@@ -93,8 +93,22 @@ final class ArpaWorkflowQueueTest
             $this->same(1,$this->completed($ascAdmin,$request),'ASC approval appears in Administrator completed actions');
             $this->same(1,$this->inbox($districtSubject,$request),'District Subject Officer receives ASC_APPROVED child-ASC request');
 
-            $service->saveStageReview('division',$request,'DISTRICT','District review','Transactional test',$districtSubject);
-            $service->workflow('division',$request,'VERIFY','DISTRICT',null,$districtSubject);
+            $this->same(0,(int)$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE entity_type='DIVISION' AND request_id=? AND review_stage='DISTRICT'",[$request]),'District verification fixture has no separate District Review record');
+            $this->useContext($districtSubject,'DISTRICT_SUBJECT_OFFICER');
+            $detailRequest=$read->workflowRequestDetail('division',$request);ob_start();(static function(array $request):void{$entity='division';$workflowHistory=[];$stageReviews=[];$impact=[];require BASE_PATH.'/app/Views/arpa_appointments/request_detail.php';})($detailRequest??[]);$districtHtml=(string)ob_get_clean();
+            $detailOfficer=$this->row('SELECT o.dad_number,o.nic,o.name_with_initials,d.name_en designation_name,oc.name_en class_name FROM officer o JOIN designation d ON d.id=o.primary_designation_id LEFT JOIN officer_class oc ON oc.id=o.class_id WHERE o.id=?',[(string)$officer['id']]);
+            $detailOffice=$this->row("SELECT ofc.id,ofc.dad_number,ofc.name_en FROM officer_office_assignment ooa JOIN office ofc ON ofc.id=ooa.office_id WHERE ooa.officer_id=? AND ofc.linked_location_id=? AND ooa.active=1 AND ooa.approval_status='APPROVED' AND ooa.effective_from<=CURRENT_DATE() AND (ooa.effective_to IS NULL OR ooa.effective_to>=CURRENT_DATE()) LIMIT 1",[(string)$officer['id'],$this->asc]);
+            $detailLocations=$this->row('SELECT a.dad_number asc_number,a.name_en asc_name,d.dad_number division_number,d.name_en division_name FROM location a JOIN location d ON d.id=? WHERE a.id=?',[(string)$division['id'],$this->asc]);
+            $districtName=(string)$this->scalar('SELECT name_en FROM location WHERE id=?',[$this->district]);
+            foreach(['District Verification','District Verify','Return for Correction','Officer Information','Assignment Information','NIC','Designation','Class','Officer Office','Agrarian Service Center','ARPA Division','Submitted By','Submitted Date',$detailOfficer['dad_number'],$detailOfficer['name_with_initials'],$detailOfficer['nic'],$detailOfficer['designation_name'],$detailOffice['dad_number'],$detailOffice['name_en'],$detailLocations['asc_number'],$detailLocations['asc_name'],$detailLocations['division_number'],$detailLocations['division_name'],$districtName] as $needle)$this->same(true,str_contains($districtHtml,(string)$needle),"District Verify detail displays {$needle}");
+            if(($detailOfficer['class_name']??'')!=='')$this->same(true,str_contains($districtHtml,(string)$detailOfficer['class_name']),'District Verify detail displays Officer Class when available');
+            $this->same(false,str_contains($districtHtml,'Enter District Review'),'District Verify page does not render the obsolete District Review action');
+            foreach([(string)$officer['id'],$this->asc,(string)$division['id'],(string)($detailOffice['id']??'')] as $uuid)if($uuid!=='')$this->same(false,str_contains($districtHtml,$uuid),'District Verify visible detail does not expose Officer, Office, or location UUIDs');
+            $this->useContext($this->asctest,'ASC_SUBJECT_OFFICER');
+
+            $districtRemarks='Verified directly without a separate District Review record.';
+            $service->workflow('division',$request,'VERIFY','DISTRICT',$districtRemarks,$districtSubject);
+            $this->same($districtRemarks,(string)$this->scalar("SELECT comments FROM arpa_appointment_workflow_action WHERE request_id=? AND action='VERIFY' AND stage='DISTRICT' ORDER BY id DESC LIMIT 1",[$request]),'optional District verification remarks are retained in workflow history');
             $this->same(0,$this->inbox($districtSubject,$request),'District verification removes request from Subject Officer inbox');
             $this->same(1,$this->completed($districtSubject,$request),'District verification appears in completed actions');
             $this->same(1,$this->inbox($districtAdmin,$request),'District Administrator receives DISTRICT_VERIFIED request');
@@ -186,6 +200,12 @@ final class ArpaWorkflowQueueTest
     {
         $assignmentId=(string)$this->scalar('SELECT id FROM user_account_role WHERE user_id=? ORDER BY created_at DESC LIMIT 1',[$user]);
         $this->pdo->prepare("INSERT INTO user_account_scope(id,user_id,role_assignment_id,scope_type,scope_mode,location_id,effective_from,approval_status,active,reason,created_by,approved_by,approved_at) VALUES(UUID(),?,?,?,?,?,CURRENT_DATE(),'APPROVED',1,'Workflow queue test',?,?,NOW())")->execute([$user,$assignmentId,$type,$mode,$location,$this->asctest,$this->asctest]);
+    }
+
+    private function useContext(string $user,string $role):void
+    {
+        $stmt=$this->pdo->prepare("SELECT uar.id role_assignment_id,uas.id scope_assignment_id FROM user_account_role uar JOIN application_role r ON r.id=uar.role_id AND r.role_code=? JOIN user_account_scope uas ON uas.role_assignment_id=uar.id AND uas.user_id=uar.user_id WHERE uar.user_id=? AND uar.active=1 AND uar.approval_status='APPROVED' AND uas.active=1 AND uas.approval_status='APPROVED' LIMIT 1");$stmt->execute([$role,$user]);$context=$stmt->fetch();if(!$context)throw new RuntimeException("{$role} active context is required.");
+        $_SESSION['user_id']=$user;$_SESSION['authenticated_at']=time();$_SESSION['last_activity_at']=time();(new UserContextService($this->pdo))->select($user,(string)$context['role_assignment_id'],(string)$context['scope_assignment_id']);Auth::forgetRequestCache();
     }
 
     private function inbox(string $user,string $request):int

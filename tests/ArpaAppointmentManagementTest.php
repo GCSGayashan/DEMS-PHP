@@ -158,13 +158,13 @@ final class ArpaAppointmentManagementTest
             $service->workflow('division',$request,'VERIFY','ASC',null,$creator);
             $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','ASC',null,$creator),'same Subject Officer may create and verify but cannot administrator-approve');
             $service->workflow('division',$request,'APPROVE','ASC',null,$approve);
-            $this->throws(fn()=>$service->workflow('division',$request,'VERIFY','DISTRICT',null,$verify),'District verification requires District review information');
-            $service->saveStageReview('division',$request,'DISTRICT','District lifecycle review',null,$verify);
-            $service->saveStageReview('division',$request,'DISTRICT','District lifecycle review revised','Reviewed evidence',$verify);
-            $this->same(2,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review_audit WHERE request_id='{$request}' AND review_stage='DISTRICT'"),'changing District review retains immutable audit history');
-            $service->workflow('division',$request,'VERIFY','DISTRICT',null,$verify);
+            $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE request_id='{$request}' AND review_stage='DISTRICT'"),'Division request has no obsolete District Review record');
+            $service->workflow('division',$request,'VERIFY','DISTRICT','District verification remarks',$verify);
+            $this->same('DISTRICT_VERIFIED',(string)$this->value("SELECT workflow_status FROM arpa_division_appointment_request WHERE id='{$request}'"),'District verification succeeds without a prior District Review record');
+            $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id='{$request}' AND action='VERIFY' AND stage='DISTRICT' AND comments='District verification remarks'"),'District Verify retains its workflow history and optional remarks');
             $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','DISTRICT',null,$verify),'District review maker/verifier cannot District approve');
             $service->workflow('division',$request,'APPROVE','DISTRICT',null,$approve);
+            $this->throws(fn()=>$service->workflow('division',$request,'VERIFY','NATIONAL',null,$verify),'National verification still requires National review information');
             $service->saveStageReview('division',$request,'NATIONAL','National lifecycle review',null,$verify);
             $service->workflow('division',$request,'VERIFY','NATIONAL',null,$verify);
             $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','NATIONAL',null,$verify),'National review maker/verifier cannot final approve');
@@ -221,7 +221,10 @@ final class ArpaAppointmentManagementTest
         $service->workflow($entity,$id,'SUBMIT','CREATOR',null,$creator);
         $service->workflow($entity,$id,'VERIFY','ASC',null,$verify);
         $service->workflow($entity,$id,'APPROVE','ASC',null,$approve);
-        $service->saveStageReview($entity,$id,'DISTRICT','District fixture review',null,$verify);
+        if($entity!=='division'){
+            $this->throws(fn()=>$service->workflow($entity,$id,'VERIFY','DISTRICT',null,$verify),'Subject District verification still requires District review information');
+            $service->saveStageReview($entity,$id,'DISTRICT','District fixture review',null,$verify);
+        }
         $service->workflow($entity,$id,'VERIFY','DISTRICT',null,$verify);
         $service->workflow($entity,$id,'APPROVE','DISTRICT',null,$approve);
         $service->saveStageReview($entity,$id,'NATIONAL','National fixture review',null,$verify);

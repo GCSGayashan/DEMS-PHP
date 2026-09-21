@@ -25,6 +25,56 @@ final class ArpaAppointmentReadService
     ];
     public function __construct(private readonly PDO $pdo) {}
 
+    /** @return array<string,mixed>|null */
+    public function workflowRequestDetail(string $entity,string $requestId):?array
+    {
+        if($entity==='subject'){
+            $stmt=$this->pdo->prepare('SELECT r.*,o.dad_number officer_number,o.name_with_initials officer_name FROM arpa_subject_assignment_request r JOIN officer o ON o.id=r.officer_id WHERE r.id=?');
+            $stmt->execute([$requestId]);
+            return $stmt->fetch()?:null;
+        }
+        if($entity!=='division')throw new DomainException('Unsupported workflow entity.');
+        $sql="SELECT r.*,o.dad_number officer_number,o.name_with_initials officer_name,o.nic officer_nic,
+                     d.name_en designation_name,oc.name_en class_name,os.name_en officer_status_name,
+                     o.operational_status officer_operational_status,
+                     request_office.office_dad_number,request_office.office_name,
+                     asc_location.dad_number asc_number,asc_location.name_en asc_name,
+                     arpa_location.dad_number arpa_number,arpa_location.official_code arpa_official_code,arpa_location.name_en arpa_name,
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.location_snapshot_json,'$.district.name_en')),'null') district_name,
+                     COALESCE(NULLIF(submitted_user.display_name,''),submitted_user.username,NULLIF(creator.display_name,''),creator.username) submitted_by_name,
+                     submitted_action.action_at submitted_at
+              FROM arpa_division_appointment_request r
+              JOIN officer o ON o.id=r.officer_id
+              LEFT JOIN designation d ON d.id=o.primary_designation_id
+              LEFT JOIN officer_class oc ON oc.id=o.class_id
+              LEFT JOIN officer_status os ON os.id=o.officer_status_id
+              LEFT JOIN location asc_location ON asc_location.id=r.asc_location_id
+              LEFT JOIN location arpa_location ON arpa_location.id=r.arpa_division_location_id
+              LEFT JOIN (
+                  SELECT ooa.officer_id,ofc.linked_location_id,
+                         MAX(ofc.dad_number) office_dad_number,MAX(ofc.name_en) office_name
+                  FROM officer_office_assignment ooa
+                  JOIN office ofc ON ofc.id=ooa.office_id
+                      AND ofc.operational_status='ACTIVE' AND ofc.approval_status='APPROVED'
+                  WHERE ooa.active=1 AND ooa.approval_status='APPROVED'
+                    AND ooa.effective_from<=CURRENT_DATE()
+                    AND (ooa.effective_to IS NULL OR ooa.effective_to>=CURRENT_DATE())
+                  GROUP BY ooa.officer_id,ofc.linked_location_id
+              ) request_office ON request_office.officer_id=r.officer_id AND request_office.linked_location_id=r.asc_location_id
+              LEFT JOIN (
+                  SELECT request_id,MAX(id) submitted_action_id
+                  FROM arpa_appointment_workflow_action
+                  WHERE action='SUBMIT'
+                  GROUP BY request_id
+              ) latest_submit ON latest_submit.request_id=r.id
+              LEFT JOIN arpa_appointment_workflow_action submitted_action ON submitted_action.id=latest_submit.submitted_action_id
+              LEFT JOIN system_user submitted_user ON submitted_user.id=submitted_action.user_id
+              LEFT JOIN system_user creator ON creator.id=r.created_by
+              WHERE r.id=?";
+        $stmt=$this->pdo->prepare($sql);$stmt->execute([$requestId]);
+        return $stmt->fetch()?:null;
+    }
+
     public static function openAppointmentClause(string $appointmentAlias = 'a', string $closureAlias = 'c'): string
     {
         return "{$closureAlias}.id IS NULL";
