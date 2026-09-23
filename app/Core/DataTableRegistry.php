@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,NotificationService,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,NotificationService,OfficerOfficeAssignmentService,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -488,13 +488,13 @@ final class DataTableRegistry
 
     private static function pendingOfficerOfficeAssignments():array
     {
-        $user=Auth::user();$userId=(string)($user['id']??'');$officeIds=$user===null?[]:array_column(ScopeService::scopedOffices($userId),'id');
+        $user=Auth::user();$userId=(string)($user['id']??'');$access=$user===null?['where'=>['1=0'],'params'=>[]]:OfficerOfficeAssignmentService::approvalQueueAccess($userId,'a');
         $baseWhere=["a.deleted_at IS NULL","a.approval_status='SUBMITTED'","(a.reason IS NULL OR a.reason<>'Initial Office for user account request')",'(a.created_by IS NULL OR a.created_by<>?)','(a.submitted_by IS NULL OR a.submitted_by<>?)'];$params=[$userId,$userId];
-        if($officeIds===[])$baseWhere[]='1=0';else{$baseWhere[]='a.office_id IN ('.implode(',',array_fill(0,count($officeIds),'?')).')';array_push($params,...$officeIds);}
+        array_push($baseWhere,...$access['where']);array_push($params,...$access['params']);
         return [
             'permission'=>'officer.office-assignment.approve','export'=>false,'filename'=>'pending-officer-office-assignments',
             'from'=>'officer_office_assignment a JOIN officer f ON f.id=a.officer_id JOIN office o ON o.id=a.office_id LEFT JOIN location l ON l.id=o.linked_location_id LEFT JOIN system_user su ON su.id=a.submitted_by',
-            'select'=>['a.id','a.officer_id','f.dad_number officer_dad','f.name_with_initials officer_name','f.nic','o.dad_number office_dad','o.name_en office_name','l.dad_number location_dad','l.name_en location_name','a.effective_from','a.submitted_at','a.approval_status','su.display_name submitted_by_name','su.username submitted_by_username'],
+            'select'=>['a.id','a.officer_id','f.dad_number officer_dad','f.name_with_initials officer_name','f.nic','o.dad_number office_dad','o.name_en office_name','l.dad_number location_dad','l.name_en location_name','a.effective_from','a.submitted_at','a.approval_status','a.workflow_origin_role_code','su.display_name submitted_by_name','su.username submitted_by_username'],
             'count'=>'a.id','baseWhere'=>$baseWhere,'baseParams'=>$params,
             'searchable'=>['f.dad_number','f.name_with_initials','f.nic','o.dad_number','o.name_en','l.dad_number','l.name_en','su.display_name','su.username'],
             'columns'=>[
@@ -505,11 +505,12 @@ final class DataTableRegistry
                 self::col('Linked Location','location_name','l.name_en',fn($r)=>DataTableFormat::text(trim(($r['location_dad']??'').' - '.($r['location_name']??'')),'National')),
                 self::col('Effective From','effective_from','a.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
                 self::col('Submitted By','submitted_by_name','su.display_name',fn($r)=>DataTableFormat::text($r['submitted_by_name']?:$r['submitted_by_username'])),
+                self::col('Level','workflow_origin_role_code','a.workflow_origin_role_code',fn($r)=>DataTableFormat::text(str_starts_with((string)$r['workflow_origin_role_code'],'DISTRICT_')?'District':(str_starts_with((string)$r['workflow_origin_role_code'],'NATIONAL_')?'National':(str_starts_with((string)$r['workflow_origin_role_code'],'ASC_')?'ASC':'Existing Workflow')))),
                 self::col('Submitted At','submitted_at','a.submitted_at',fn($r)=>DataTableFormat::dateTime($r['submitted_at'])),
                 self::col('Status','approval_status','a.approval_status',fn($r)=>DataTableFormat::badge($r['approval_status'])),
                 self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary me-1" href="'.e(url('hr/officers/office-assignments/'.$r['id'].'/review')).'">Review / Approve</a>'.(AssignmentDeletePolicy::allowed()?'<a class="btn btn-sm btn-outline-danger" href="'.e(url('hr/officers/'.$r['officer_id'].'/offices/'.$r['id'].'/delete')).'">Delete</a>':'')),
             ],
-            'defaultOrder'=>[7,'DESC'],'emptyMessage'=>'No submitted Office assignments are awaiting your approval in the current working context.',
+            'defaultOrder'=>[8,'DESC'],'emptyMessage'=>'No submitted Office assignments are awaiting your approval in the current working context.',
         ];
     }
 

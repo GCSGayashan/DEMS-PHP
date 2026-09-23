@@ -48,7 +48,7 @@ final class PendingOfficerOfficeAssignmentApprovalTest
         $this->same($officeA,$this->value('SELECT primary_office_id FROM officer WHERE id=?',[$officer]),'Officer primary Office pointer is synchronized on approval');
         $this->same(1,(int)$this->value("SELECT COUNT(*) FROM officer_office_assignment_audit WHERE assignment_id=? AND action_key='APPROVED'",[$assignment]),'approval is append-only audited');
 
-        $specialOfficer=$this->officer();$this->useContext($systemMaker);$special=$service->create(['officer_id'=>$specialOfficer,'office_id'=>$officeA,'effective_from'=>$today,'reason'=>OfficerOfficeAssignmentService::USER_ACCOUNT_REQUEST_INITIAL_REASON],$systemMaker['user']);
+        $specialOfficer=$this->officer();$this->useContext($systemMaker);$special=$service->createForUserAccountRequest(['officer_id'=>$specialOfficer,'office_id'=>$officeA,'effective_from'=>$today],$systemMaker['user']);
         $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$special]),'User Account Request initial assignment remains submitted');
         $this->same(0,(int)$this->value('SELECT active FROM officer_office_assignment WHERE id=?',[$special]),'User Account Request initial assignment remains inactive');
         $this->same(0,(int)$this->value("SELECT COUNT(*) FROM system_notification WHERE entity_type='OFFICER_OFFICE_ASSIGNMENT' AND entity_id=?",[$special]),'User Account Request initial assignment creates no standalone approval notification');

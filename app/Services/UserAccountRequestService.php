@@ -258,7 +258,7 @@ final class UserAccountRequestService
             ->execute([$officerId, $dadNumber, $nic, $nic, $matchKey, $name, $designationId, $officerStatusId, $effectiveFrom, $actorId, $actorId]);
 
         $reason = OfficerOfficeAssignmentService::USER_ACCOUNT_REQUEST_INITIAL_REASON;
-        $officeAssignmentId = (new OfficerOfficeAssignmentService($this->pdo))->create([
+        $officeAssignmentId = (new OfficerOfficeAssignmentService($this->pdo))->createForUserAccountRequest([
             'officer_id' => $officerId,
             'office_id' => $office['id'],
             'effective_from' => $effectiveFrom,

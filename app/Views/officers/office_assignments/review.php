@@ -1,4 +1,4 @@
-<?php use App\Core\{Csrf,DataTableFormat}; $dash='—'; ?>
+<?php use App\Core\{Csrf,DataTableFormat}; $dash='—'; $origin=(string)($assignment['workflow_origin_role_code']??'');$approvalLevel=str_starts_with($origin,'DISTRICT_')?'District':(str_starts_with($origin,'NATIONAL_')?'National':(str_starts_with($origin,'ASC_')?'ASC':'Existing Workflow')); ?>
 <div class="page-heading">
     <div>
         <div class="breadcrumb-lite">Human Resource Management / Officers / Office Assignments / Review</div>
@@ -29,6 +29,7 @@
                 <dt class="col-sm-5">Linked Location</dt><dd class="col-sm-7"><?= e(trim(($assignment['location_dad']??'').' - '.($assignment['location_name']??''),' -')?:'National') ?></dd>
                 <dt class="col-sm-5">Effective From</dt><dd class="col-sm-7"><?= e($assignment['effective_from']) ?></dd>
                 <dt class="col-sm-5">Submitted By</dt><dd class="col-sm-7"><?= e($assignment['submitted_by_name']?:$assignment['submitted_by_username']?:$dash) ?></dd>
+                <dt class="col-sm-5">Approval Level</dt><dd class="col-sm-7"><?= e($approvalLevel) ?></dd>
                 <dt class="col-sm-5">Submitted At</dt><dd class="col-sm-7"><?= e($assignment['submitted_at']?:$dash) ?></dd>
                 <dt class="col-sm-5">Status</dt><dd class="col-sm-7"><?= DataTableFormat::badge($assignment['approval_status']) ?></dd>
             </dl>
@@ -45,7 +46,8 @@
     <?php endif; ?>
 </div></div>
 
-<div class="card mt-4"><div class="card-body d-flex justify-content-between align-items-center">
-    <div><h2 class="h5 mb-1">Approval</h2><p class="text-muted mb-0">Approval updates this same assignment record. It does not create another Office assignment.</p></div>
-    <form method="post" action="<?= e(url('hr/officers/office-assignments/'.$assignment['id'].'/approve')) ?>"><?= Csrf::field() ?><button class="btn btn-success" type="submit">Approve Office Assignment</button></form>
-</div></div>
+<div class="row g-3 mt-1">
+    <div class="col-lg-4"><form method="post" action="<?= e(url('hr/officers/office-assignments/'.$assignment['id'].'/approve')) ?>" class="card h-100"><div class="card-body"><?= Csrf::field() ?><h2 class="h5">Approve</h2><p class="text-muted">Activate this same effective-dated Office Assignment record.</p><button class="btn btn-success" type="submit">Approve Office Assignment</button></div></form></div>
+    <div class="col-lg-4"><form method="post" action="<?= e(url('hr/officers/office-assignments/'.$assignment['id'].'/return')) ?>" class="card h-100"><div class="card-body"><?= Csrf::field() ?><h2 class="h5">Return</h2><label class="form-label" for="office-return-reason">Correction reason</label><textarea class="form-control mb-3" id="office-return-reason" name="reason" maxlength="1000" required></textarea><button class="btn btn-warning" type="submit">Return for Correction</button></div></form></div>
+    <div class="col-lg-4"><form method="post" action="<?= e(url('hr/officers/office-assignments/'.$assignment['id'].'/reject')) ?>" class="card h-100"><div class="card-body"><?= Csrf::field() ?><h2 class="h5">Reject</h2><label class="form-label" for="office-reject-reason">Rejection reason</label><textarea class="form-control mb-3" id="office-reject-reason" name="reason" maxlength="1000" required></textarea><button class="btn btn-outline-danger" type="submit">Reject Assignment</button></div></form></div>
+</div>

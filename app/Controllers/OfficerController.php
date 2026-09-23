@@ -28,10 +28,11 @@ final class OfficerController extends Controller
 
     public function show(string $id):void
     {
-        Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$workflowService=new OfficerWorkflowService(Database::pdo());$demsAdmin=ArpaAdministrativePolicy::isCanonicalDemsAdmin();
-        if(!$demsAdmin&&!$workflowService->canAccess($id,$userId)){http_response_code(404);$this->render('partials/not-found');return;}
+        Auth::requirePermission('officer.view');$userId=(string)Auth::user()['id'];$pdo=Database::pdo();$workflowService=new OfficerWorkflowService($pdo);$officeAssignmentService=new OfficerOfficeAssignmentService($pdo);$demsAdmin=ArpaAdministrativePolicy::isCanonicalDemsAdmin();
+        $assignmentCandidateAccess=Auth::can('officer.office-assignment.create')&&ScopeService::canAccessOfficerForOfficeAssignment($userId,$id);
+        if(!$demsAdmin&&!$workflowService->canAccess($id,$userId)&&!$assignmentCandidateAccess){http_response_code(404);$this->render('partials/not-found');return;}
         $restricted=!$demsAdmin&&ScopeService::requiresGeographicRestriction($userId);$offices=$demsAdmin?[]:ScopeService::scopedOffices($userId);$ascIds=$restricted?array_column(ScopeService::scopedLocations($userId,'ASC'),'id'):null;
-        $profile=(new OfficerProfileService(Database::pdo()))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds,$demsAdmin);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=(new OfficerOfficeAssignmentService(Database::pdo()))->initialForOfficer($id);$initialOfficeReconciliation=$initialOfficeAssignment===null?$workflowService->initialOfficeReconciliationCandidate($id,$userId):null;$canAdminDateCorrect=ArpaAdministrativePolicy::canCorrectDates();$this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment','initialOfficeReconciliation','demsAdmin','canAdminDateCorrect'));
+        $profile=(new OfficerProfileService($pdo))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds,$demsAdmin);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=$officeAssignmentService->initialForOfficer($id);$initialOfficeReconciliation=$initialOfficeAssignment===null?$workflowService->initialOfficeReconciliationCandidate($id,$userId):null;$officeAssignmentAction=$officeAssignmentService->actionForOfficer($id,$userId);$canAdminDateCorrect=ArpaAdministrativePolicy::canCorrectDates();$this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment','initialOfficeReconciliation','officeAssignmentAction','demsAdmin','canAdminDateCorrect'));
     }
 
     public function search():void
@@ -64,6 +65,14 @@ final class OfficerController extends Controller
         $this->render('officers/office_assignments/pending',compact('dataTable'));
     }
 
+    public function unassignedOfficers():void
+    {
+        if(!Auth::can('officer.office-assignment.create')&&!Auth::can('officer.office-assignment.approve')){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Unassigned Officer access']);return;}
+        try{$officers=(new OfficerOfficeAssignmentService(Database::pdo()))->unassignedOfficers((string)Auth::user()['id']);}
+        catch(\DomainException $e){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}
+        $this->render('officers/unassigned',compact('officers'));
+    }
+
     public function reviewOfficeAssignment(string $assignmentId):void
     {
         Auth::requirePermission('officer.office-assignment.approve');
@@ -76,6 +85,22 @@ final class OfficerController extends Controller
     {
         Auth::requirePermission('officer.office-assignment.approve');Csrf::validate();
         try{(new OfficerOfficeAssignmentService(Database::pdo()))->approve($assignmentId,(string)Auth::user()['id']);$this->flash('success','Office assignment approved.');}
+        catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/hr/officers/office-assignments/pending');
+    }
+
+    public function returnPendingOfficeAssignment(string $assignmentId):void
+    {
+        Auth::requirePermission('officer.office-assignment.approve');Csrf::validate();
+        try{(new OfficerOfficeAssignmentService(Database::pdo()))->returnForCorrection($assignmentId,(string)($_POST['reason']??''),(string)Auth::user()['id']);$this->flash('success','Office assignment returned for correction.');}
+        catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/hr/officers/office-assignments/pending');
+    }
+
+    public function rejectPendingOfficeAssignment(string $assignmentId):void
+    {
+        Auth::requirePermission('officer.office-assignment.approve');Csrf::validate();
+        try{(new OfficerOfficeAssignmentService(Database::pdo()))->reject($assignmentId,(string)($_POST['reason']??''),(string)Auth::user()['id']);$this->flash('success','Office assignment rejected.');}
         catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
         redirect('/hr/officers/office-assignments/pending');
     }
@@ -741,7 +766,9 @@ final class OfficerController extends Controller
     public function assignOffice(string $id):void
     {
         Auth::requirePermission('officer.office-assignment.create');$userId=(string)Auth::user()['id'];
-        $s=Database::pdo()->prepare('SELECT id,dad_number,name_with_initials FROM officer WHERE id=?');$s->execute([$id]);$officer=$s->fetch();if(!$officer){http_response_code(404);$this->render('partials/not-found');return;}$offices=ScopeService::scopedOffices($userId);$this->render('officers/office_assignment_form',compact('officer','offices'));
+        try{$form=(new OfficerOfficeAssignmentService(Database::pdo()))->assignmentForm($id,$userId);}
+        catch(\DomainException $e){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}
+        $this->render('officers/office_assignment_form',$form);
     }
     public function storeOfficeAssignment(string $id):void{Auth::requirePermission('officer.office-assignment.create');Csrf::validate();try{$_POST['officer_id']=$id;(new OfficerOfficeAssignmentService(Database::pdo()))->create($_POST,(string)Auth::user()['id']);$this->flash('success','Office assignment submitted.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id.'/offices/assign');}redirect('/hr/officers/'.$id);}
     public function editOfficeAssignment(string $id,string $assignmentId):void

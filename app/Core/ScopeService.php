@@ -340,6 +340,50 @@ final class ScopeService
         return (int)$stmt->fetchColumn()>0;
     }
 
+    /**
+     * Scope evidence for assigning an Office to an Officer who has no current
+     * Office. District/ASC visibility is derived only from the Officer's
+     * persisted workflow scope or an approved historical/future Office
+     * assignment in the current context. National/System contexts remain
+     * enterprise-wide. A stale primary_office_id is deliberately not used.
+     *
+     * @return array{with:string,params:array<int,string>,where:array<int,string>}
+     */
+    public static function officeAssignmentCandidateAccess(string $userId,string $officerExpression):array
+    {
+        if(!self::requiresGeographicRestriction($userId))return ['with'=>'','params'=>[],'where'=>[]];
+        $with=self::visibleLocationsCte($userId).", assignment_scope_offices(id) AS (
+            SELECT DISTINCT o.id
+            FROM office o
+            JOIN visible_locations vl ON vl.id=o.linked_location_id
+            WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE'
+        ) ";
+        return [
+            'with'=>$with,
+            'params'=>self::visibleLocationParams($userId),
+            'where'=>["(
+                {$officerExpression}.workflow_scope_location_id IN (SELECT id FROM visible_locations)
+                OR EXISTS (
+                    SELECT 1
+                    FROM officer_office_assignment scope_oa
+                    JOIN assignment_scope_offices scope_ofc ON scope_ofc.id=scope_oa.office_id
+                    WHERE scope_oa.officer_id={$officerExpression}.id
+                      AND scope_oa.deleted_at IS NULL
+                      AND scope_oa.approval_status='APPROVED'
+                )
+            )"],
+        ];
+    }
+
+    public static function canAccessOfficerForOfficeAssignment(string $userId,string $officerId):bool
+    {
+        if(!self::requiresGeographicRestriction($userId))return true;
+        $access=self::officeAssignmentCandidateAccess($userId,'o');
+        $stmt=Database::pdo()->prepare($access['with'].' SELECT COUNT(*) FROM officer o WHERE o.id=? AND '.implode(' AND ',$access['where']));
+        $stmt->execute(array_merge($access['params'],[$officerId]));
+        return (int)$stmt->fetchColumn()>0;
+    }
+
     private static function visibleLocationsCteForDate(string $userId):string
     {
         $context=Auth::activeContextForUser($userId);

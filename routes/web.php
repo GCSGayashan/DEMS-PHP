@@ -48,9 +48,12 @@ $router->get('/hr/officer-edit-requests/{requestId}', [OfficerController::class,
 $router->post('/hr/officer-edit-requests/{requestId}/approve', [OfficerController::class, 'approveEditRequest']);
 $router->post('/hr/officer-edit-requests/{requestId}/return', [OfficerController::class, 'returnEditRequest']);
 $router->post('/hr/officer-edit-requests/{requestId}/reject', [OfficerController::class, 'rejectEditRequest']);
+$router->get('/hr/officers/unassigned', [OfficerController::class, 'unassignedOfficers']);
 $router->get('/hr/officers/office-assignments/pending', [OfficerController::class, 'pendingOfficeAssignments']);
 $router->get('/hr/officers/office-assignments/{assignmentId}/review', [OfficerController::class, 'reviewOfficeAssignment']);
 $router->post('/hr/officers/office-assignments/{assignmentId}/approve', [OfficerController::class, 'approvePendingOfficeAssignment']);
+$router->post('/hr/officers/office-assignments/{assignmentId}/return', [OfficerController::class, 'returnPendingOfficeAssignment']);
+$router->post('/hr/officers/office-assignments/{assignmentId}/reject', [OfficerController::class, 'rejectPendingOfficeAssignment']);
 $router->get('/hr/officers/{id}/edit', [OfficerController::class, 'edit']);
 $router->post('/hr/officers/{id}/edit', [OfficerController::class, 'update']);
 $router->get('/hr/officers/{id}', [OfficerController::class, 'show']);
