@@ -60,11 +60,12 @@ final class NotificationService
     {
         if(!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/',$notificationAlias))throw new DomainException('Invalid notification SQL alias.');
         $n=$notificationAlias;
-        $officerId="COALESCE(ctx_officer.id,ctx_assignment_officer.id,ctx_division_officer.id,ctx_subject_officer.id,ctx_user_officer.id,ctx_role_officer.id,ctx_scope_officer.id)";
-        $officerDad="COALESCE(ctx_officer.dad_number,ctx_assignment_officer.dad_number,ctx_division_officer.dad_number,ctx_subject_officer.dad_number,ctx_user_officer.dad_number,ctx_role_officer.dad_number,ctx_scope_officer.dad_number)";
-        $officerName="COALESCE(ctx_officer.name_with_initials,ctx_assignment_officer.name_with_initials,ctx_division_officer.name_with_initials,ctx_subject_officer.name_with_initials,ctx_user_officer.name_with_initials,ctx_role_officer.name_with_initials,ctx_scope_officer.name_with_initials)";
+        $officerId="COALESCE(ctx_officer.id,ctx_edit_officer.id,ctx_assignment_officer.id,ctx_division_officer.id,ctx_subject_officer.id,ctx_user_officer.id,ctx_role_officer.id,ctx_scope_officer.id)";
+        $officerDad="COALESCE(ctx_officer.dad_number,ctx_edit_officer.dad_number,ctx_assignment_officer.dad_number,ctx_division_officer.dad_number,ctx_subject_officer.dad_number,ctx_user_officer.dad_number,ctx_role_officer.dad_number,ctx_scope_officer.dad_number)";
+        $officerName="COALESCE(ctx_officer.name_with_initials,ctx_edit_officer.name_with_initials,ctx_assignment_officer.name_with_initials,ctx_division_officer.name_with_initials,ctx_subject_officer.name_with_initials,ctx_user_officer.name_with_initials,ctx_role_officer.name_with_initials,ctx_scope_officer.name_with_initials)";
         $officeDad="CASE {$n}.entity_type
             WHEN 'OFFICER' THEN CASE WHEN COALESCE(ctx_officer_initial.office_count,0)>0 THEN ctx_officer_initial_office.dad_number ELSE ctx_primary_office.dad_number END
+            WHEN 'OFFICER_EDIT_REQUEST' THEN ctx_primary_office.dad_number
             WHEN 'OFFICER_OFFICE_ASSIGNMENT' THEN ctx_assignment_office.dad_number
             WHEN 'ARPA_DIVISION_REQUEST' THEN ctx_division_office.dad_number
             WHEN 'ARPA_SUBJECT_REQUEST' THEN ctx_subject_office.dad_number
@@ -74,6 +75,7 @@ final class NotificationService
           END";
         $officeName="CASE {$n}.entity_type
             WHEN 'OFFICER' THEN CASE WHEN COALESCE(ctx_officer_initial.office_count,0)>0 THEN ctx_officer_initial_office.name_en ELSE ctx_primary_office.name_en END
+            WHEN 'OFFICER_EDIT_REQUEST' THEN ctx_primary_office.name_en
             WHEN 'OFFICER_OFFICE_ASSIGNMENT' THEN ctx_assignment_office.name_en
             WHEN 'ARPA_DIVISION_REQUEST' THEN ctx_division_office.name_en
             WHEN 'ARPA_SUBJECT_REQUEST' THEN ctx_subject_office.name_en
@@ -83,6 +85,8 @@ final class NotificationService
           END";
         $joins="
           LEFT JOIN officer ctx_officer ON {$n}.entity_type='OFFICER' AND ctx_officer.id={$n}.entity_id
+          LEFT JOIN officer_edit_request ctx_edit_request ON {$n}.entity_type='OFFICER_EDIT_REQUEST' AND ctx_edit_request.id={$n}.entity_id
+          LEFT JOIN officer ctx_edit_officer ON ctx_edit_officer.id=ctx_edit_request.officer_id
           LEFT JOIN officer_office_assignment ctx_assignment ON {$n}.entity_type='OFFICER_OFFICE_ASSIGNMENT' AND ctx_assignment.id={$n}.entity_id
           LEFT JOIN officer ctx_assignment_officer ON ctx_assignment_officer.id=ctx_assignment.officer_id
           LEFT JOIN office ctx_assignment_office ON ctx_assignment_office.id=ctx_assignment.office_id
@@ -132,7 +136,7 @@ final class NotificationService
           LEFT JOIN office ctx_role_scope_office ON ctx_role_scope_office.id=ctx_role_scope_resolution.office_id
           LEFT JOIN office ctx_scope_direct_office ON ctx_scope_direct_office.id=ctx_scope.office_id
           LEFT JOIN office ctx_scope_location_office ON ctx_scope_location_office.linked_location_id=ctx_scope.location_id
-          LEFT JOIN office ctx_primary_office ON ctx_primary_office.id=COALESCE(ctx_officer.primary_office_id,ctx_assignment_officer.primary_office_id,ctx_division_officer.primary_office_id,ctx_subject_officer.primary_office_id,ctx_user_officer.primary_office_id,ctx_role_officer.primary_office_id,ctx_scope_officer.primary_office_id)";
+          LEFT JOIN office ctx_primary_office ON ctx_primary_office.id=COALESCE(ctx_officer.primary_office_id,ctx_edit_officer.primary_office_id,ctx_assignment_officer.primary_office_id,ctx_division_officer.primary_office_id,ctx_subject_officer.primary_office_id,ctx_user_officer.primary_office_id,ctx_role_officer.primary_office_id,ctx_scope_officer.primary_office_id)";
         return [
             'joins'=>$joins,
             'select'=>["{$officerId} notification_officer_id","{$officerDad} notification_officer_dad_number","{$officerName} notification_officer_name","{$officeDad} notification_office_dad_number","{$officeName} notification_office_name"],

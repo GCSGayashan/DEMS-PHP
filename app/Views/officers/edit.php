@@ -32,6 +32,13 @@ $v = static fn(string $key, mixed $default = '') =>
 Changes are applied immediately and recorded in the audit history. This Officer remains <?= e($officer['approval_status']) ?>; workflow status, submission details, and assignments are not changed.
 </div>
 <?php endif; ?>
+<?php if(!empty($editRequestMode)): ?>
+<div class="alert alert-info">
+<strong>Officer profile edit request</strong><br>
+Changes will not update the Officer master until an authorized <?= !empty($returnedEditRequest)&&($returnedEditRequest['request_level']??'')==='DISTRICT'?'District':'National' ?> Administrator approves this request. Office assignments cannot be changed here.
+</div>
+<?php if(!empty($returnedEditRequest)): ?><input type="hidden" name="officer_edit_request_id" value="<?= e($returnedEditRequest['id']) ?>"><?php endif; ?>
+<?php endif; ?>
 
 <div class="form-section">
 <h5>Identity</h5>
@@ -386,7 +393,7 @@ Use effective-dated Office Assignments to move an Officer between offices.
 <?php endif; ?>
 
 <button class="btn btn-primary">
-Save Changes
+<?= !empty($editRequestMode)?'Submit Changes for Approval':'Save Changes' ?>
 </button>
 
 <a

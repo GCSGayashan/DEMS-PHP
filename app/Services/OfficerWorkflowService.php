@@ -186,7 +186,8 @@ final class OfficerWorkflowService
         $maker=$context!==null&&(string)$row['created_by']===$actorId&&$this->makerContextMatches($row,$context);
         $checker=$context!==null&&($this->checkerContextMatches($row,$context)||($row['workflow_origin_role_code']===null&&Auth::can('officer.approve')))&&(string)$row['created_by']!==$actorId&&(string)$row['submitted_by']!==$actorId;
         $adminDirectEdit=OfficerAdminDirectEditPolicy::supportsStatus((string)$row['approval_status'])&&OfficerAdminDirectEditPolicy::allowed();
-        return ['can_edit'=>Auth::can('officer.edit')&&(($row['approval_status']==='DRAFT'&&$maker)||$adminDirectEdit),'admin_direct_edit'=>$adminDirectEdit,'can_submit'=>$row['approval_status']==='DRAFT'&&$maker&&Auth::can('officer.submit'),'can_approve'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.approve'),'can_return'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.return')];
+        $editRequestService=new OfficerEditRequestService($this->pdo);$editRequest=$editRequestService->returnedForMaker($officerId,$actorId)!==null||$editRequestService->canInitiate($officerId,$actorId);
+        return ['can_edit'=>(Auth::can('officer.edit')&&(($row['approval_status']==='DRAFT'&&$maker)||$adminDirectEdit))||$editRequest,'admin_direct_edit'=>$adminDirectEdit,'edit_request'=>$editRequest,'can_submit'=>$row['approval_status']==='DRAFT'&&$maker&&Auth::can('officer.submit'),'can_approve'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.approve'),'can_return'=>$row['approval_status']==='SUBMITTED'&&$checker&&Auth::can('officer.return')];
     }
 
     public function notifyExistingSubmission(string $officerId,string $actorId):void

@@ -21,6 +21,14 @@ final class OfficerAdminDirectEditService
 
     public function __construct(private readonly PDO $pdo){}
 
+    /** @param array<string,mixed> $data */
+    public function validateProposedUpdate(string $officerId,array $data):void
+    {
+        $unexpected=array_diff(array_keys($data),self::EDITABLE_FIELDS);
+        if($unexpected!==[])throw new DomainException('The Officer update contains fields that cannot be edited.');
+        $this->validate($officerId,$data);
+    }
+
     /** @param array<string,mixed> $data @return array<string,mixed> */
     public function update(string $officerId,array $data,int $expectedVersion,string $actorId):array
     {
@@ -37,7 +45,7 @@ final class OfficerAdminDirectEditService
             if(!OfficerAdminDirectEditPolicy::supportsStatus($preservedStatus))throw new DomainException('Direct administrative editing is limited to approved or submitted Officers.');
             if((int)$before['version']!==$expectedVersion)throw new DomainException('The Officer changed after this edit form was opened. Reload the profile and try again.');
 
-            $this->validate($officerId,$data);
+            $this->validateProposedUpdate($officerId,$data);
             $set=[];foreach(array_keys($data) as $column)$set[]=$column.'=?';
             $params=array_values($data);$params[]=$actorId;$params[]=$officerId;$params[]=$expectedVersion;$params[]=$preservedStatus;
             $update=$this->pdo->prepare('UPDATE officer SET '.implode(',',$set).',updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=? AND approval_status=?');

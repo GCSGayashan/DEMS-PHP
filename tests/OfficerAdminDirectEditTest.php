@@ -38,7 +38,8 @@ final class OfficerAdminDirectEditTest
 
         $this->useContext($nationalAdmin,'NATIONAL_ADMIN');
         $this->same(false,OfficerAdminDirectEditPolicy::allowed(),'National Admin does not receive canonical direct edit');
-        $this->same(false,$workflow->actions($id,$nationalAdmin)['can_edit'],'National Admin does not receive approved Officer direct-edit action');
+        $this->same(true,$workflow->actions($id,$nationalAdmin)['can_edit'],'National Admin receives the approval-based Officer profile edit action');
+        $this->same(true,$workflow->actions($id,$nationalAdmin)['edit_request'],'National Admin edit remains an approval request rather than direct edit');
         $this->throws(fn()=>$service->update($id,$this->data($target),(int)$target['version'],$nationalAdmin),'forged National Admin direct edit is rejected');
 
         $this->useContext($admin,'SYSTEM_ADMIN');
@@ -153,7 +154,7 @@ final class OfficerAdminDirectEditTest
         $this->throws(fn()=>$service->update($draft,$data,0,$admin),'direct administrative editing remains unavailable for Draft Officers');
 
         $view=(string)file_get_contents(BASE_PATH.'/app/Views/officers/show.php');$form=(string)file_get_contents(BASE_PATH.'/app/Views/officers/edit.php');
-        $this->same(true,str_contains($view,"['admin_direct_edit'])?'Edit Officer':'Edit'"),'canonical approved and submitted profile actions are labelled Edit Officer');
+        $this->same(true,str_contains($view,"['admin_direct_edit'])?'Direct Edit Officer'"),'canonical approved and submitted profile actions are clearly labelled as direct edit');
         $this->same(true,str_contains($form,'name="version"')&&str_contains($form,'Direct administrative correction')&&str_contains($form,'workflow status, submission details, and assignments are not changed'),'edit form carries optimistic version and explains workflow preservation');
     }
 

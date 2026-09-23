@@ -43,6 +43,11 @@ $router->post('/hr/officers/search', [OfficerController::class, 'searchSubmit'])
 $router->get('/api/officers/options', [OfficerController::class, 'options']);
 $router->get('/hr/officers/create', [OfficerController::class, 'create']);
 $router->post('/hr/officers', [OfficerController::class, 'store']);
+$router->get('/hr/officer-edit-requests', [OfficerController::class, 'editRequests']);
+$router->get('/hr/officer-edit-requests/{requestId}', [OfficerController::class, 'reviewEditRequest']);
+$router->post('/hr/officer-edit-requests/{requestId}/approve', [OfficerController::class, 'approveEditRequest']);
+$router->post('/hr/officer-edit-requests/{requestId}/return', [OfficerController::class, 'returnEditRequest']);
+$router->post('/hr/officer-edit-requests/{requestId}/reject', [OfficerController::class, 'rejectEditRequest']);
 $router->get('/hr/officers/office-assignments/pending', [OfficerController::class, 'pendingOfficeAssignments']);
 $router->get('/hr/officers/office-assignments/{assignmentId}/review', [OfficerController::class, 'reviewOfficeAssignment']);
 $router->post('/hr/officers/office-assignments/{assignmentId}/approve', [OfficerController::class, 'approvePendingOfficeAssignment']);

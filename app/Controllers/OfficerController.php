@@ -3,7 +3,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,DataTableRegistry,NicNormalizer,ScopeService};
-use App\Services\{ArpaAdministrativePolicy,OfficerAdminDirectEditPolicy,OfficerAdminDirectEditService,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
+use App\Services\{ArpaAdministrativePolicy,OfficerAdminDirectEditPolicy,OfficerAdminDirectEditService,OfficerEditRequestService,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
 
 final class OfficerController extends Controller
 {
@@ -82,7 +82,7 @@ final class OfficerController extends Controller
 
     public function edit(string $id): void
     {
-        Auth::requirePermission('officer.edit');
+        if(!Auth::can('officer.edit')&&!Auth::can('officer.edit-request')){http_response_code(403);$this->render('partials/forbidden',['permission'=>'officer profile editing']);return;}
 
         $userId=(string)Auth::user()['id'];
 
@@ -92,8 +92,6 @@ final class OfficerController extends Controller
             $this->render('partials/not-found');
             return;
         }
-        try{$workflowService->assertEditable($id,$userId);}catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'officer.edit within the active workflow context']);return;}
-
         $pdo=Database::pdo();
 
         $stmt=$pdo->prepare('SELECT * FROM officer WHERE id=?');
@@ -105,6 +103,12 @@ final class OfficerController extends Controller
             $this->render('partials/not-found');
             return;
         }
+
+        $directAdminEdit=OfficerAdminDirectEditPolicy::supportsStatus((string)$officer['approval_status'])&&OfficerAdminDirectEditPolicy::allowed();
+        $editRequestService=new OfficerEditRequestService($pdo);$returnedEditRequest=$editRequestService->returnedForMaker($id,$userId);
+        $editRequestMode=!$directAdminEdit&&(string)$officer['approval_status']==='APPROVED'&&($returnedEditRequest!==null||$editRequestService->canInitiate($id,$userId));
+        if(!$directAdminEdit&&!$editRequestMode){try{$workflowService->assertEditable($id,$userId);}catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Officer editing within the active workflow context']);return;}}
+        if($returnedEditRequest!==null&&is_array($returnedEditRequest['proposed']??null))$officer=array_replace($officer,$returnedEditRequest['proposed']);
 
         foreach(['primary_mobile','alternative_mobile'] as $mobileField){
             $normalized=OfficerPersonnelValidator::normalizeSriLankanMobile(
@@ -142,8 +146,6 @@ final class OfficerController extends Controller
         $availableOffices=ScopeService::scopedOffices($userId);
         $initialOfficeAssignment=(new OfficerOfficeAssignmentService($pdo))
             ->initialForOfficer($id);
-        $directAdminEdit=OfficerAdminDirectEditPolicy::supportsStatus((string)$officer['approval_status'])&&OfficerAdminDirectEditPolicy::allowed();
-
         $this->render(
             'officers/edit',
             compact(
@@ -156,14 +158,16 @@ final class OfficerController extends Controller
                 'civilStatuses',
                 'availableOffices',
                 'initialOfficeAssignment',
-                'directAdminEdit'
+                'directAdminEdit',
+                'editRequestMode',
+                'returnedEditRequest'
             )
         );
     }
 
     public function update(string $id): void
     {
-        Auth::requirePermission('officer.edit');
+        if(!Auth::can('officer.edit')&&!Auth::can('officer.edit-request')){http_response_code(403);$this->render('partials/forbidden',['permission'=>'officer profile editing']);return;}
         Csrf::validate();
 
         $userId=(string)Auth::user()['id'];
@@ -187,7 +191,10 @@ final class OfficerController extends Controller
             return;
         }
 
-        try{$workflowService->assertEditable($id,$userId);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id);}
+        $directAdminEdit=OfficerAdminDirectEditPolicy::supportsStatus((string)$current['approval_status'])&&OfficerAdminDirectEditPolicy::allowed();
+        $editRequestService=new OfficerEditRequestService($pdo);$returnedRequestId=trim((string)($_POST['officer_edit_request_id']??''));
+        $editRequestMode=!$directAdminEdit&&(string)$current['approval_status']==='APPROVED'&&$editRequestService->canInitiate($id,$userId);
+        if(!$directAdminEdit&&!$editRequestMode){try{$workflowService->assertEditable($id,$userId);}catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id);}}
 
         $fail=function(string $message) use($id): void {
             $this->flash('danger',$message);
@@ -521,11 +528,13 @@ final class OfficerController extends Controller
 
         $params=array_values($data);
 
-        $ownTransaction=!$pdo->inTransaction();
+        $ownTransaction=!$pdo->inTransaction();$editRequestSubmitted=false;
         if($ownTransaction)$pdo->beginTransaction();
         try{
-            if(OfficerAdminDirectEditPolicy::supportsStatus((string)$current['approval_status'])&&OfficerAdminDirectEditPolicy::allowed()){
+            if($directAdminEdit){
                 (new OfficerAdminDirectEditService($pdo))->update($id,$data,$expectedVersion,$userId);
+            }elseif($editRequestMode){
+                $editRequestService->submit($id,$data,$expectedVersion,$userId,$returnedRequestId!==''?$returnedRequestId:null);$editRequestSubmitted=true;
             }else{
                 $params[]=$userId;
                 $params[]=$id;
@@ -567,6 +576,8 @@ final class OfficerController extends Controller
         }
 
         if(
+            !$editRequestSubmitted
+            &&
             $newPhotoName!==null
             &&
             !empty($current['photograph_path'])
@@ -583,7 +594,7 @@ final class OfficerController extends Controller
             }
         }
 
-        $this->flash('success',OfficerAdminDirectEditPolicy::supportsStatus((string)$current['approval_status'])&&OfficerAdminDirectEditPolicy::allowed()?'Officer updated successfully.':'Officer details updated successfully.');
+        $this->flash('success',$directAdminEdit?'Officer updated successfully.':($editRequestSubmitted?'Officer edit request submitted for approval.':'Officer details updated successfully.'));
 
         redirect('/hr/officers/'.$id);
     }
@@ -686,6 +697,46 @@ final class OfficerController extends Controller
     public function approve(string $id): void { Auth::requirePermission('officer.approve'); Csrf::validate(); try{(new OfficerWorkflowService(Database::pdo()))->approve($id,(string)Auth::user()['id']);$this->flash('success','Officer approved.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());} redirect('/hr/officers'); }
     public function reconcileInitialOfficeAndApprove(string $id):void{Auth::requirePermission('officer.approve');Csrf::validate();try{(new OfficerWorkflowService(Database::pdo()))->reconcileInitialOfficeAndApprove($id,(string)Auth::user()['id']);$this->flash('success','Officer approved using the existing approved Primary Office assignment.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());}redirect('/hr/officers/'.$id);}
     public function returnForCorrection(string $id):void{Auth::requirePermission('officer.return');Csrf::validate();try{(new OfficerWorkflowService(Database::pdo()))->returnForCorrection($id,(string)($_POST['reason']??''),(string)Auth::user()['id']);$this->flash('success','Officer returned for correction.');}catch(\Throwable $e){$this->flash('danger',$e->getMessage());}redirect('/hr/officers/'.$id);}
+
+    public function editRequests():void
+    {
+        if(!Auth::can('officer.edit-request')&&!Auth::can('officer.edit-approve')){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Officer edit request access']);return;}
+        try{$requests=(new OfficerEditRequestService(Database::pdo()))->listForActor((string)Auth::user()['id']);}
+        catch(\DomainException $e){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}
+        $this->render('officers/edit_requests/index',compact('requests'));
+    }
+
+    public function reviewEditRequest(string $requestId):void
+    {
+        Auth::requirePermission('officer.edit-approve');
+        try{$request=(new OfficerEditRequestService(Database::pdo()))->review($requestId,(string)Auth::user()['id']);}
+        catch(\DomainException $e){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}
+        $this->render('officers/edit_requests/review',compact('request'));
+    }
+
+    public function approveEditRequest(string $requestId):void
+    {
+        Auth::requirePermission('officer.edit-approve');Csrf::validate();
+        try{(new OfficerEditRequestService(Database::pdo()))->approve($requestId,(string)Auth::user()['id']);$this->flash('success','Officer profile changes approved and applied.');}
+        catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/hr/officer-edit-requests/'.$requestId);
+    }
+
+    public function returnEditRequest(string $requestId):void
+    {
+        Auth::requirePermission('officer.edit-approve');Csrf::validate();
+        try{(new OfficerEditRequestService(Database::pdo()))->returnForCorrection($requestId,(string)($_POST['reason']??''),(string)Auth::user()['id']);$this->flash('success','Officer edit request returned for correction.');}
+        catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/hr/officer-edit-requests/'.$requestId);
+    }
+
+    public function rejectEditRequest(string $requestId):void
+    {
+        Auth::requirePermission('officer.edit-approve');Csrf::validate();
+        try{(new OfficerEditRequestService(Database::pdo()))->reject($requestId,(string)($_POST['reason']??''),(string)Auth::user()['id']);$this->flash('success','Officer edit request rejected.');}
+        catch(\DomainException $e){$this->flash('danger',$e->getMessage());}
+        redirect('/hr/officer-edit-requests/'.$requestId);
+    }
 
     public function assignOffice(string $id):void
     {
