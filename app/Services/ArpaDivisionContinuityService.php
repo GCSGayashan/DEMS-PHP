@@ -63,6 +63,7 @@ final class ArpaDivisionContinuityService
               FROM arpa_division_appointment a
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               WHERE a.arpa_division_location_id IN({$marks}) AND a.id<>COALESCE(?, '')
+                AND a.request_id<>COALESCE(?, '')
                 AND (a.legacy_history_only=0 OR c.id IS NOT NULL)
                 AND a.effective_from IS NOT NULL
                 AND (a.effective_from>=? OR c.effective_to IS NULL OR c.effective_to>=?)
@@ -77,7 +78,7 @@ final class ArpaDivisionContinuityService
                 AND r.requested_effective_from IS NOT NULL
                 AND (r.requested_effective_from>=? OR r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)";
         $params=array_merge(
-            $divisionIds,[$excludeAppointmentId,self::BASELINE,self::BASELINE],
+            $divisionIds,[$excludeAppointmentId,$excludeRequestId,self::BASELINE,self::BASELINE],
             $divisionIds,[$excludeRequestId],ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES,[self::BASELINE,self::BASELINE]
         );
         $stmt=$this->pdo->prepare($sql);$stmt->execute($params);$byDivision=[];

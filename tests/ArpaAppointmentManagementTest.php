@@ -67,7 +67,7 @@ final class ArpaAppointmentManagementTest
         $this->same('RETURNED',ArpaAppointmentRules::transition('ASC_APPROVED','REJECT','DISTRICT')['status'],'District Subject Officer rejection returns to ASC correction');
         $this->same('RETURNED',ArpaAppointmentRules::transition('DISTRICT_VERIFIED','REJECT','DISTRICT')['status'],'District Administrator rejection returns to ASC correction');
         $this->same('RETURNED',ArpaAppointmentRules::transition('DISTRICT_APPROVED','REJECT','NATIONAL')['status'],'National Subject Officer rejection returns to ASC correction');
-        $this->same('NATIONAL_APPROVED',ArpaAppointmentRules::divisionRequestTransition('END','ASC_VERIFIED','APPROVE','ASC')['status'],'End Appointment reaches the existing terminal status at ASC approval');
+        $this->same('ASC_APPROVED',ArpaAppointmentRules::divisionRequestTransition('END','ASC_VERIFIED','APPROVE','ASC')['status'],'End Appointment becomes operational at ASC approval and continues governance');
         $this->same('ASC_APPROVED',ArpaAppointmentRules::divisionRequestTransition('APPOINTMENT','ASC_VERIFIED','APPROVE','ASC')['status'],'New Appointment still continues beyond ASC approval');
         $this->throws(fn()=>ArpaAppointmentRules::transition('ASC_VERIFIED','APPROVE','DISTRICT'),'cross-level approval is rejected');
         $this->throws(fn()=>ArpaAppointmentRules::transition('CREATED','APPROVE','NATIONAL'),'draft cannot be approved');
@@ -158,6 +158,13 @@ final class ArpaAppointmentManagementTest
             $service->workflow('division',$request,'VERIFY','ASC',null,$creator);
             $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','ASC',null,$creator),'same Subject Officer may create and verify but cannot administrator-approve');
             $service->workflow('division',$request,'APPROVE','ASC',null,$approve);
+            $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment WHERE request_id='{$request}'"),'ASC approval materializes exactly one operational appointment');
+            $this->same('ASC_APPROVED',(string)$this->value("SELECT workflow_status FROM arpa_division_appointment_request WHERE id='{$request}'"),'ASC-approved operational appointment retains its governance stage');
+            $ascApprovedProfile=(new \App\Services\OfficerProfileService($this->pdo))->profile($officer,[],[(string)$location['asc_id']]);
+            $this->same(true,in_array($request,array_column($ascApprovedProfile['current_appointments'],'request_id'),true),'Officer Profile includes an ASC-approved canonical current appointment');
+            $profileAppointment=array_values(array_filter($ascApprovedProfile['current_appointments'],fn($row)=>(string)$row['request_id']===$request))[0];
+            $this->same('ASC_APPROVED',$profileAppointment['workflow_status'],'Officer Profile keeps Approval Status separate from Current operational status');
+            $this->same('Native Appointment',$profileAppointment['display_origin'],'Officer Profile labels the materialized row as a Native Appointment');
             $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE request_id='{$request}' AND review_stage='DISTRICT'"),'Division request has no obsolete District Review record');
             $service->workflow('division',$request,'VERIFY','DISTRICT','District verification remarks',$verify);
             $this->same('DISTRICT_VERIFIED',(string)$this->value("SELECT workflow_status FROM arpa_division_appointment_request WHERE id='{$request}'"),'District verification succeeds without a prior District Review record');
@@ -171,7 +178,7 @@ final class ArpaAppointmentManagementTest
             $this->throws(fn()=>$service->workflow('division',$request,'APPROVE','NATIONAL',null,$verify),'National verifier cannot final approve');
             $service->workflow('division',$request,'APPROVE','NATIONAL',null,$approve);
             $appointment=(string)$this->value("SELECT id FROM arpa_division_appointment WHERE request_id='{$request}'");
-            $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment WHERE id='{$appointment}'"),'final approval creates one operational appointment');
+            $this->same(1,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment WHERE id='{$appointment}'"),'later governance approval does not duplicate the ASC-materialized appointment');
             $actingRequest=$service->createDivisionAppointmentRequest(['officer_id'=>$officer,'appointment_type'=>'ACTING','asc_location_id'=>$location['asc_id'],'arpa_division_location_id'=>$actingDivision,'effective_from'=>$today],$creator);
             $this->approveRequest($service,'division',$actingRequest,$creator,$verify,$approve);
             $reason=(string)$this->value("SELECT id FROM arpa_appointment_end_reason WHERE system_key='TRANSFER'");
@@ -192,12 +199,15 @@ final class ArpaAppointmentManagementTest
             $service->workflow('division',$endRequest,'VERIFY','ASC',null,$creator);
             $this->same(0,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id='{$endRequest}'"),'ASC-verified End Appointment keeps the canonical appointment open');
             $endStatus=$service->workflow('division',$endRequest,'APPROVE','ASC',null,$approve);
-            $this->same('NATIONAL_APPROVED',$endStatus,'ASC Administrator approval makes the End Appointment terminal');
+            $this->same('ASC_APPROVED',$endStatus,'ASC Administrator approval applies the End Appointment operationally');
             $this->same(2,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id='{$endRequest}'"),'ending Permanent creates independent source and dependent closure events');
             $this->same(2,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id='{$endRequest}' AND letter_date='{$today}'"),'backdated/removal letter date hook follows effective-to');
             $this->same(1,$this->scalar("SELECT COUNT(*) FROM ".\App\Services\ArpaAppointmentReadService::vacantDivisionSource()." v WHERE v.id='{$location['arpa_id']}'"),'ASC-approved End effective today releases the Division through the canonical vacancy source');
-            $this->throws(fn()=>$service->workflow('division',$endRequest,'VERIFY','DISTRICT',null,$verify),'terminal End Appointment cannot enter District review');
-            $this->same(2,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id='{$endRequest}'"),'repeated workflow attempt cannot duplicate canonical closures');
+            $this->same('DISTRICT_VERIFIED',$service->workflow('division',$endRequest,'VERIFY','DISTRICT',null,$verify),'operational End Appointment continues to District verification');
+            $this->same('DISTRICT_APPROVED',$service->workflow('division',$endRequest,'APPROVE','DISTRICT',null,$approve),'operational End Appointment continues to District approval');
+            $this->same('NATIONAL_VERIFIED',$service->workflow('division',$endRequest,'VERIFY','NATIONAL',null,$verify),'operational End Appointment continues to National verification');
+            $this->same('NATIONAL_APPROVED',$service->workflow('division',$endRequest,'APPROVE','NATIONAL',null,$approve),'End Appointment reaches final governance approval');
+            $this->same(2,$this->scalar("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id='{$endRequest}'"),'later governance stages cannot duplicate canonical closures');
 
             $subject=(string)$this->value("SELECT id FROM subject_master WHERE system_key='AGRARIAN_BANK'");
             $subjectRequest=$service->createSubjectAssignmentRequest(['officer_id'=>$officer,'asc_location_id'=>$location['asc_id'],'subject_id'=>$subject,'effective_from'=>$tomorrow],$creator);

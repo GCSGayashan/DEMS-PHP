@@ -43,7 +43,16 @@ final class ArpaAppointmentReadService
                      NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.location_snapshot_json,'$.province.name_en')),'null') province_name,
                      NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.location_snapshot_json,'$.district.name_en')),'null') district_name,
                      COALESCE(NULLIF(submitted_user.display_name,''),submitted_user.username,NULLIF(creator.display_name,''),creator.username) submitted_by_name,
-                     submitted_action.action_at submitted_at
+                     submitted_action.action_at submitted_at,
+                     canonical.id canonical_appointment_id,canonical.effective_from canonical_effective_from,
+                     canonical_closure.id canonical_closure_id,canonical_closure.effective_to canonical_effective_to,
+                     EXISTS(SELECT 1 FROM arpa_division_appointment_closure end_closure
+                            WHERE end_closure.request_id=r.id) materialized_end_closure,
+                     (SELECT source_a.effective_from FROM arpa_division_appointment source_a
+                      WHERE source_a.id=r.source_appointment_id) source_effective_from,
+                     (SELECT source_c.effective_to FROM arpa_division_appointment_closure source_c
+                      WHERE source_c.request_id=r.id AND source_c.appointment_id=r.source_appointment_id
+                      LIMIT 1) materialized_end_effective_to
               FROM arpa_division_appointment_request r
               JOIN officer o ON o.id=r.officer_id
               LEFT JOIN designation d ON d.id=o.primary_designation_id
@@ -71,6 +80,8 @@ final class ArpaAppointmentReadService
               LEFT JOIN arpa_appointment_workflow_action submitted_action ON submitted_action.id=latest_submit.submitted_action_id
               LEFT JOIN system_user submitted_user ON submitted_user.id=submitted_action.user_id
               LEFT JOIN system_user creator ON creator.id=r.created_by
+              LEFT JOIN arpa_division_appointment canonical ON canonical.request_id=r.id
+              LEFT JOIN arpa_division_appointment_closure canonical_closure ON canonical_closure.appointment_id=canonical.id
               WHERE r.id=?";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$requestId]);
         return $stmt->fetch()?:null;

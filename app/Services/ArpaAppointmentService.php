@@ -325,12 +325,14 @@ final class ArpaAppointmentService
             if (strtoupper($action) === 'APPROVE') {
                 $this->assertMakerChecker($history, $requestId, (string)$request['created_by'], strtoupper($stage), $actorId);
             }
-            if ($transition['status'] === 'NATIONAL_APPROVED') {
-                if ($entity === 'division') {
-                    $this->finalizeDivision($request, $actorId);
-                } else {
-                    $this->finalizeSubject($request, $actorId);
-                }
+            $ascOperational=$entity==='division'
+                &&$transition['status']==='ASC_APPROVED'
+                &&in_array((string)$request['request_type'],['APPOINTMENT','END'],true);
+            if($ascOperational){
+                $this->materializeDivisionOperational($request,$actorId,$this->databaseTimestamp());
+            }elseif($transition['status']==='NATIONAL_APPROVED'){
+                if($entity==='division'&&(string)$request['request_type']==='TRANSFER')$this->finalizeDivision($request,$actorId);
+                elseif($entity==='subject')$this->finalizeSubject($request,$actorId);
             }
             $final = $transition['status'] === 'NATIONAL_APPROVED';
             $this->pdo->prepare("UPDATE {$table} SET workflow_status=?,updated_by=?,updated_at=NOW(),finalized_by=" . ($final ? '?' : 'finalized_by') . ',finalized_at=' . ($final ? 'NOW()' : 'finalized_at') . ',version=version+1 WHERE id=?')
@@ -402,24 +404,95 @@ final class ArpaAppointmentService
     private function finalizeDivision(array $request, string $actorId): void
     {
         $this->arpaOfficer((string)$request['officer_id'], true);
+        $approvedAt=$this->databaseTimestamp();
         if ($request['request_type'] === 'APPOINTMENT') {
-            $this->insertAppointment($request, $actorId);
+            $this->insertAppointment($request,$actorId,$approvedAt);
             return;
         }
         $source = $this->appointment((string)$request['source_appointment_id'], true);
         if ($request['request_type'] === 'END') {
-            $this->closeAppointmentAndDependents($source, $request, $actorId, 'DIRECT');
+            $this->closeAppointmentAndDependents($source,$request,$actorId,'DIRECT',$approvedAt);
             return;
         }
         if ($request['request_type'] === 'TRANSFER') {
-            $this->closeAppointmentAndDependents($source, $request, $actorId, 'TRANSFER');
-            $this->insertAppointment($request, $actorId);
+            $this->closeAppointmentAndDependents($source,$request,$actorId,'TRANSFER',$approvedAt);
+            $this->insertAppointment($request,$actorId,$approvedAt);
             return;
         }
         throw new DomainException('Unsupported division request type.');
     }
 
-    private function insertAppointment(array $request, string $actorId): void
+    /**
+     * Materialize an existing native request without changing its workflow.
+     * The ASC approval identity and timestamp come from recorded workflow
+     * history; callers cannot substitute the CLI/backfill executor.
+     *
+     * @return array{request_id:string,request_type:string,appointment_id:?string,appointment_created:bool,closures_created:int,approved_by:string,approved_at:?string,already_materialized:bool}
+     */
+    public function materializeApprovedNativeDivisionRequest(string $requestId):array
+    {
+        return $this->transaction(function()use($requestId):array{
+            $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=? FOR UPDATE');$s->execute([$requestId]);$request=$s->fetch();
+            if(!$request||(string)$request['record_origin']!=='NATIVE'||$request['deleted_at']!==null)throw new DomainException('Only a non-deleted NATIVE ARPA Division request can be backfilled.');
+            if(!in_array((string)$request['request_type'],['APPOINTMENT','END'],true))throw new DomainException('Only APPOINTMENT and END requests use ASC-approved operational materialization.');
+            if(!in_array((string)$request['workflow_status'],['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED','NATIONAL_APPROVED'],true))throw new DomainException('The request has not reached ASC approval.');
+            $existing=$this->existingDivisionMaterialization($request);
+            if($existing!==null)return $existing;
+            $approval=$this->ascApprovalEvidence($requestId);
+            if($approval===null)throw new DomainException('The recorded ASC approval actor is missing.');
+            return $this->materializeDivisionOperational($request,(string)$approval['user_id'],$approval['action_at']?:null);
+        });
+    }
+
+    /** @return array{request_id:string,request_type:string,appointment_id:?string,appointment_created:bool,closures_created:int,approved_by:string,approved_at:?string,already_materialized:bool} */
+    private function materializeDivisionOperational(array $request,string $approvedBy,?string $approvedAt):array
+    {
+        $existing=$this->existingDivisionMaterialization($request);
+        if($existing!==null)return $existing;
+        $this->arpaOfficer((string)$request['officer_id'],true);
+        if((string)$request['request_type']==='APPOINTMENT'){
+            $appointmentId=$this->insertAppointment($request,$approvedBy,$approvedAt);
+            $closures=(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id=?',[(string)$request['id']]);
+            return $this->materializationResult($request,$appointmentId,true,$closures,$approvedBy,$approvedAt,false);
+        }
+        if((string)$request['request_type']==='END'){
+            if(empty($request['source_appointment_id']))throw new DomainException('The END request does not identify a source canonical appointment.');
+            $source=$this->appointment((string)$request['source_appointment_id'],true);
+            $before=(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id=?',[(string)$request['id']]);
+            $this->closeAppointmentAndDependents($source,$request,$approvedBy,'DIRECT',$approvedAt);
+            $after=(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id=?',[(string)$request['id']]);
+            return $this->materializationResult($request,(string)$source['id'],false,$after-$before,$approvedBy,$approvedAt,false);
+        }
+        throw new DomainException('Unsupported ASC-approved operational request type.');
+    }
+
+    /** @return array<string,mixed>|null */
+    private function existingDivisionMaterialization(array $request):?array
+    {
+        if((string)$request['request_type']==='APPOINTMENT'){
+            $s=$this->pdo->prepare('SELECT id,approved_by,approved_at FROM arpa_division_appointment WHERE request_id=? FOR UPDATE');$s->execute([$request['id']]);$row=$s->fetch();
+            return $row?$this->materializationResult($request,(string)$row['id'],false,0,(string)$row['approved_by'],$row['approved_at']?:null,true):null;
+        }
+        if((string)$request['request_type']==='END'){
+            $s=$this->pdo->prepare('SELECT appointment_id,approved_by,approved_at FROM arpa_division_appointment_closure WHERE request_id=? ORDER BY id LIMIT 1 FOR UPDATE');$s->execute([$request['id']]);$row=$s->fetch();
+            return $row?$this->materializationResult($request,(string)$row['appointment_id'],false,0,(string)$row['approved_by'],$row['approved_at']?:null,true):null;
+        }
+        return null;
+    }
+
+    /** @return array<string,mixed>|null */
+    private function ascApprovalEvidence(string $requestId):?array
+    {
+        $s=$this->pdo->prepare("SELECT user_id,action_at FROM arpa_appointment_workflow_action WHERE request_id=? AND action='APPROVE' AND stage='ASC' AND new_status IN('ASC_APPROVED','NATIONAL_APPROVED') ORDER BY id DESC LIMIT 1");$s->execute([$requestId]);return $s->fetch()?:null;
+    }
+
+    /** @return array{request_id:string,request_type:string,appointment_id:?string,appointment_created:bool,closures_created:int,approved_by:string,approved_at:?string,already_materialized:bool} */
+    private function materializationResult(array $request,?string $appointmentId,bool $created,int $closures,string $approvedBy,?string $approvedAt,bool $already):array
+    {
+        return ['request_id'=>(string)$request['id'],'request_type'=>(string)$request['request_type'],'appointment_id'=>$appointmentId,'appointment_created'=>$created,'closures_created'=>$closures,'approved_by'=>$approvedBy,'approved_at'=>$approvedAt,'already_materialized'=>$already];
+    }
+
+    private function insertAppointment(array $request,string $actorId,?string $approvedAt=null):string
     {
         $officer = $this->arpaOfficer((string)$request['officer_id'], true);
         $effectiveFrom = (string)$request['requested_effective_from'];
@@ -440,7 +513,7 @@ final class ArpaAppointmentService
         if ($this->hasExclusiveSubjectAt((string)$request['officer_id'], $effectiveFrom)) {
             throw new DomainException('The officer has an exclusive Bank, Sales Shop, or Sithamu assignment. Close it first.');
         }
-        $sql = 'INSERT INTO arpa_division_appointment(id,request_id,officer_id,appointment_type,service_permanency_snapshot,province_location_id_snapshot,district_location_id_snapshot,asc_location_id,arpa_division_location_id,province_dad_snapshot,province_name_snapshot,district_dad_snapshot,district_name_snapshot,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())';
+        $sql = 'INSERT INTO arpa_division_appointment(id,request_id,officer_id,appointment_type,service_permanency_snapshot,province_location_id_snapshot,district_location_id_snapshot,asc_location_id,arpa_division_location_id,province_dad_snapshot,province_name_snapshot,district_dad_snapshot,district_name_snapshot,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
         $appointmentId=$this->uuid();
         $this->pdo->prepare($sql)->execute([
             $appointmentId, $request['id'], $request['officer_id'], $type, $officer['arpa_service_permanency'],
@@ -448,37 +521,38 @@ final class ArpaAppointmentService
             $snapshot['province']['dad_number'] ?? null, $snapshot['province']['name_en'] ?? null,
             $snapshot['district']['dad_number'] ?? null, $snapshot['district']['name_en'] ?? null,
             $snapshot['asc']['dad_number'], $snapshot['asc']['name_en'], $snapshot['arpa']['dad_number'], $snapshot['arpa']['name_en'],
-            $this->json($snapshot), $effectiveFrom, $actorId,
+            $this->json($snapshot), $effectiveFrom, $actorId,$approvedAt,
         ]);
         if($historicalGapEnd!==null){
             if(empty($request['end_reason_id']))throw new DomainException('End Reason is required when filling a bounded historical gap.');
             $appointment=$this->appointment($appointmentId,true);
-            $this->insertAppointmentClosure($appointment,$request,$historicalGapEnd,$actorId,'DIRECT');
+            $this->insertAppointmentClosure($appointment,$request,$historicalGapEnd,$actorId,'DIRECT',$approvedAt);
         }
+        return $appointmentId;
     }
 
-    private function closeAppointmentAndDependents(array $source, array $request, string $actorId, string $kind): void
+    private function closeAppointmentAndDependents(array $source,array $request,string $actorId,string $kind,?string $approvedAt=null):void
     {
         $end = (string)$request['requested_effective_to'];
         if ($end < $source['effective_from']) {
             throw new DomainException('Effective to cannot precede the source appointment.');
         }
         $this->assertNotClosed('arpa_division_appointment_closure', 'appointment_id', (string)$source['id']);
-        $this->insertAppointmentClosure($source, $request, $end, $actorId, $kind);
+        $this->insertAppointmentClosure($source,$request,$end,$actorId,$kind,$approvedAt);
         if ($source['appointment_type'] !== 'PERMANENT') {
             return;
         }
         foreach ($this->dependentAppointments($source, $end, true) as $dependent) {
             $dependentEnd = max($end, (string)$dependent['effective_from']);
-            $this->insertAppointmentClosure($dependent, $request, $dependentEnd, $actorId, 'DEPENDENT');
+            $this->insertAppointmentClosure($dependent,$request,$dependentEnd,$actorId,'DEPENDENT',$approvedAt);
         }
     }
 
-    private function insertAppointmentClosure(array $appointment, array $request, string $effectiveTo, string $actorId, string $kind): void
+    private function insertAppointmentClosure(array $appointment,array $request,string $effectiveTo,string $actorId,string $kind,?string $approvedAt=null):void
     {
         $snapshot = ['appointment_id' => $appointment['id'], 'type' => $appointment['appointment_type'], 'effective_from' => $appointment['effective_from'], 'effective_to' => $effectiveTo];
-        $this->pdo->prepare('INSERT INTO arpa_division_appointment_closure(id,appointment_id,request_id,effective_to,end_reason_id,closure_kind,remarks,context_snapshot_json,approved_by,approved_at,letter_date) VALUES(?,?,?,?,?,?,?,?,?,NOW(),?)')
-            ->execute([$this->uuid(), $appointment['id'], $request['id'], $effectiveTo, $request['end_reason_id'], $kind, $this->nullText($request['request_remarks'] ?? null), $this->json($snapshot), $actorId, $effectiveTo]);
+        $this->pdo->prepare('INSERT INTO arpa_division_appointment_closure(id,appointment_id,request_id,effective_to,end_reason_id,closure_kind,remarks,context_snapshot_json,approved_by,approved_at,letter_date) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+            ->execute([$this->uuid(),$appointment['id'],$request['id'],$effectiveTo,$request['end_reason_id'],$kind,$this->nullText($request['request_remarks']??null),$this->json($snapshot),$actorId,$approvedAt,$effectiveTo]);
     }
 
     private function finalizeSubject(array $request, string $actorId): void
@@ -739,6 +813,16 @@ final class ArpaAppointmentService
             if ($owned && $this->pdo->inTransaction()) $this->pdo->rollBack();
             throw $e;
         }
+    }
+
+    private function scalar(string $sql,array $params=[]):mixed
+    {
+        $stmt=$this->pdo->prepare($sql);$stmt->execute($params);return $stmt->fetchColumn();
+    }
+
+    private function databaseTimestamp():string
+    {
+        return (string)$this->pdo->query('SELECT CURRENT_TIMESTAMP')->fetchColumn();
     }
 
     private function uuid(): string

@@ -23,15 +23,18 @@ final class NotificationBackfillServiceTest
         $this->same('arpa.appointment.asc-verify',NotificationBackfillService::arpaActionFor('division','END','SUBMITTED')[0]??null,'END submitted routes to ASC verifier');
         $this->same('arpa.appointment.asc-approve',NotificationBackfillService::arpaActionFor('division','END','ASC_VERIFIED')[0]??null,'END ASC verified routes to ASC approver');
         $this->same(true,NotificationBackfillService::isArpaCorrection('RETURNED'),'END returned is backfillable as a maker correction action');
-        foreach(['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'] as $status){
-            $this->same(true,NotificationBackfillService::isDivisionEndAfterTerminalAscApproval('division','END',$status),"END {$status} is skipped after terminal ASC approval");
-            $this->same(null,NotificationBackfillService::arpaActionFor('division','END',$status),"END {$status} has no approver route");
+        foreach([
+            'ASC_APPROVED'=>'arpa.appointment.district-verify',
+            'DISTRICT_VERIFIED'=>'arpa.appointment.district-approve',
+            'DISTRICT_APPROVED'=>'arpa.appointment.national-verify',
+            'NATIONAL_VERIFIED'=>'arpa.appointment.national-approve',
+        ] as $status=>$permission){
+            $this->same($permission,NotificationBackfillService::arpaActionFor('division','END',$status)[0]??null,"END {$status} routes to the next governance stage");
         }
         $this->same('arpa.appointment.district-verify',NotificationBackfillService::arpaActionFor('division','APPOINTMENT','ASC_APPROVED')[0]??null,'normal appointment ASC approval still routes to District verification');
 
         $before=(int)$this->pdo->query('SELECT COUNT(*) FROM system_notification')->fetchColumn();$report=(new NotificationBackfillService($this->pdo))->run(false);$after=(int)$this->pdo->query('SELECT COUNT(*) FROM system_notification')->fetchColumn();
         $this->same($before,$after,'dry-run writes no notifications');
-        $this->same(true,array_key_exists('arpa_end_terminal_skipped',$report),'dry-run reports terminal END rows skipped');
         (new NotificationBackfillService($this->pdo))->run(true);
         $this->same(0,$this->notificationCount($special,null),'backfill does not create a standalone notification for a User Account Request initial Office assignment');
         $this->recipientBehavior();

@@ -29,7 +29,9 @@ final class ArpaAppointmentDisplayPresentation
 
         return [
             'display_status'=>$status,
-            'display_origin'=>(string)($row['record_origin']??'')==='LEGACY_IMPORT'?'Imported Record':'Native Record',
+            'display_origin'=>(string)($row['record_origin']??'')==='LEGACY_IMPORT'
+                ?'Imported Record'
+                :($sourceKind==='RESERVATION'?'Native Workflow / Reservation':'Native Appointment'),
             'exception_labels'=>$exception?self::exceptionLabels($row['legacy_exception_codes_json']??[]):[],
         ];
     }

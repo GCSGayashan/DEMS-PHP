@@ -277,8 +277,13 @@ final class ArpaAppointmentOperationalViewsTest
             $approvedEnd=$service->createEndRequest($scheduled,$future,$reason,'Future vacancy boundary',$this->actor);
             $service->workflow('division',$approvedEnd,'SUBMIT','CREATOR',null,$this->actor);
             $service->workflow('division',$approvedEnd,'VERIFY','ASC',null,$this->actor);
-            $this->same('NATIONAL_APPROVED',$service->workflow('division',$approvedEnd,'APPROVE','ASC',null,$ascApprover),'ASC approval terminates an End Appointment without District or National workflow');
+            $this->same('ASC_APPROVED',$service->workflow('division',$approvedEnd,'APPROVE','ASC',null,$ascApprover),'ASC approval applies the End Appointment while governance continues');
             $this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id='{$scheduled}' AND request_id='{$approvedEnd}'")->fetchColumn(),'ASC approval creates exactly one canonical closure');
+            $this->same('DISTRICT_VERIFIED',$service->workflow('division',$approvedEnd,'VERIFY','DISTRICT',null,$this->actor),'END may proceed to District verification after operational closure');
+            $this->same('DISTRICT_APPROVED',$service->workflow('division',$approvedEnd,'APPROVE','DISTRICT',null,$ascApprover),'END may proceed to District approval without another closure');
+            $this->same('NATIONAL_VERIFIED',$service->workflow('division',$approvedEnd,'VERIFY','NATIONAL',null,$this->actor),'END may proceed to National verification');
+            $this->same('NATIONAL_APPROVED',$service->workflow('division',$approvedEnd,'APPROVE','NATIONAL',null,$ascApprover),'END completes final governance approval');
+            $this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id='{$scheduled}' AND request_id='{$approvedEnd}'")->fetchColumn(),'District and National governance do not duplicate the closure');
             $this->same(false,$this->vacantPageSourceContains($division),'approved future end keeps the Division non-vacant before the Effective To date');
             $this->same(true,in_array($division,array_column($read->vacantDivisionsForAsc($this->actor,$asc,$future),'id'),true),'approved end becomes vacant on its Effective To date');
             $afterScheduledEnd=date('Y-m-d',strtotime($future.' +1 day'));

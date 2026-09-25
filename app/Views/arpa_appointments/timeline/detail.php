@@ -41,7 +41,7 @@ $hasTimelineConflict=array_intersect((array)($diagnostic['timeline_statuses']??[
 <div class="card mb-4"><div class="card-body">
   <h2 class="h5 mb-3">Canonical Appointment Timeline</h2>
   <div class="table-responsive"><table class="table table-bordered align-middle">
-    <thead><tr><th>Period</th><th>Officer / Appointment</th><th>Status</th><th>Workflow / Source</th><th>Action</th></tr></thead>
+    <thead><tr><th>Period</th><th>Officer / Appointment</th><th>Operational Status</th><th>Approval Status / Source</th><th>Action</th></tr></thead>
     <tbody>
     <?php if(!$entries): ?><tr><td colspan="5" class="text-center text-muted">No appointment timeline information is available.</td></tr><?php endif; ?>
     <?php foreach($entries as $entry): ?>
@@ -68,7 +68,7 @@ $hasTimelineConflict=array_intersect((array)($diagnostic['timeline_statuses']??[
           <td><strong><?= $date($entry['effective_from'],$dash) ?></strong> to <strong><?= $date($entry['effective_to'],$dash) ?></strong></td>
           <td><div class="fw-semibold"><?= e($entry['officer_number'].' - '.$entry['officer_name']) ?></div><div class="small text-muted"><?= e($entry['nic']?:$dash) ?></div><span class="badge text-bg-secondary mt-1"><?= e($typeLabel($entry['appointment_type'])) ?></span></td>
           <td><?= DataTableFormat::badge($state) ?><?= !empty($entry['overlap'])?' '.DataTableFormat::badge('Overlap'):'' ?><?php foreach($entry['exception_labels'] as $exceptionLabel): ?><div class="small text-warning"><?= e($exceptionLabel) ?></div><?php endforeach; ?></td>
-          <td><div><?= e($entry['workflow_status']?$typeLabel($entry['workflow_status']):'Operational') ?></div><div class="small text-muted"><?= e($entry['display_origin'].' / '.$typeLabel($entry['source_kind'])) ?></div><?php if($entry['end_reason']): ?><div class="small">End reason: <?= e($entry['end_reason']) ?></div><?php endif; ?></td>
+          <td><div><strong>Approval Status:</strong> <?= e($entry['workflow_status']?$typeLabel($entry['workflow_status']):'Operational') ?></div><div class="small text-muted"><strong>Source:</strong> <?= e($entry['display_origin']) ?></div><?php if($entry['end_reason']): ?><div class="small">End reason: <?= e($entry['end_reason']) ?></div><?php endif; ?></td>
           <td><?php if($entry['appointment_id']): ?><a class="btn btn-sm btn-outline-primary" href="<?= e(url('hr/arpa-appointments/divisions/'.$entry['appointment_id'])) ?>">View Appointment</a><?php else: ?><a class="btn btn-sm btn-outline-primary" href="<?= e(url('hr/arpa-appointments/requests/division/'.$entry['request_id'])) ?>">View Request</a><?php endif; ?></td>
         </tr>
       <?php endif; ?>

@@ -3,6 +3,14 @@ use App\Core\{Auth,Csrf,DataTableFormat};
 use App\Services\ArpaAppointmentRules;
 use App\Services\ArpaWorkflowQueuePolicy;
 $status=$request['workflow_status'];
+$hasCanonical=$entity==='division'&&!empty($request['canonical_appointment_id']);
+$hasEndClosure=$entity==='division'&&!empty($request['materialized_end_closure']);
+$operationalStatus=$hasCanonical
+    ?(!empty($request['canonical_effective_to'])&&$request['canonical_effective_to']<date('Y-m-d')?'ENDED':(($request['canonical_effective_from']??'')>date('Y-m-d')?'SCHEDULED':'CURRENT'))
+    :($hasEndClosure
+        ?(!empty($request['materialized_end_effective_to'])&&$request['materialized_end_effective_to']<date('Y-m-d')?'ENDED':(($request['source_effective_from']??'')>date('Y-m-d')?'SCHEDULED':'CURRENT'))
+        :'RESERVATION');
+$originLabel=($hasCanonical||$hasEndClosure)?'Native Appointment':'Native Workflow / Reservation';
 $administrativelyDeleted=$entity==='division'&&($request['deleted_at']??null)!==null;
 $step=match($status){
     'CREATED'=>['SUBMIT','CREATOR','arpa.appointment.submit','Submit'],
@@ -27,7 +35,7 @@ $editPermission=$entity==='subject'?'arpa.subject.create':'arpa.appointment.edit
 if($administrativelyDeleted){$canPrimary=false;$canReturn=false;$canReject=false;$canCorrectReturned=false;$canEditSubmitted=false;}
 $lastReturn=null;for($i=count($workflowHistory)-1;$i>=0;$i--){if(in_array($workflowHistory[$i]['action'],['RETURN_FOR_CORRECTION','REJECT'],true)){$lastReturn=$workflowHistory[$i];break;}}
 ?>
-<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Review</div><h1><?= e(ucwords($entity).' '.ucwords(strtolower(str_replace('_',' ',$request['request_type'])))) ?> Request</h1><p>Check the officer, location, dates, and other assignment information.</p></div><div><?= DataTableFormat::badge($status) ?></div></div>
+<div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Review</div><h1><?= e(ucwords($entity).' '.ucwords(strtolower(str_replace('_',' ',$request['request_type'])))) ?> Request</h1><p>Check the officer, location, dates, and other assignment information.</p></div><div class="text-end"><div><span class="small text-muted">Operational Status</span> <?= DataTableFormat::badge($operationalStatus) ?></div><div class="mt-1"><span class="small text-muted">Approval Status</span> <?= DataTableFormat::badge($status) ?></div><div class="small text-muted mt-1"><?= e($originLabel) ?></div></div></div>
 <?php if($administrativelyDeleted): ?><div class="alert alert-secondary"><strong>ADMINISTRATIVELY DELETED</strong><br>This request is retained for audit visibility and is no longer actionable. Reason: <?= e($request['delete_reason']?:'Not recorded') ?></div><?php endif; ?>
 <?php if($status==='RETURNED'&&$lastReturn): ?><div class="alert alert-warning"><div class="d-flex flex-wrap justify-content-between gap-2"><strong>RETURNED FOR CORRECTION</strong><span><?= $lastReturn['action_at']?e(substr((string)$lastReturn['action_at'],0,16)):'Unavailable from legacy source' ?></span></div><div class="mt-2"><strong>Returned by:</strong> <?= e($lastReturn['performed_by']) ?> &middot; <strong>Level:</strong> <?= e($lastReturn['stage']) ?></div><div class="mt-1"><strong>Reason:</strong> <?= nl2br(e($lastReturn['comments'])) ?></div></div><?php endif; ?>
 <div class="row g-3"><div class="<?= $expandedDivisionReviewPage?'col-lg-8':'col-lg-7' ?>"><div class="form-section"><h2 class="h5">Original Agrarian Service Center Request</h2>

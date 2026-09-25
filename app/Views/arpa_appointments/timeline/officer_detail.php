@@ -25,7 +25,7 @@ $label=static fn(?string $value):string=>DataTableFormat::enumLabel((string)$val
 <div class="card mb-4"><div class="card-body">
   <h2 class="h5 mb-3">Canonical ARPA Appointments</h2>
   <div class="table-responsive"><table class="table table-bordered align-middle">
-    <thead><tr><th>Period</th><th>Appointment</th><th>Location</th><th>Workflow / State</th><th>Data Issues</th><th>Action</th></tr></thead>
+    <thead><tr><th>Period</th><th>Appointment</th><th>Location</th><th>Operational / Approval Status</th><th>Data Issues</th><th>Action</th></tr></thead>
     <tbody>
     <?php foreach($appointments as $appointment):
       $state=$appointment['display_status'];
@@ -34,7 +34,7 @@ $label=static fn(?string $value):string=>DataTableFormat::enumLabel((string)$val
         <td><strong><?= $date($appointment['effective_from'],'—') ?></strong> to <strong><?= $date($appointment['effective_to']) ?></strong></td>
         <td><span class="badge text-bg-secondary"><?= e($label($appointment['appointment_type'])) ?></span></td>
         <td><div class="fw-semibold"><?= e($appointment['arpa_dad'].' - '.$appointment['arpa_name']) ?></div><div class="small text-muted"><?= e($appointment['asc_dad'].' - '.$appointment['asc_name']) ?><?= $appointment['district_name']?' / '.e($appointment['district_name']):'' ?></div></td>
-        <td><?= DataTableFormat::badge($state) ?><div class="small mt-1"><?= e($label($appointment['workflow_status'])) ?> · <?= e($appointment['display_origin']) ?></div><?php foreach($appointment['exception_labels'] as $exceptionLabel): ?><div class="small text-warning"><?= e($exceptionLabel) ?></div><?php endforeach; ?></td>
+        <td><div><strong>Operational Status:</strong> <?= DataTableFormat::badge($state) ?></div><div class="small mt-1"><strong>Approval Status:</strong> <?= e($label($appointment['workflow_status'])) ?></div><div class="small text-muted"><strong>Source:</strong> <?= e($appointment['display_origin']) ?></div><?php foreach($appointment['exception_labels'] as $exceptionLabel): ?><div class="small text-warning"><?= e($exceptionLabel) ?></div><?php endforeach; ?></td>
         <td><?php if(!$appointment['issue_keys']): ?><span class="text-muted">None</span><?php else: ?><?php foreach($appointment['issue_keys'] as $key): ?><code class="d-block small"><?= e((string)$key) ?></code><?php endforeach; ?><?php endif; ?></td>
         <td><?php if($appointment['appointment_id']): ?><a class="btn btn-sm btn-outline-primary" href="<?= e(url('hr/arpa-appointments/divisions/'.$appointment['appointment_id'])) ?>">View Appointment</a><?php else: ?><a class="btn btn-sm btn-outline-primary" href="<?= e(url('hr/arpa-appointments/requests/division/'.$appointment['request_id'])) ?>">View Request</a><?php endif; ?></td>
       </tr>

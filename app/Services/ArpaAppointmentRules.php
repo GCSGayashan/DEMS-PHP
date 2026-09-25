@@ -98,15 +98,9 @@ final class ArpaAppointmentRules
         throw new DomainException("Action {$action} is not valid from {$status} at {$stage} stage.");
     }
 
-    /** END Appointment requests terminate at ASC Administrator approval. */
+    /** Division requests now share the full governance workflow. */
     public static function divisionRequestTransition(string $requestType,string $status,string $action,string $stage):array
     {
-        if(strtoupper($requestType)==='END'
-            &&$status==='ASC_VERIFIED'
-            &&strtoupper($action)==='APPROVE'
-            &&strtoupper($stage)==='ASC'){
-            return ['status'=>'NATIONAL_APPROVED','stage'=>'ASC'];
-        }
         return self::transition($status,$action,$stage);
     }
 
