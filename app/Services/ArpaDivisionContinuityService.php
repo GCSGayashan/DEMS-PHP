@@ -29,6 +29,7 @@ final class ArpaDivisionContinuityService
                   FROM arpa_division_appointment_request r
                   WHERE r.deleted_at IS NULL AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                     AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment canonical_a WHERE canonical_a.request_id=r.id)
                     AND r.requested_effective_from IS NOT NULL
                     AND (r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>='{$baseline}')";
         return "SELECT ordered.division_id,COUNT(*) period_count,
@@ -75,6 +76,7 @@ final class ArpaDivisionContinuityService
                 AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                 AND r.request_type IN('APPOINTMENT','TRANSFER')
                 AND r.workflow_status IN({$statuses})
+                AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment canonical_a WHERE canonical_a.request_id=r.id)
                 AND r.requested_effective_from IS NOT NULL
                 AND (r.requested_effective_from>=? OR r.request_type='TRANSFER' OR r.requested_effective_to IS NULL OR r.requested_effective_to>=?)";
         $params=array_merge(

@@ -142,6 +142,30 @@ final class ArpaDivisionContinuityTest
         $returned=$this->request($reservation,'2026-01-22','RETURNED');
         $this->same('GAP',$this->continuity->assertCanFillPeriod($reservation,'2026-01-22',null,$returned,null,false,false)['relation'],'returned request revalidation does not reintroduce the removed gap blocker');
 
+        $materializedReservation=$this->division('Materialized Reservation Regression');
+        $requestA=$this->nativeRequest($materializedReservation,'2025-01-01','2025-03-13','DISTRICT_APPROVED','ACTING');
+        $requestB=$this->nativeRequest($materializedReservation,'2025-03-14','2025-12-31','DISTRICT_APPROVED','ACTING');
+        $this->canonicalForRequest($requestB,$materializedReservation,'2025-03-14','2025-12-31','ACTING');
+        foreach(['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'] as $materializedStatus){
+            $this->pdo->prepare('UPDATE arpa_division_appointment_request SET workflow_status=? WHERE id=?')->execute([$materializedStatus,$requestB]);
+            $diagnostic=$this->continuity->requirement($materializedReservation,'2025-01-01',$requestA);
+            $this->same(1,$diagnostic['authoritative_period_count'],"{$materializedStatus} canonical request is represented once as operational coverage");
+            $this->same(0,$diagnostic['overlap_count'],"{$materializedStatus} canonical request is not duplicated as a reservation");
+            $this->same('EXACT',$this->continuity->assertCanFillPeriod($materializedReservation,'2025-01-01','2025-03-13',$requestA,null,false,false)['relation'],"adjacent Request A can proceed to materialization beside {$materializedStatus} canonical Request B");
+        }
+        $summary=$this->row('SELECT period_count,overlap_count FROM ('.ArpaDivisionContinuityService::summarySource().') continuity_summary WHERE division_id=?',[$materializedReservation]);
+        $this->same(2,(int)$summary['period_count'],'summary contains pending Request A plus canonical Request B exactly once each');
+        $this->same(0,(int)$summary['overlap_count'],'adjacent 13/14 March boundaries are not a summary overlap');
+        $pendingOnly=$this->continuity->requirement($materializedReservation,'2025-01-01',$requestB);
+        $this->same(1,$pendingOnly['authoritative_period_count'],'pending request without a canonical appointment remains a reservation');
+        $overlappingRequest=$this->nativeRequest($materializedReservation,'2025-03-01','2025-03-20','SUBMITTED','ACTING');
+        $this->throwsContains(
+            fn()=>$this->continuity->assertCanFillPeriod($materializedReservation,'2025-01-01','2025-03-13',$requestA,null,false,false),
+            'overlapping authoritative assignment periods',
+            'a genuinely overlapping third pending request remains rejected'
+        );
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='REJECTED' WHERE id=?")->execute([$overlappingRequest]);
+
         $productionInvalid=array_column($this->continuity->invalidPendingAssignments(),'id');
         $this->same(false,in_array('ca8868e8-46fd-43b7-944d-a7ff6aa4ae49',$productionInvalid,true),'a pending request that only leaves an uncovered period is no longer reported as invalid');
 
@@ -181,6 +205,27 @@ final class ArpaDivisionContinuityTest
     {
         $id=$this->uuid();$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'PERMANENT',?,?,?, ?,0,?)")
             ->execute([$id,$this->officer,$this->asc,$division,$from,$status,$this->actor]);return $id;
+    }
+
+    private function nativeRequest(string $division,string $from,?string $to,string $status,string $type):string
+    {
+        $id=$this->uuid();$reason=$to===null?null:(string)$this->value('SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1');
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,requested_effective_to,end_reason_id,workflow_status,legacy_history_only,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,?,?,?,?,?,?,?,0,?)")
+            ->execute([$id,$this->officer,$type,$this->asc,$division,$from,$to,$reason,$status,$this->actor]);
+        return $id;
+    }
+
+    private function canonicalForRequest(string $request,string $division,string $from,?string $to,string $type):string
+    {
+        $appointment=$this->uuid();$location=$this->row('SELECT a.dad_number asc_dad,a.name_en asc_name,d.dad_number arpa_dad,d.name_en arpa_name FROM location a JOIN location d ON d.id=? WHERE a.id=?',[$division,$this->asc]);
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment(id,record_origin,request_id,officer_id,appointment_type,service_permanency_snapshot,service_permanency_source,asc_location_id,arpa_division_location_id,asc_dad_snapshot,asc_name_snapshot,arpa_dad_snapshot,arpa_name_snapshot,hierarchy_snapshot_json,effective_from,approved_by,approved_at,approval_timestamp_provenance,legacy_history_only) VALUES(?,'NATIVE',?,?,?,?, 'NATIVE_CURRENT_STATUS',?,?,?,?,?,?,'{}',?,?,NOW(),'NATIVE_RECORDED',0)")
+            ->execute([$appointment,$request,$this->officer,$type,'PERMANENT_IN_SERVICE',$this->asc,$division,$location['asc_dad'],$location['asc_name'],$location['arpa_dad'],$location['arpa_name'],$from,$this->actor]);
+        if($to!==null){
+            $reason=(string)$this->value('SELECT id FROM arpa_appointment_end_reason ORDER BY display_order LIMIT 1');
+            $this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,end_reason_id,closure_kind,context_snapshot_json,approved_by,approved_at,approval_timestamp_provenance) VALUES(?,'NATIVE',?,?,?,?,'DIRECT','{}',?,NOW(),'NATIVE_RECORDED')")
+                ->execute([$this->uuid(),$appointment,$request,$to,$reason,$this->actor]);
+        }
+        return $appointment;
     }
 
     private function workflow(string $request):void{(new ArpaAppointmentService($this->pdo))->workflow('division',$request,'SUBMIT','CREATOR',null,$this->actor);}
