@@ -166,6 +166,30 @@ final class ArpaDivisionContinuityTest
         );
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='REJECTED' WHERE id=?")->execute([$overlappingRequest]);
 
+        $periodAvailability=$this->division('Canonical Closure Reservation Regression');
+        $closedRequest=$this->nativeRequest($periodAvailability,'2025-01-01',null,'DISTRICT_APPROVED','PERMANENT');
+        $this->canonicalForRequest($closedRequest,$periodAvailability,'2025-01-01','2025-03-13','PERMANENT');
+        $read=new ArpaAppointmentReadService($this->pdo);
+        $read->assertDivisionPeriodAvailable($this->asc,$periodAvailability,'2025-03-14');$this->assertions++;
+        $read->assertDivisionPeriodDoesNotOverlap($periodAvailability,'2025-03-14');$this->assertions++;
+        $read->assertDivisionVacant($this->asc,$periodAvailability,'2025-03-14');$this->assertions++;
+        $vacantIds=array_map('strval',array_column($read->vacantDivisionsForAsc($this->actor,$this->asc,'2025-03-14'),'id'));
+        $this->same(true,in_array($periodAvailability,$vacantIds,true),'vacancy dropdown follows the canonical 13 March closure instead of the materialized request Open end');
+
+        $pendingOverlap=$this->nativeRequest($periodAvailability,'2025-03-14',null,'SUBMITTED','ACTING');
+        $this->throwsContains(fn()=>$read->assertDivisionPeriodAvailable($this->asc,$periodAvailability,'2025-03-14'),'overlaps an authoritative assignment','genuine pending request without canonical appointment still reserves the Division');
+        $this->throwsContains(fn()=>$read->assertDivisionPeriodDoesNotOverlap($periodAvailability,'2025-03-14'),'overlaps an authoritative assignment','direct overlap helper still sees a genuine pending reservation');
+        $this->throwsContains(fn()=>$read->assertDivisionVacant($this->asc,$periodAvailability,'2025-03-14'),'already has an open or scheduled appointment','vacancy assertion still sees a genuine pending reservation');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='REJECTED' WHERE id=?")->execute([$pendingOverlap]);
+
+        $deletedOverlap=$this->nativeRequest($periodAvailability,'2025-03-14',null,'SUBMITTED','ACTING');
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NOW(),deleted_by=?,delete_reason='Read-service reservation regression fixture' WHERE id=?")->execute([$this->actor,$deletedOverlap]);
+        $read->assertDivisionPeriodAvailable($this->asc,$periodAvailability,'2025-03-14');$this->assertions++;
+
+        $canonicalOverlapRequest=$this->nativeRequest($periodAvailability,'2025-03-14',null,'REJECTED','ACTING');
+        $this->canonicalForRequest($canonicalOverlapRequest,$periodAvailability,'2025-03-14',null,'ACTING');
+        $this->throwsContains(fn()=>$read->assertDivisionPeriodAvailable($this->asc,$periodAvailability,'2025-03-14'),'overlaps an authoritative assignment','genuine overlapping canonical appointment remains blocked');
+
         $productionInvalid=array_column($this->continuity->invalidPendingAssignments(),'id');
         $this->same(false,in_array('ca8868e8-46fd-43b7-944d-a7ff6aa4ae49',$productionInvalid,true),'a pending request that only leaves an uncovered period is no longer reported as invalid');
 

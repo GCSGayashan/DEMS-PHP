@@ -253,6 +253,7 @@ final class ArpaAppointmentReadService
                   WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=l.id AND r.id<>COALESCE(?, '')
                     AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                     AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment canonical_a WHERE canonical_a.request_id=r.id)
                     AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?
                     AND COALESCE(CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'9999-12-31')>=?)";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([
@@ -282,6 +283,7 @@ final class ArpaAppointmentReadService
                   WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.id<>COALESCE(?, '')
                     AND r.record_origin='NATIVE' AND r.legacy_history_only=0
                     AND r.request_type IN('APPOINTMENT','TRANSFER') AND r.workflow_status IN({$statuses})
+                    AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment canonical_a WHERE canonical_a.request_id=r.id)
                     AND r.requested_effective_from IS NOT NULL AND r.requested_effective_from<=?
                     AND COALESCE(CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'9999-12-31')>=?)";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([
@@ -471,6 +473,7 @@ final class ArpaAppointmentReadService
                     AND vacancy_r.record_origin='NATIVE' AND vacancy_r.legacy_history_only=0
                     AND vacancy_r.request_type IN('APPOINTMENT','TRANSFER')
                     AND vacancy_r.workflow_status IN({$statuses})
+                    AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment canonical_a WHERE canonical_a.request_id=vacancy_r.id)
                     AND vacancy_r.requested_effective_from IS NOT NULL
                     AND vacancy_r.id<>COALESCE({$excludeRequestExpression},''))";
     }
