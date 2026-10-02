@@ -24,7 +24,7 @@ final class UserAccessManagementTest
     {
         [$districtX,$ascX,$districtY,$ascY]=$this->districtFixtures();
         $arpaX=$this->arpaUnder($ascX);$arpaY=$this->arpaUnder($ascY);
-        $system=$this->systemAdmin();$checker=$this->createActor('SYSTEM_ADMIN',null,'system-checker');
+        $system=$this->systemAdmin();$checker=$this->createActor('SYSTEM_ADMIN',null,'system-checker');$securityChecker=$this->createActor('SECURITY_ADMIN',null,'security-checker');
         $actors=[
             'ASC_SUBJECT_OFFICER'=>$this->createActor('ASC_SUBJECT_OFFICER',$ascX,'asc-subject-manager'),
             'ASC_ADMIN'=>$this->createActor('ASC_ADMIN',$ascX,'asc-manager'),
@@ -124,7 +124,7 @@ final class UserAccessManagementTest
         $this->same(false,in_array($arpaY,array_column($arpaResults,'id'),true),'ASC location lookup excludes another ASC');
 
         $this->activeUserVisibilityCases($actors,$system,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
-        $this->accountRequestCases($actors,$system,$checker,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
+        $this->accountRequestCases($actors,$system,$checker,$securityChecker,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
         $this->effectiveDateAndInactiveCases($actors,$districtX,$ascX,$arpaX,$districtY,$ascY,$arpaY);
 
         $expired=$this->createActor('ASC_ADMIN',$ascX,'expired-manager',1,'APPROVED',date('Y-m-d',strtotime('-2 days')));
@@ -163,7 +163,7 @@ final class UserAccessManagementTest
         $this->same(true,str_contains($activationView,"check.addEventListener('change'")&&str_contains($activationView,'fetch(endpoint'),'role selection enables controls and requests authorized locations');
     }
 
-    private function accountRequestCases(array $actors,string $system,string $checker,string $districtX,string $ascX,string $arpaX,string $districtY,string $ascY,string $arpaY):void
+    private function accountRequestCases(array $actors,string $system,string $checker,string $securityChecker,string $districtX,string $ascX,string $arpaX,string $districtY,string $ascY,string $arpaY):void
     {
         $service=new UserAccountRequestService($this->pdo);$password='Manual-User-1!';$today=date('Y-m-d');
         $activeStatus=$this->statusId('ACTIVE');
@@ -294,17 +294,43 @@ final class UserAccessManagementTest
             'role_id'=>$this->roleId('ARPA_OFFICER'),'location_id'=>$arpaX,'effective_from'=>$today,'temporary_password'=>$password,'mfa_method'=>'AUTHENTICATOR_APP',
         ]),'an Officer cannot receive a duplicate user identity');
 
-        $this->useContext($checker,'SYSTEM_ADMIN');
-        $this->throws(fn()=>(new OfficerOfficeAssignmentService($this->pdo))->approve((string)$manual['office_assignment_id'],$checker),'normal Office Assignment approval cannot bypass the parent User Account Request');
+        $officeService=new OfficerOfficeAssignmentService($this->pdo);
+        $this->useContext($actors['ASC_SUBJECT_OFFICER'],'ASC_SUBJECT_OFFICER');
+        $this->throwsMessage(fn()=>$officeService->approveInitialForUserAccountRequest((string)$manual['office_assignment_id'],$userId,$actors['ASC_SUBJECT_OFFICER']),'Maker-checker policy prevents self-approval.','maker cannot approve their own User Account Request initial Office assignment');
+
+        $this->useContext($securityChecker,'SECURITY_ADMIN');
+        $this->same(true,Auth::can('user.approve'),'Security Administrator has User Account Request approval permission');
+        $this->same(false,Auth::can('officer.office-assignment.approve'),'Security Administrator is not granted general Office-assignment approval permission');
+        $genericAssignment=$this->uuid();$initialOffice=(string)$this->value('SELECT office_id FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]);
+        $this->pdo->prepare("INSERT INTO officer_office_assignment(id,officer_id,office_id,effective_from,is_primary,active,reason,approval_status,created_by,submitted_by,submitted_at) VALUES(?,?,?,CURRENT_DATE(),0,0,'Ordinary Office assignment','SUBMITTED',?,?,NOW())")
+            ->execute([$genericAssignment,$officerId,$initialOffice,$actors['ASC_SUBJECT_OFFICER'],$actors['ASC_SUBJECT_OFFICER']]);
+        $this->throwsMessage(fn()=>$officeService->approve($genericAssignment,$securityChecker),'You are not authorized to approve Office assignments.','generic Office Assignment approval still requires the HR approval permission');
+        $this->throwsMessage(fn()=>$officeService->approveInitialForUserAccountRequest($genericAssignment,$userId,$securityChecker),'The Office assignment is not the valid initial assignment for this User Account Request.','non-initial Office assignment cannot use the combined-request approval path');
+
+        $this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='RETURNED' WHERE id=?")->execute([$manual['office_assignment_id']]);
+        $this->throwsMessage(fn()=>$officeService->approveInitialForUserAccountRequest((string)$manual['office_assignment_id'],$userId,$securityChecker),'Only a submitted Office assignment may be approved.','invalid initial Office assignment status is rejected');
+        $this->pdo->prepare("UPDATE officer_office_assignment SET approval_status='SUBMITTED' WHERE id=?")->execute([$manual['office_assignment_id']]);
+
+        $officeStatus=(string)$this->value('SELECT operational_status FROM office WHERE id=?',[$initialOffice]);
+        $this->pdo->prepare("UPDATE office SET operational_status='INACTIVE' WHERE id=?")->execute([$initialOffice]);
+        $this->throwsMessage(fn()=>$officeService->approveInitialForUserAccountRequest((string)$manual['office_assignment_id'],$userId,$securityChecker),'You cannot manage this Office assignment.','combined approval preserves ScopeService Office access restrictions');
+        $this->pdo->prepare('UPDATE office SET operational_status=? WHERE id=?')->execute([$officeStatus,$initialOffice]);
+
+        $this->throws(fn()=>$officeService->approve((string)$manual['office_assignment_id'],$securityChecker),'normal Office Assignment approval cannot bypass the parent User Account Request');
         $this->same('SUBMITTED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),'forged standalone approval leaves initial Office assignment submitted');
-        $service->approve($checker,$userId);
+        $service->approve($securityChecker,$userId);
         $this->same('ACTIVE',(string)$this->value('SELECT account_status FROM system_user WHERE id=?',[$userId]),'different checker activates the approved manual account');
+        $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM system_user WHERE id=?',[$userId]),'combined approval approves the system user');
+        $this->same(1,(int)$this->value('SELECT enabled FROM system_user WHERE id=?',[$userId]),'combined approval enables the system user');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM officer WHERE id=?',[$officerId]),'combined approval approves the created Officer');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),'combined approval approves the initial Office assignment');
+        $this->same(1,(int)$this->value('SELECT active FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),'combined approval activates the initial Office assignment');
         $this->same(0,$this->count("SELECT COUNT(*) FROM system_notification WHERE entity_type='OFFICER_OFFICE_ASSIGNMENT' AND entity_id=?",[$manual['office_assignment_id']]),'combined approval creates no separate Office Assignment notification');
         $this->same($this->value('SELECT office_id FROM officer_office_assignment WHERE id=?',[$manual['office_assignment_id']]),$this->value('SELECT primary_office_id FROM officer WHERE id=?',[$officerId]),'approved initial Office becomes the Officer primary Office');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM user_account_role WHERE id=?',[$assignmentId]),'account approval approves the initial role transactionally');
+        $this->same(1,(int)$this->value('SELECT active FROM user_account_role WHERE id=?',[$assignmentId]),'account approval activates the initial role');
         $this->same('APPROVED',(string)$this->value('SELECT approval_status FROM user_account_scope WHERE role_assignment_id=?',[$assignmentId]),'account approval approves the linked initial scope');
+        $this->same(1,(int)$this->value('SELECT active FROM user_account_scope WHERE role_assignment_id=?',[$assignmentId]),'account approval activates the linked initial scope');
 
         $this->createAssignment($userId,'ASC_SUBJECT_OFFICER',$ascX);
         $this->useContext($actors['ASC_ADMIN'],'ASC_ADMIN');
