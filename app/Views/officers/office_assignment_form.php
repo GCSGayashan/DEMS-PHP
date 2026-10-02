@@ -1,5 +1,5 @@
 <?php use App\Core\Csrf; ?>
-<div class="page-heading"><div><div class="breadcrumb-lite">Human Resource Management / Officers / Office Assignment</div><h1>Assign Office</h1><p><?= e($officer['dad_number'].' - '.$officer['name_with_initials']) ?></p></div></div>
+<div class="page-heading"><div><div class="breadcrumb-lite">Human Resource Management / Officers / Office Assignment</div><h1><?= !empty($returnedAssignment)?'Correct Office Assignment':'Add New Office' ?></h1><p><?= e($officer['dad_number'].' - '.$officer['name_with_initials']) ?></p></div></div>
 <form method="post" action="<?= e(url('hr/officers/'.$officer['id'].'/offices')) ?>" class="card"><div class="card-body"><?= Csrf::field() ?><div class="row g-3">
 <?php if(!empty($returnedAssignment)): ?><input type="hidden" name="assignment_id" value="<?= e($returnedAssignment['id']) ?>"><div class="col-12"><div class="alert alert-warning mb-0"><strong>Returned for Correction</strong><br>Correct this same Office Assignment request and resubmit it for approval.</div></div><?php endif; ?>
 <div class="col-md-4"><label class="form-label">NIC</label><input class="form-control" value="<?= e($officer['nic']?:'—') ?>" readonly></div>

@@ -774,16 +774,21 @@ final class OfficerController extends Controller
     public function editOfficeAssignment(string $id,string $assignmentId):void
     {
         Auth::requirePermission('officer.office-assignment.view');$actor=(string)Auth::user()['id'];$service=new OfficerOfficeAssignmentService(Database::pdo());
-        try{$assignment=$service->directEditRecord($assignmentId,$actor);if((string)$assignment['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');}
-        catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Head Office direct assignment editing']);return;}
-        $offices=ScopeService::scopedOffices($actor);$this->render('officers/office_assignments/edit',compact('assignment','offices'));
+        try{
+            if(\App\Services\AssignmentDirectEditPolicy::allowed('officer.office-assignment.view')){$assignment=$service->directEditRecord($assignmentId,$actor);$offices=ScopeService::scopedOffices($actor);$directEdit=true;$originalAssignmentId=$assignmentId;}
+            else{$form=$service->changeRequestForm($assignmentId,$actor);$assignment=$form['assignment'];$offices=$form['offices'];$directEdit=false;$originalAssignmentId=$form['originalAssignmentId'];}
+            if((string)$assignment['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');
+        }catch(\DomainException $e){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}
+        $this->render('officers/office_assignments/edit',compact('assignment','offices','directEdit','originalAssignmentId'));
     }
     public function updateOfficeAssignment(string $id,string $assignmentId):void
     {
         Auth::requirePermission('officer.office-assignment.view');Csrf::validate();$actor=(string)Auth::user()['id'];$service=new OfficerOfficeAssignmentService(Database::pdo());
-        try{$assignment=$service->directEditRecord($assignmentId,$actor);if((string)$assignment['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');}
-        catch(\DomainException){http_response_code(403);$this->render('partials/forbidden',['permission'=>'Head Office direct assignment editing']);return;}
-        try{$service->directEdit($assignmentId,$_POST,$actor);$this->flash('success','Assignment updated successfully.');}
+        try{
+            if(\App\Services\AssignmentDirectEditPolicy::allowed('officer.office-assignment.view')){$assignment=$service->directEditRecord($assignmentId,$actor);if((string)$assignment['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');$service->directEdit($assignmentId,$_POST,$actor);$message='Assignment updated successfully.';}
+            else{$form=$service->changeRequestForm($assignmentId,$actor);if((string)$form['assignment']['officer_id']!==$id)throw new \DomainException('Office assignment was not found.');$service->requestChange($assignmentId,$_POST,$actor);$message='Office assignment change submitted for District approval.';}
+            $this->flash('success',$message);
+        }
         catch(\DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/officers/'.$id.'/offices/'.$assignmentId.'/edit');}
         redirect('/hr/officers/'.$id);
     }
