@@ -20,13 +20,18 @@ final class ArpaAdministrativePolicy
     public static function canCorrectDates():bool
     {
         $context=Auth::activeContext(false);
-        return $context!==null&&Auth::can('arpa.appointment.view')&&self::isCanonicalDemsAdmin();
+        if($context===null||!Auth::can('arpa.appointment.view'))return false;
+        if(self::isCanonicalDemsAdmin())return true;
+        return (string)($context['role_code']??'')==='NATIONAL_SUBJECT_OFFICER'
+            && (string)($context['role_level']??'')==='NATIONAL'
+            && (string)($context['scope_type']??'')==='NATIONAL'
+            && (string)($context['scope_mode']??'')==='NATIONAL';
     }
 
     /** @return array<string,mixed> */
     public static function assertDateCorrection():array
     {
-        if(!self::canCorrectDates())throw new DomainException('Only the canonical dems.admin account may directly correct ARPA appointment dates.');
+        if(!self::canCorrectDates())throw new DomainException('Direct ARPA appointment editing requires the canonical dems.admin account or an active National Subject Officer context.');
         return Auth::activeContext(false)??throw new DomainException('Select an Active Working Context.');
     }
 

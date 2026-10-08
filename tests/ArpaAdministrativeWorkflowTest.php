@@ -46,7 +46,8 @@ final class ArpaAdministrativeWorkflowTest
 
         $nationalSubject=$this->actor('NATIONAL_SUBJECT_OFFICER','arpa-date-national-subject');$nationalAdmin=$this->actor('NATIONAL_ADMIN','arpa-date-national-admin');$systemAdmin=$this->actor('SYSTEM_ADMIN','arpa-date-system-admin');$district=$this->actor('DISTRICT_ADMIN','arpa-date-district',$this->district($asc));$ascActor=$this->actor('ASC_ADMIN','arpa-date-asc',$asc);
         $notifications=(int)$this->value('SELECT COUNT(*) FROM system_notification');$workflow=(int)$this->value('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id IN(?,?)',[$appointmentRequest,$endRequest]);$requestUpdatedAt=$this->value('SELECT updated_at FROM arpa_division_appointment_request WHERE id=?',[$appointmentRequest]);$endRequestUpdatedAt=$this->value('SELECT updated_at FROM arpa_division_appointment_request WHERE id=?',[$endRequest]);
-        foreach([[$nationalSubject,'NATIONAL_SUBJECT_OFFICER'],[$nationalAdmin,'NATIONAL_ADMIN'],[$systemAdmin,'SYSTEM_ADMIN']] as [$actor,$role]){
+        $this->useContext($nationalSubject,'NATIONAL_SUBJECT_OFFICER');$this->same(true,ArpaAdministrativePolicy::canCorrectDates(),'National Subject Officer may directly correct ARPA assignment dates in an active National context');
+        foreach([[$nationalAdmin,'NATIONAL_ADMIN'],[$systemAdmin,'SYSTEM_ADMIN']] as [$actor,$role]){
             $this->useContext($actor,$role);$this->same(false,ArpaAdministrativePolicy::canCorrectDates(),"{$role} is not canonical dems.admin");
             $this->throws(fn()=>$service->correctDates($appointment,['effective_from'=>'2024-12-31','effective_to'=>'2025-01-20','correction_reason'=>'Forged historical correction'],$actor),"{$role} forged correction is rejected");
         }
