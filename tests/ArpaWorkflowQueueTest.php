@@ -172,6 +172,7 @@ final class ArpaWorkflowQueueTest
 
             $controller=file_get_contents(BASE_PATH.'/app/Controllers/DataTableController.php');
             $this->same(true,str_contains($controller,"isset(\$config['authorize'])"),'direct DataTable endpoint enforces queue-specific authorization');
+            $this->legacyImportQueueTest((string)$officer['id'],(string)$division['id'],$date,$districtSubject,$districtAdmin,$nationalSubject,$nationalAdmin);
         }finally{$this->pdo->rollBack();}
     }
 
@@ -199,7 +200,62 @@ final class ArpaWorkflowQueueTest
     private function inbox(string $user,string $request):int
     {
         $access=(new ArpaWorkflowQueuePolicy($this->pdo))->requestAccess($user,'r');
-        return (int)$this->scalar($access['with']."SELECT COUNT(*) FROM arpa_division_appointment_request r WHERE r.id=? AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND {$access['where']}",array_merge($access['params'],[$request]));
+        return (int)$this->scalar($access['with']."SELECT COUNT(*) FROM arpa_division_appointment_request r WHERE r.id=? AND r.deleted_at IS NULL AND r.legacy_history_only=0 AND {$access['where']}",array_merge($access['params'],[$request]));
+    }
+
+    private function legacyImportQueueTest(string $officer,string $division,string $date,string $districtSubject,string $districtAdmin,string $nationalSubject,string $nationalAdmin):void
+    {
+        $otherDistrict=(string)$this->scalar("SELECT l.id FROM location l JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='DISTRICT' WHERE l.id<>? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' LIMIT 1",[$this->district]);
+        if($otherDistrict==='')throw new RuntimeException('A second District fixture is required.');
+        $otherDistrictSubject=$this->actor('DISTRICT_SUBJECT_OFFICER','DISTRICT','INCLUDE_CHILDREN',$otherDistrict);
+        $policy=new ArpaWorkflowQueuePolicy($this->pdo);
+
+        $districtBefore=$policy->actionableCount($districtSubject);
+        $ascApproved=$this->workflowRequest('LEGACY_IMPORT','ASC_APPROVED',0,$officer,$division,$date);
+        $this->same($districtBefore+1,$policy->actionableCount($districtSubject),'actionableCount includes an actionable LEGACY_IMPORT Division request');
+        $this->same(1,$this->queueTableCount($districtSubject,'DISTRICT_SUBJECT_OFFICER',$ascApproved),'LEGACY_IMPORT ASC_APPROVED request appears in its District Subject Officer queue');
+        $this->same(0,$this->queueTableCount($otherDistrictSubject,'DISTRICT_SUBJECT_OFFICER',$ascApproved),'LEGACY_IMPORT request remains excluded from another District queue');
+
+        $historyOnly=$this->workflowRequest('LEGACY_IMPORT','ASC_APPROVED',1,$officer,$division,$date);
+        $this->same(0,$this->queueTableCount($districtSubject,'DISTRICT_SUBJECT_OFFICER',$historyOnly),'LEGACY_IMPORT history-only request remains excluded from the live queue');
+        $this->same($districtBefore+1,$policy->actionableCount($districtSubject),'actionableCount excludes LEGACY_IMPORT history-only requests');
+
+        $deleted=$this->workflowRequest('LEGACY_IMPORT','ASC_APPROVED',0,$officer,$division,$date,true);
+        $this->same(0,$this->queueTableCount($districtSubject,'DISTRICT_SUBJECT_OFFICER',$deleted),'deleted LEGACY_IMPORT Division request remains excluded');
+        $this->same($districtBefore+1,$policy->actionableCount($districtSubject),'actionableCount excludes deleted Division requests');
+
+        $native=$this->workflowRequest('NATIVE','ASC_APPROVED',0,$officer,$division,$date);
+        $this->same(1,$this->queueTableCount($districtSubject,'DISTRICT_SUBJECT_OFFICER',$native),'NATIVE ASC_APPROVED queue behavior remains unchanged');
+        $this->same($districtBefore+2,$policy->actionableCount($districtSubject),'actionableCount still includes native actionable requests');
+
+        $districtVerified=$this->workflowRequest('LEGACY_IMPORT','DISTRICT_VERIFIED',0,$officer,$division,$date);
+        $this->same(1,$this->queueTableCount($districtAdmin,'DISTRICT_ADMIN',$districtVerified),'LEGACY_IMPORT DISTRICT_VERIFIED request appears for the District Administrator');
+        $districtApproved=$this->workflowRequest('LEGACY_IMPORT','DISTRICT_APPROVED',0,$officer,$division,$date);
+        $this->same(1,$this->queueTableCount($nationalSubject,'NATIONAL_SUBJECT_OFFICER',$districtApproved),'LEGACY_IMPORT DISTRICT_APPROVED request appears for the National Subject Officer');
+        $nationalVerified=$this->workflowRequest('LEGACY_IMPORT','NATIONAL_VERIFIED',0,$officer,$division,$date);
+        $this->same(1,$this->queueTableCount($nationalAdmin,'NATIONAL_ADMIN',$nationalVerified),'LEGACY_IMPORT NATIONAL_VERIFIED request appears for the National Administrator');
+
+        $subject=(string)$this->scalar("SELECT id FROM subject_master WHERE active=1 AND approval_status='APPROVED' ORDER BY id LIMIT 1");
+        if($subject==='')throw new RuntimeException('An approved Subject fixture is required.');
+        $subjectBefore=$policy->actionableCount($nationalAdmin);
+        $this->pdo->prepare("INSERT INTO arpa_subject_assignment_request(id,record_origin,request_type,officer_id,asc_location_id,subject_id,requested_effective_from,workflow_status,legacy_history_only,legacy_exception,legacy_exception_codes_json,created_by) VALUES(?,'LEGACY_IMPORT','ASSIGN',?,?,?,?,'NATIONAL_VERIFIED',0,1,?,NULL)")->execute([$this->uuid(),$officer,$this->asc,$subject,$date,'["INCOMPLETE_LEGACY_WORKFLOW"]']);
+        $this->same($subjectBefore+1,$policy->actionableCount($nationalAdmin),'actionableCount includes imported non-history-only Subject requests produced by the legacy migration');
+    }
+
+    private function queueTableCount(string $user,string $role,string $request):int
+    {
+        $this->useContext($user,$role);
+        $definition=DataTableRegistry::definition('arpa-submitted-appointments');
+        $definition['baseWhere'][]='r.id=?';$definition['baseParams'][]=$request;
+        return $this->tableCount($definition);
+    }
+
+    private function workflowRequest(string $origin,string $status,int $historyOnly,string $officer,string $division,string $date,bool $deleted=false):string
+    {
+        $id=$this->uuid();$creator=$origin==='NATIVE'?$this->asctest:null;
+        $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,legacy_exception,legacy_exception_codes_json,created_by) VALUES(?,?,'APPOINTMENT',?,'DUTY_COVERING',?,?,?,?,?,?,?,?)")->execute([$id,$origin,$officer,$this->asc,$division,$date,$status,$historyOnly,$origin==='LEGACY_IMPORT'?1:0,$origin==='LEGACY_IMPORT'?'["INCOMPLETE_LEGACY_WORKFLOW","DATA_ISSUE_RESOLUTION"]':null,$creator]);
+        if($deleted)$this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NOW(),deleted_by=?,delete_reason='Workflow queue test' WHERE id=?")->execute([$this->asctest,$id]);
+        return $id;
     }
 
     private function completed(string $user,string $request):int
