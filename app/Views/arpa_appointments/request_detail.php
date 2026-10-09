@@ -29,6 +29,8 @@ $reviewStage=ArpaAppointmentRules::isReviewStatus($status)?ArpaAppointmentRules:
 $stageRolePermission=match($status){'SUBMITTED'=>'arpa.appointment.asc-verify','ASC_VERIFIED'=>'arpa.appointment.asc-approve','ASC_APPROVED'=>'arpa.appointment.district-verify','DISTRICT_VERIFIED'=>'arpa.appointment.district-approve','DISTRICT_APPROVED'=>'arpa.appointment.national-verify','NATIONAL_VERIFIED'=>'arpa.appointment.national-approve',default=>null};
 $canReturn=$stageRolePermission!==null&&Auth::can('arpa.appointment.return')&&Auth::can($stageRolePermission);
 $canReject=$stageRolePermission!==null&&Auth::can('arpa.appointment.reject')&&Auth::can($stageRolePermission);
+$canonicalDivisionAppointment=$entity==='division'&&($request['request_type']??null)==='APPOINTMENT'&&$hasCanonical;
+if($canonicalDivisionAppointment){$canReturn=false;$canReject=false;}
 $expandedDivisionReviewPage=$entity==='division'&&in_array($status,['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'],true);
 $workflowPanelTitle=match($status){'SUBMITTED'=>'ASC Verification','ASC_VERIFIED'=>'ASC Approval','ASC_APPROVED'=>'District Verification','DISTRICT_VERIFIED'=>'District Approval','DISTRICT_APPROVED'=>'National Verification','NATIONAL_VERIFIED'=>'National Approval',default=>'Workflow action'};
 $editPermission=$entity==='subject'?'arpa.subject.create':'arpa.appointment.edit';

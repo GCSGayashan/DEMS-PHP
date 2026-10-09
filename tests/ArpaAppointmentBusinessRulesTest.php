@@ -80,6 +80,9 @@ final class ArpaAppointmentBusinessRulesTest
         $this->throwsMessage(fn()=>$service->updateAndResubmitRequest('division',$permanentRequest,$editedPermanent,$actor),'This appointment has already been verified and can no longer be edited.','verification lock prevents a stale maker edit');
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='RETURNED' WHERE id=?")->execute([$permanentRequest]);
         $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Returned Permanent request does not qualify as the Acting foundation');
+        // The direct status mutations below are an explicit status-only fixture for
+        // read-service eligibility. They intentionally bypass the real workflow(),
+        // so no ASC-approval canonical materialization is expected in this fixture.
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='ASC_APPROVED',deleted_at=NOW(),deleted_by=? WHERE id=?")->execute([$actor,$permanentRequest]);
         $this->same(false,in_array('ACTING',$read->appointmentTypeAvailability($permanentOfficer,$today)['allowed_types'],true),'Deleted ASC-approved Permanent request does not qualify as the Acting foundation');
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NULL,deleted_by=NULL,delete_reason=NULL,requested_effective_from=? WHERE id=?")->execute([$future,$permanentRequest]);
@@ -94,7 +97,7 @@ final class ArpaAppointmentBusinessRulesTest
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='ASC_APPROVED' WHERE id=?")->execute([$permanentRequest]);
         $approvedFoundationActing=$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'ACTING',$asc,$divisions[1],$today),$actor);
         $this->same('SUBMITTED',$this->value('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$approvedFoundationActing]),'backend accepts Acting for another Division when the Permanent foundation is ASC approved');
-        $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE request_id=?',[$permanentRequest]),'ASC-approved Permanent remains a reservation and is not canonicalized early');
+        $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE request_id=?',[$permanentRequest]),'synthetic status-only ASC_APPROVED fixture remains non-materialized because direct SQL bypasses the workflow transition');
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET deleted_at=NOW(),deleted_by=?,delete_reason='Eligibility regression fixture complete' WHERE id=?")->execute([$actor,$approvedFoundationActing]);
         $this->pdo->prepare("UPDATE arpa_division_appointment_request SET workflow_status='SUBMITTED' WHERE id=?")->execute([$permanentRequest]);
         $this->throwsMessage(fn()=>$service->createAndSubmitDivisionAppointmentRequest($this->request($permanentOfficer,'PERMANENT',$asc,$divisions[1],$today),$actor),'This officer already has a Permanent ARPA Division assignment.','submitted Permanent reserves the officer');

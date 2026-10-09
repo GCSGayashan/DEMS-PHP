@@ -100,7 +100,9 @@ final class ArpaWorkflowQueueTest
             $detailOffice=$this->row("SELECT ofc.id,ofc.dad_number,ofc.name_en FROM officer_office_assignment ooa JOIN office ofc ON ofc.id=ooa.office_id WHERE ooa.officer_id=? AND ofc.linked_location_id=? AND ooa.active=1 AND ooa.approval_status='APPROVED' AND ooa.effective_from<=CURRENT_DATE() AND (ooa.effective_to IS NULL OR ooa.effective_to>=CURRENT_DATE()) LIMIT 1",[(string)$officer['id'],$this->asc]);
             $detailLocations=$this->row('SELECT a.dad_number asc_number,a.name_en asc_name,d.dad_number division_number,d.name_en division_name FROM location a JOIN location d ON d.id=? WHERE a.id=?',[(string)$division['id'],$this->asc]);
             $districtName=(string)$this->scalar('SELECT name_en FROM location WHERE id=?',[$this->district]);
-            foreach(['District Verification','District Verify','Return for Correction','Officer Information','Assignment Information','Province','NIC','Designation','Class','Officer Office','Agrarian Service Center','ARPA Division','Submitted By','Submitted Date',$detailOfficer['dad_number'],$detailOfficer['name_with_initials'],$detailOfficer['nic'],$detailOfficer['designation_name'],$detailOffice['dad_number'],$detailOffice['name_en'],$detailLocations['asc_number'],$detailLocations['asc_name'],$detailLocations['division_number'],$detailLocations['division_name'],$districtName,$detailRequest['province_name']] as $needle)$this->same(true,str_contains($districtHtml,(string)$needle),"District Verify detail displays {$needle}");
+            foreach(['District Verification','District Verify','Officer Information','Assignment Information','Province','NIC','Designation','Class','Officer Office','Agrarian Service Center','ARPA Division','Submitted By','Submitted Date',$detailOfficer['dad_number'],$detailOfficer['name_with_initials'],$detailOfficer['nic'],$detailOfficer['designation_name'],$detailOffice['dad_number'],$detailOffice['name_en'],$detailLocations['asc_number'],$detailLocations['asc_name'],$detailLocations['division_number'],$detailLocations['division_name'],$districtName,$detailRequest['province_name']] as $needle)$this->same(true,str_contains($districtHtml,(string)$needle),"District Verify detail displays {$needle}");
+            $this->same(false,str_contains($districtHtml,'Return for Correction'),'materialized District Verify page hides Return for Correction');
+            $this->same(false,str_contains($districtHtml,'>Reject<'),'materialized District Verify page hides Reject');
             if(($detailOfficer['class_name']??'')!=='')$this->same(true,str_contains($districtHtml,(string)$detailOfficer['class_name']),'District Verify detail displays Officer Class when available');
             $this->same(false,str_contains($districtHtml,'Enter District Review'),'District Verify page does not render the obsolete District Review action');
             foreach([(string)$officer['id'],$this->asc,(string)$division['id'],(string)($detailOffice['id']??'')] as $uuid)if($uuid!=='')$this->same(false,str_contains($districtHtml,$uuid),'District Verify visible detail does not expose Officer, Office, or location UUIDs');
@@ -127,48 +129,22 @@ final class ArpaWorkflowQueueTest
             $this->same($auditCount,(int)$this->scalar('SELECT COUNT(*) FROM audit_event WHERE target_id=?',[$request]),'failed rejection writes no audit event');
 
             $reason='Please correct the appointment effective date.';
-            $service->workflow('division',$request,'REJECT','DISTRICT',$reason,$districtAdmin);
-            $this->same('RETURNED',(string)$this->scalar('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$request]),'District Administrator rejection returns request to ASC correction');
-            $this->same(1,$this->inbox($this->asctest,$request),'returned request appears in ASC Subject Officer inbox');
-            $this->same(0,$this->completed($this->asctest,$request),'rejection invalidates ASC Subject Officer successful actions in the current cycle');
-            $this->same(0,$this->completed($ascAdmin,$request),'rejection invalidates ASC Administrator successful actions in the current cycle');
-            $this->same(0,$this->completed($districtSubject,$request),'rejection invalidates District Subject Officer successful actions in the current cycle');
-            $event=$this->row("SELECT action,stage,user_id,comments,previous_status,new_status FROM arpa_appointment_workflow_action WHERE request_id=? ORDER BY id DESC LIMIT 1",[$request]);
-            $this->same(['action'=>'REJECT','stage'=>'DISTRICT','user_id'=>$districtAdmin,'comments'=>$reason,'previous_status'=>'DISTRICT_VERIFIED','new_status'=>'RETURNED'],$event,'append-only rejection event retains actor, level, reason, and status boundary');
-            $this->same(5,(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id=?',[$request]),'all first-cycle workflow actions remain preserved');
-            $audit=json_decode((string)$this->scalar("SELECT details_json FROM audit_event WHERE target_id=? AND action_key='arpa.division-workflow.reject' ORDER BY id DESC LIMIT 1",[$request]),true);
-            $this->same($reason,$audit['reason']??null,'rejection reason is retained in the transactionally committed audit event');
-
-            $returned=DataTableRegistry::definition('arpa-submitted-appointments');$returned['baseWhere'][]='r.id=?';$returned['baseParams'][]=$request;
-            $returnedResponse=(new DataTableQuery($this->pdo,$returned,new DataTableRequest(['length'=>10])))->response();
-            $this->same(1,$returnedResponse['recordsFiltered'],'returned record is present in the server-side ASC inbox');
-            $returnedRow=$returnedResponse['data'][0];
-            $this->same('RETURNED FOR CORRECTION',strip_tags($returnedRow['workflow_status']),'returned inbox uses the correction warning status');
-            $this->same($reason,strip_tags($returnedRow['return_reason']),'returned inbox displays the correction reason');
-            $this->same('DISTRICT',strip_tags($returnedRow['returned_level']),'returned inbox displays rejecting level');
-            $this->same(true,str_contains($returnedRow['actions'],'Resubmit'),'returned inbox exposes resubmit only to ASC correction role');
-            $detailTemplate=(string)file_get_contents(BASE_PATH.'/app/Views/arpa_appointments/request_detail.php');
-            foreach(['RETURNED FOR CORRECTION','Workflow History','Stage / Level','Performed By','Reason / Comments','Unavailable from legacy source'] as $needle)$this->same(true,str_contains($detailTemplate,$needle),"returned request detail presents {$needle}");
-
-            $ascCorrection=$this->actor('ASC_SUBJECT_OFFICER','ASC','EXACT',$this->asc);
-            $this->same(true,$policy->canCorrectReturnedRequest($ascCorrection,$this->asc),'another authorized ASC Subject Officer can own correction in the same ASC scope');
-            $outsideAsc=(string)$this->scalar("SELECT l.id FROM location l JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ASC' WHERE l.id<>? AND l.operational_status='ACTIVE' AND l.approval_status='APPROVED' LIMIT 1",[$this->asc]);
-            $outsideCorrection=$this->actor('ASC_SUBJECT_OFFICER','ASC','EXACT',$outsideAsc);
-            $this->same(false,$policy->canCorrectReturnedRequest($outsideCorrection,$this->asc),'ASC correction permission does not bypass geographic scope');
-            $this->throws(fn()=>$service->workflow('division',$request,'SUBMIT','CREATOR','Out-of-scope attempt',$outsideCorrection),'out-of-scope ASC officer cannot resubmit by direct service call');
-            $service->workflow('division',$request,'SUBMIT','CREATOR','Corrected and resubmitted',$ascCorrection);
-            $this->same('SUBMITTED',(string)$this->scalar('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$request]),'resubmission starts a new review cycle on the original request');
-            $this->same(1,$this->inbox($this->asctest,$request),'second cycle re-enters ASC verification inbox');
-
-            $service->workflow('division',$request,'VERIFY','ASC','Second-cycle ASC verification',$this->asctest);
-            $service->workflow('division',$request,'APPROVE','ASC','Second-cycle ASC approval',$ascAdmin);
-            $service->workflow('division',$request,'VERIFY','DISTRICT','Second-cycle District verification',$districtSubject);
-            $service->workflow('division',$request,'APPROVE','DISTRICT','Second-cycle District approval',$districtAdmin);
-            $this->same(1,$this->inbox($nationalSubject,$request),'National Subject Officer receives the successful second cycle');
+            $this->throwsMessage(
+                fn()=>$service->workflow('division',$request,'REJECT','DISTRICT',$reason,$districtAdmin),
+                'This ARPA Division appointment is already operational after ASC approval and cannot be returned or rejected. Use the authorized administrative correction process if the historical assignment must be changed.',
+                'District direct-service rejection is blocked after canonical materialization'
+            );
+            $this->same('DISTRICT_VERIFIED',(string)$this->scalar('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$request]),'blocked rejection leaves governance status unchanged');
+            $this->same($eventCount,(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id=?',[$request]),'blocked rejection writes no workflow event');
+            $this->same($auditCount,(int)$this->scalar('SELECT COUNT(*) FROM audit_event WHERE target_id=?',[$request]),'blocked rejection writes no audit event');
+            $service->workflow('division',$request,'APPROVE','DISTRICT','Direct District approval',$districtAdmin);
+            $this->same(1,$this->inbox($nationalSubject,$request),'National Subject Officer receives the District-approved request');
 
             $this->same(0,(int)$this->scalar("SELECT COUNT(*) FROM arpa_appointment_stage_review WHERE entity_type='DIVISION' AND request_id=? AND review_stage='NATIONAL'",[$request]),'National verification fixture has no separate National Review record');
             $this->useContext($nationalSubject,'NATIONAL_SUBJECT_OFFICER');$nationalRequest=$read->workflowRequestDetail('division',$request);ob_start();(static function(array $request):void{$entity='division';$workflowHistory=[];$stageReviews=[];$impact=[];require BASE_PATH.'/app/Views/arpa_appointments/request_detail.php';})($nationalRequest??[]);$nationalHtml=(string)ob_get_clean();
-            foreach(['National Verification','National Verify','Return for Correction','Officer Information','Assignment Information','Province',$detailOfficer['dad_number'],$detailOfficer['nic'],$detailOffice['name_en'],$detailLocations['asc_name'],$detailLocations['division_name'],$districtName] as $needle)$this->same(true,str_contains($nationalHtml,(string)$needle),"National Verify detail displays {$needle}");
+            foreach(['National Verification','National Verify','Officer Information','Assignment Information','Province',$detailOfficer['dad_number'],$detailOfficer['nic'],$detailOffice['name_en'],$detailLocations['asc_name'],$detailLocations['division_name'],$districtName] as $needle)$this->same(true,str_contains($nationalHtml,(string)$needle),"National Verify detail displays {$needle}");
+            $this->same(false,str_contains($nationalHtml,'Return for Correction'),'materialized National Verify page hides Return for Correction');
+            $this->same(false,str_contains($nationalHtml,'>Reject<'),'materialized National Verify page hides Reject');
             $this->same(false,str_contains($nationalHtml,'Enter National Review'),'National Verify page does not render the obsolete National Review action');
             foreach([(string)$officer['id'],$this->asc,(string)$division['id'],(string)($detailOffice['id']??'')] as $uuid)if($uuid!=='')$this->same(false,str_contains($nationalHtml,$uuid),'National Verify visible detail does not expose Officer, Office, or location UUIDs');
             $this->useContext($this->asctest,'ASC_SUBJECT_OFFICER');
@@ -181,8 +157,8 @@ final class ArpaWorkflowQueueTest
             $service->workflow('division',$request,'APPROVE','NATIONAL',null,$nationalAdmin);
             $this->same(0,$this->inbox($nationalAdmin,$request),'National approval removes request from Administrator inbox');
             $this->same(1,$this->completed($nationalAdmin,$request),'National approval appears in completed actions');
-            foreach([$this->asctest,$ascAdmin,$districtSubject,$districtAdmin,$nationalSubject,$nationalAdmin] as $successfulActor)$this->same(1,$this->completed($successfulActor,$request),'each second-cycle actor retains one successful current-cycle action after National approval');
-            $this->same(12,(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id=?',[$request]),'first-cycle rejection history and second-cycle success history both remain append-only');
+            foreach([$this->asctest,$ascAdmin,$districtSubject,$districtAdmin,$nationalSubject,$nationalAdmin] as $successfulActor)$this->same(1,$this->completed($successfulActor,$request),'each governance actor retains one successful action after National approval');
+            $this->same(7,(int)$this->scalar('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id=?',[$request]),'successful governance workflow remains append-only without blocked return/reject actions');
             $this->same('NATIONAL_APPROVED',(string)$this->scalar('SELECT workflow_status FROM arpa_division_appointment_request WHERE id=?',[$request]),'native workflow reaches NATIONAL_APPROVED');
             $this->same(1,(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment WHERE request_id=?',[$request]),'final native approval creates the operational appointment');
 
@@ -259,6 +235,7 @@ final class ArpaWorkflowQueueTest
     private function row(string $sql,array $params=[]):array{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetch()?:[];}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
     private function throws(callable $fn,string $message):void{$this->assertions++;try{$fn();}catch(DomainException){return;}throw new RuntimeException($message.': expected DomainException');}
+    private function throwsMessage(callable $fn,string $expected,string $message):void{$this->assertions++;try{$fn();}catch(DomainException $e){if($e->getMessage()===$expected)return;throw new RuntimeException($message.': expected '.var_export($expected,true).', got '.var_export($e->getMessage(),true));}throw new RuntimeException($message.': expected DomainException');}
     private function state():array{return ['legacy_requests'=>(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment_request WHERE record_origin='LEGACY_IMPORT'")->fetchColumn(),'legacy_appointments'=>(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment WHERE record_origin='LEGACY_IMPORT'")->fetchColumn(),'native_requests'=>(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment_request WHERE record_origin='NATIVE'")->fetchColumn(),'native_appointments'=>(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_division_appointment WHERE record_origin='NATIVE'")->fetchColumn(),'roles'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_role')->fetchColumn(),'scopes'=>(int)$this->pdo->query('SELECT COUNT(*) FROM user_account_scope')->fetchColumn(),'decisions'=>(int)$this->pdo->query("SELECT COUNT(*) FROM legacy_arpa_appointment_resolution WHERE resolution_status='CONFIRMED'")->fetchColumn()];}
     private function same(mixed $expected,mixed $actual,string $message):void{$this->assertions++;if($expected!==$actual)throw new RuntimeException($message.': expected '.var_export($expected,true).', got '.var_export($actual,true));}
 }

@@ -270,15 +270,22 @@ final class ArpaAppointmentService
         }
         $table = $isDivision ? 'arpa_division_appointment_request' : 'arpa_subject_assignment_request';
         $history = $isDivision ? 'arpa_appointment_workflow_action' : 'arpa_subject_workflow_action';
-        if(in_array(strtoupper($action),['RETURN_FOR_CORRECTION','REJECT'],true) && $this->nullText($comments)===null){
-            throw new DomainException('Comments are required when returning or rejecting a request.');
-        }
         return $this->transaction(function () use ($table, $history, $entity, $requestId, $action, $stage, $comments, $actorId): string {
             $deleted=$entity==='division'?' AND deleted_at IS NULL':'';$stmt = $this->pdo->prepare("SELECT * FROM {$table} WHERE id=?{$deleted} FOR UPDATE");
             $stmt->execute([$requestId]);
             $request = $stmt->fetch();
             if (!$request) {
                 throw new DomainException('Workflow request was not found.');
+            }
+            $normalizedAction=strtoupper($action);
+            if($entity==='division'
+                &&(string)$request['request_type']==='APPOINTMENT'
+                &&in_array($normalizedAction,['RETURN_FOR_CORRECTION','REJECT'],true)
+                &&$this->existingDivisionMaterialization($request)!==null){
+                throw new DomainException('This ARPA Division appointment is already operational after ASC approval and cannot be returned or rejected. Use the authorized administrative correction process if the historical assignment must be changed.');
+            }
+            if(in_array($normalizedAction,['RETURN_FOR_CORRECTION','REJECT'],true) && $this->nullText($comments)===null){
+                throw new DomainException('Comments are required when returning or rejecting a request.');
             }
             $transition = $entity==='division'
                 ? ArpaAppointmentRules::divisionRequestTransition((string)$request['request_type'],(string)$request['workflow_status'],$action,$stage)
