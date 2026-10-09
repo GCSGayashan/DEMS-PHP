@@ -3,8 +3,8 @@ $arpaPath=parse_url($_SERVER['REQUEST_URI']??'',PHP_URL_PATH)?:'';
 $arpaTabs=[
   ['Dashboard','hr/arpa-appointments','/hr/arpa-appointments'],
   ['New Assignments','hr/arpa-appointments/new','/hr/arpa-appointments/new'],
-  ['Submitted','hr/arpa-appointments/submitted','/hr/arpa-appointments/submitted'],
-  ['Review & Approve','hr/arpa-appointments/approval','/hr/arpa-appointments/approval'],
+  ['Pending Review & Approval','hr/arpa-appointments/submitted','/hr/arpa-appointments/submitted'],
+  ['My Completed Reviews & Approvals','hr/arpa-appointments/approval','/hr/arpa-appointments/approval'],
   ['Current Assignments','hr/arpa-appointments/open','/hr/arpa-appointments/open'],
   ['Assignment History','hr/arpa-appointments/history','/hr/arpa-appointments/history'],
   ['Appointment Timeline','hr/arpa-appointments/timeline','/hr/arpa-appointments/timeline'],

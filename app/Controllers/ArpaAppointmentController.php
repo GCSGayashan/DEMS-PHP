@@ -52,19 +52,19 @@ final class ArpaAppointmentController extends Controller
         }
 
         if($this->appointmentHierarchySummary(
-            'Submitted',
+            'Pending Review & Approval',
             'arpa-submitted-appointments-summary',
             null,
             null,
-            'Assignments waiting for your review or approval.'
+            'Assignments currently waiting for your verification or approval in your active working context.'
         ))return;
 
         $this->appointmentList(
-            'Submitted',
+            'Pending Review & Approval',
             'arpa-submitted-appointments',
             null,
             null,
-            'Assignments waiting for your review or approval.'
+            'Assignments currently waiting for your verification or approval in your active working context.'
         );
     }
 
@@ -78,11 +78,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Submitted',
+            'Pending Review & Approval',
             'arpa-submitted-appointments',
             'hr/arpa-appointments/submitted',
             $id,
-            'Assignments waiting for action at the selected Agrarian Service Center.'
+            'Assignments currently waiting for your verification or approval at the selected Agrarian Service Center.'
         );
     }
 
@@ -96,19 +96,19 @@ final class ArpaAppointmentController extends Controller
         }
 
         if($this->appointmentHierarchySummary(
-            'Review & Approve',
+            'My Completed Reviews & Approvals',
             'arpa-approval-verification-summary',
             null,
             null,
-            'Assignments you reviewed or approved during the current review cycle.'
+            'Your completed verification and approval actions from the current review cycle.'
         ))return;
 
         $this->appointmentList(
-            'Review & Approve',
+            'My Completed Reviews & Approvals',
             'arpa-approval-verification',
             null,
             null,
-            'Assignments you reviewed or approved during the current review cycle.'
+            'Your completed verification and approval actions from the current review cycle.'
         );
     }
 
@@ -122,11 +122,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Review & Approve',
+            'My Completed Reviews & Approvals',
             'arpa-approval-verification',
             'hr/arpa-appointments/approval',
             $id,
-            'Completed reviews and approvals for the selected Agrarian Service Center.'
+            'Your completed verification and approval actions for the selected Agrarian Service Center.'
         );
     }
 
@@ -429,11 +429,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentDistrictSummary(
-            'Submitted',
+            'Pending Review & Approval',
             'arpa-submitted-appointments-summary',
             'hr/arpa-appointments/submitted',
             $id,
-            'Assignments waiting for action, grouped by Agrarian Service Center in the selected District.'
+            'Assignments currently waiting for your verification or approval, grouped by Agrarian Service Center in the selected District.'
         );
     }
 
@@ -450,11 +450,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Submitted',
+            'Pending Review & Approval',
             'arpa-submitted-appointments',
             'hr/arpa-appointments/submitted',
             $ascId,
-            'Assignments waiting for action at the selected Agrarian Service Center.',
+            'Assignments currently waiting for your verification or approval at the selected Agrarian Service Center.',
             $districtId
         );
     }
@@ -469,11 +469,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentDistrictSummary(
-            'Review & Approve',
+            'My Completed Reviews & Approvals',
             'arpa-approval-verification-summary',
             'hr/arpa-appointments/approval',
             $id,
-            'Completed verification and approval actions grouped by ASC within the selected District.'
+            'Your completed verification and approval actions, grouped by ASC within the selected District.'
         );
     }
 
@@ -490,11 +490,11 @@ final class ArpaAppointmentController extends Controller
         }
 
         $this->appointmentAscList(
-            'Review & Approve',
+            'My Completed Reviews & Approvals',
             'arpa-approval-verification',
             'hr/arpa-appointments/approval',
             $ascId,
-            'Completed verification and approval actions for the selected Agrarian Service Center.',
+            'Your completed verification and approval actions for the selected Agrarian Service Center.',
             $districtId
         );
     }

@@ -24,7 +24,8 @@ final class ArpaWorkflowQueueTest
     private function layoutTest():void
     {
         $_SERVER['REQUEST_URI']='/DEMS-PHP/public/hr/arpa-appointments';ob_start();(new ArpaAppointmentController())->dashboard();$html=(string)ob_get_clean();
-        foreach(['<!doctype html>','class="topbar"','class="sidebar"','ARPA Officer Assignments','assets/css/app.css','assets/js/dems-charts.js','Submitted','Review &amp; Approve'] as $needle)$this->same(true,str_contains($html,$needle),"dashboard layout contains {$needle}");
+        foreach(['<!doctype html>','class="topbar"','class="sidebar"','ARPA Officer Assignments','assets/css/app.css','assets/js/dems-charts.js','Pending Review &amp; Approval','My Completed Reviews &amp; Approvals'] as $needle)$this->same(true,str_contains($html,$needle),"dashboard layout contains {$needle}");
+        $this->same(true,str_contains($html,'href="'.url('hr/arpa-appointments/submitted').'">View Pending Review &amp; Approval</a>'),'dashboard pending-action button opens the pending review and approval queue');
         $this->same(false,str_contains($html,'asset('),'dashboard output has no unresolved asset helper call');
     }
 
