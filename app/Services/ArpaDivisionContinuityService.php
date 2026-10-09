@@ -317,7 +317,7 @@ final class ArpaDivisionContinuityService
               JOIN legacy_arpa_appointment_preview p ON p.reconciled_business_key=i.reconciled_business_key AND p.active=1
               JOIN officer o ON o.id=i.officer_id
               LEFT JOIN legacy_arpa_appointment_resolution r ON r.reconciliation_item_id=i.id
-              WHERE i.active=1 AND i.diagnostic_blocker=1
+              WHERE i.active=1 AND i.diagnostic_blocker=1 AND p.assignment_category='ARPA_DIVISION' AND i.item_type<>'SPECIAL_ASC'
                 AND COALESCE(r.selected_target_arpa_id,i.candidate_arpa_id,p.arpa_location_id)=?
                 AND (r.id IS NULL OR r.resolution_status='REQUIRES_FURTHER_REVIEW')";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([self::BASELINE,$divisionId]);return $stmt->fetchAll();

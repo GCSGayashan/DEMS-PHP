@@ -63,7 +63,7 @@ final class ArpaDivisionTimelineService
                      FROM legacy_arpa_reconciliation_item i
                      JOIN legacy_arpa_appointment_preview p ON p.reconciled_business_key=i.reconciled_business_key AND p.active=1
                      LEFT JOIN legacy_arpa_appointment_resolution res ON res.reconciliation_item_id=i.id
-                     WHERE i.active=1 AND i.diagnostic_blocker=1
+                     WHERE i.active=1 AND i.diagnostic_blocker=1 AND p.assignment_category='ARPA_DIVISION' AND i.item_type<>'SPECIAL_ASC'
                        AND COALESCE(res.selected_target_arpa_id,i.candidate_arpa_id,p.arpa_location_id) IS NOT NULL
                        AND (res.id IS NULL OR res.resolution_status='REQUIRES_FURTHER_REVIEW')
                    ) mapped
