@@ -1218,7 +1218,7 @@ final class DataTableRegistry
             'with'=>$access['with'],
             'from'=>'arpa_appointment_workflow_action w JOIN arpa_division_appointment_request r ON r.id=w.request_id JOIN officer o ON o.id=r.officer_id LEFT JOIN location asc_l ON asc_l.id=r.asc_location_id LEFT JOIN location arpa ON arpa.id=r.arpa_division_location_id JOIN system_user actor ON actor.id=w.user_id',
             'select'=>['w.id','r.id request_id','r.officer_id','o.dad_number officer_number','o.name_with_initials officer_name','o.nic','asc_l.name_en asc_name','arpa.name_en arpa_name','r.appointment_type','r.requested_effective_from effective_from','w.action','w.stage','w.new_status resulting_status','COALESCE(actor.display_name,actor.username) action_officer','w.action_at','w.timestamp_provenance','r.workflow_status current_workflow_status'],
-            'count'=>'w.id','baseWhere'=>['w.user_id=?','r.legacy_history_only=0',$access['where']],
+            'count'=>'w.id','baseWhere'=>['w.user_id=?','r.legacy_history_only=0',"r.record_origin='NATIVE'","w.record_origin='NATIVE'",$access['where']],
             'baseParams'=>array_merge($access['params'],[$userId]),
             'searchable'=>['r.id','o.dad_number','o.name_with_initials','o.nic','asc_l.name_en','arpa.name_en','r.appointment_type','w.action','w.stage','w.new_status','r.workflow_status'],
             'filters'=>[

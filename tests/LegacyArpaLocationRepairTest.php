@@ -186,7 +186,8 @@ final class LegacyArpaLocationRepairTest
         }
         $completed=DataTableRegistry::definition('arpa-approval-verification');
         $this->same(true,in_array('r.legacy_history_only=0',$completed['baseWhere']??[],true),'completed workflow queue excludes historical-only requests');
-        $this->same(false,in_array("w.record_origin='NATIVE'",$completed['baseWhere']??[],true),'completed workflow history can retain non-history legacy evidence with unavailable timestamps');
+        $this->same(true,in_array("r.record_origin='NATIVE'",$completed['baseWhere']??[],true),'completed workflow queue excludes imported legacy requests');
+        $this->same(true,in_array("w.record_origin='NATIVE'",$completed['baseWhere']??[],true),'completed workflow queue excludes imported legacy actions');
         $open = DataTableRegistry::definition('arpa-open-appointments');
         $this->same(true, in_array('a.legacy_history_only=0', $open['baseWhere'] ?? [], true), 'Open Appointments excludes historical-only operational records');
         $pending = DataTableRegistry::definition('arpa-pending-actions');
