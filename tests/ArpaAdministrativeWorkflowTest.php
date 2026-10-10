@@ -27,7 +27,8 @@ final class ArpaAdministrativeWorkflowTest
         $submitted=$this->request($officer,$asc,$division,'APPOINTMENT','SUBMITTED',null,'2026-02-01');
         $legacy=$this->request($officer,$asc,$division,'END','NATIONAL_APPROVED','2025-01-15',null,'LEGACY_IMPORT');
         $profile=(new OfficerProfileService($this->pdo))->profile($officer,[],null,true);$ids=array_column($profile['arpa_workflow_requests'],'id');
-        foreach([$returned,$submitted,$legacy] as $id)$this->same(true,in_array($id,$ids,true),'dems.admin profile includes every request status/origin');
+        foreach([$returned,$submitted] as $id)$this->same(true,in_array($id,$ids,true),'dems.admin profile includes native workflow requests regardless of status');
+        $this->same(false,in_array($legacy,$ids,true),'dems.admin workflow-request table excludes imported legacy requests represented by appointment history');
         $this->same(false,in_array($submitted,array_column($profile['current_appointments'],'request_id'),true),'submitted workflow is not presented as an authoritative current assignment');
 
         $this->throws(fn()=>$service->deleteRequest($returned,'',$admin),'delete reason is mandatory');
@@ -35,6 +36,7 @@ final class ArpaAdministrativeWorkflowTest
         $this->pdo->prepare("INSERT INTO system_notification(id,recipient_user_id,notification_type,module_code,title,message,entity_type,entity_id,workflow_stage,action_status,dedupe_key) VALUES(UUID(),?,'ACTION_REQUIRED','ARPA_APPOINTMENT','Correction','Correction required','ARPA_DIVISION_REQUEST',?,'CORRECTION','PENDING',?)")->execute([$admin,$returned,'test-'.$returned]);
         $service->deleteRequest($returned,'Duplicate returned END request',$admin);
         $this->same(1,(int)$this->value('SELECT COUNT(*) FROM arpa_division_appointment_request WHERE id=? AND deleted_at IS NOT NULL',[$returned]),'eligible request is soft deleted');
+        $profile=(new OfficerProfileService($this->pdo))->profile($officer,[],null,true);$this->same(true,in_array($returned,array_column($profile['arpa_workflow_requests'],'id'),true),'administratively deleted native request remains visible in the workflow-request table');
         $this->same(1,(int)$this->value('SELECT COUNT(*) FROM arpa_appointment_workflow_action WHERE request_id=?',[$returned]),'workflow audit history is retained');
         $this->same('CANCELLED',(string)$this->value('SELECT action_status FROM system_notification WHERE entity_id=?',[$returned]),'only request notification is cancelled');
         $this->same(1,(int)$this->value("SELECT COUNT(*) FROM audit_event WHERE target_id=? AND action_key='arpa.appointment.workflow-request.admin-delete'",[$returned]),'administrative deletion is audited');

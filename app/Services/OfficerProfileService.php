@@ -35,7 +35,7 @@ final class OfficerProfileService
                 LEFT JOIN arpa_division_appointment source_a ON source_a.id=r.source_appointment_id
                 LEFT JOIN arpa_division_appointment canonical ON canonical.request_id=r.id
                 LEFT JOIN arpa_division_appointment_closure closure ON closure.request_id=r.id
-               WHERE r.officer_id=?
+               WHERE r.officer_id=? AND r.record_origin='NATIVE'
                ORDER BY COALESCE(r.requested_effective_from,r.requested_effective_to,r.created_at) DESC,r.created_at DESC,r.id";
         $s=$this->pdo->prepare($sql);$s->execute([$officerId]);return $s->fetchAll();
     }
