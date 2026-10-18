@@ -288,6 +288,7 @@ final class ArpaDivisionContinuityService
     private function canonicalIssues(string $divisionId):array
     {
         $source=ArpaAppointmentReadService::issueSource();
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'dc');
         $sql="SELECT q.row_key,q.issue_type,q.severity,q.officer_number,q.officer_name,q.appointment_types,q.effective_periods,
                      MIN(a.effective_from) issue_from,MAX(COALESCE(c.effective_to,'9999-12-31')) issue_to
               FROM {$source} q
@@ -295,14 +296,14 @@ final class ArpaDivisionContinuityService
               LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
               WHERE a.arpa_division_location_id=?
                 AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
-                               WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))
+                               WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective})
               GROUP BY q.row_key,q.issue_type,q.severity,q.officer_number,q.officer_name,q.appointment_types,q.effective_periods
               UNION ALL
               SELECT q.row_key,q.issue_type,q.severity,q.officer_number,q.officer_name,q.appointment_types,q.effective_periods,
                      COALESCE(r.requested_effective_from,?) issue_from,COALESCE(r.requested_effective_to,'9999-12-31') issue_to
               FROM {$source} q JOIN arpa_division_appointment_request r ON r.id=q.related_ids
               WHERE r.arpa_division_location_id=? AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id)
-                AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+                AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective})";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$divisionId,self::BASELINE,$divisionId]);return $stmt->fetchAll();
     }
 

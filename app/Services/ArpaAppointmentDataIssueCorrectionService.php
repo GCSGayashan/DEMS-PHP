@@ -10,6 +10,10 @@ use Throwable;
 
 final class ArpaAppointmentDataIssueCorrectionService
 {
+    private const CORRECTION_COLUMNS='c.id,c.issue_row_key,c.issue_type,c.officer_id,c.appointment_id,c.request_id,
+        c.related_appointment_ids_json,c.asc_location_id,c.corrected_by,c.corrected_at,c.correction_action,
+        c.resolution_status,c.correction_reason,c.remarks,c.evidence_reference,c.before_json,c.after_json,
+        c.source,c.record_origin,c.legacy_source_references_json,c.created_at';
     public const PERMISSION='arpa.appointment.data-issue.correct';
     public const CORRECTABLE_ISSUES=[
         'DIVISION_MULTIPLE_OPEN','OFFICER_MULTIPLE_PERMANENT','OFFICER_MULTIPLE_ACTING',
@@ -37,11 +41,113 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
 
     /** @return array<string,mixed> */
-    public function validateCanonicalPromotion(string $appointmentId,?string $businessDate=null,bool $includeLegacyPeerConflicts=true):array
+    public function validateCanonicalPromotion(string $appointmentId,?string $businessDate=null,bool $includeLegacyPeerConflicts=true,?string $ignoreCorrectionId=null):array
     {
-        $rows=$this->canonicalPromotionRows($appointmentId,$businessDate,false);
+        $rows=$this->canonicalPromotionRows($appointmentId,$businessDate,false,$ignoreCorrectionId);
         if($rows===[])return ['eligible'=>false,'classification'=>'SKIPPED_OTHER_DATA_ISSUE','blocker_code'=>'APPOINTMENT_NOT_FOUND','blocker_reason'=>'The imported appointment was not found.'];
         return array_merge($rows[0],$this->canonicalPromotionAssessmentFromRow($rows[0],$includeLegacyPeerConflicts));
+    }
+
+    /**
+     * Internal final-approval application. It is deliberately unusable as a
+     * stand-alone correction endpoint: the caller must own the transaction and
+     * the amendment must already be awaiting National approval.
+     *
+     * @return array{correction_id:string,resolution_status:string}
+     */
+    public function applyApprovedAmendmentInTransaction(string $amendmentId,string $actorId):array
+    {
+        if(!$this->pdo->inTransaction())throw new DomainException('Correction amendment application requires the final approval transaction.');
+        if(!Auth::isCurrentUser($actorId)||Auth::activeContextForUser($actorId)===null
+            ||!Auth::can('arpa.appointment.national-approve')){
+            throw new DomainException('A current National approval context is required to apply this correction amendment.');
+        }
+        $stmt=$this->pdo->prepare("SELECT * FROM arpa_appointment_correction_amendment_request WHERE id=? FOR UPDATE");
+        $stmt->execute([$amendmentId]);$amendment=$stmt->fetch();
+        if(!$amendment||(string)$amendment['workflow_status']!=='NATIONAL_VERIFIED'||$amendment['applied_correction_id']!==null){
+            throw new DomainException('This correction amendment is not awaiting final National approval.');
+        }
+        if(!ScopeService::canAccessCurrentArpaStage($actorId,'NATIONAL',(string)$amendment['asc_location_id'])){
+            throw new DomainException('This correction amendment is outside your current National scope.');
+        }
+
+        $stmt=$this->pdo->prepare('SELECT * FROM arpa_appointment_data_correction WHERE id=? FOR UPDATE');
+        $stmt->execute([$amendment['source_correction_id']]);$source=$stmt->fetch();
+        if(!$source||empty($source['appointment_id']))throw new DomainException('A request-only correction cannot create or amend a canonical appointment.');
+        $stmt=$this->pdo->prepare('SELECT id FROM arpa_appointment_data_correction WHERE supersedes_correction_id=? FOR UPDATE');
+        $stmt->execute([$source['id']]);if($stmt->fetchColumn())throw new DomainException('This correction decision has already been superseded.');
+        if((string)$source['appointment_id']!==(string)$amendment['appointment_id']
+            ||(string)$source['officer_id']!==(string)$amendment['officer_id']
+            ||(string)$source['asc_location_id']!==(string)$amendment['asc_location_id']){
+            throw new DomainException('The approved amendment no longer matches its source correction identity.');
+        }
+
+        $related=$this->decode((string)$source['related_appointment_ids_json']);
+        if(!is_array($related))$related=[];
+        $related=array_values(array_unique(array_filter($related,static fn(mixed $id):bool=>is_string($id)&&preg_match('/^[0-9a-f-]{36}$/i',$id)===1)));
+        if(!in_array((string)$amendment['appointment_id'],$related,true))$related[]=(string)$amendment['appointment_id'];
+        $this->lockAppointments($related);
+        $this->lockRelatedAppointmentState($related);
+        $before=$this->appointments($related);
+        if($before===[])throw new DomainException('The source appointment no longer exists.');
+        if(!$this->allAppointmentsBelongToAsc($before,(string)$amendment['asc_location_id'])){
+            throw new DomainException('The source correction spans more than one ASC and cannot be applied through this amendment.');
+        }
+        $target=null;foreach($before as $row)if((string)$row['id']===(string)$amendment['appointment_id'])$target=$row;
+        if($target===null)throw new DomainException('The source appointment no longer exists.');
+
+        $proposal=$this->decode((string)$amendment['proposed_json']);
+        $input=$proposal+[
+            'appointment_id'=>$amendment['appointment_id'],
+            'remarks'=>$amendment['remarks'],
+            'evidence_reference'=>$amendment['evidence_reference'],
+        ];
+        $action=(string)$amendment['proposed_action'];
+        if(!in_array($action,self::ACTIONS,true))throw new DomainException('Unsupported correction amendment action.');
+        $divisionIds=[(string)$target['arpa_division_location_id']];
+        if($action==='CORRECT_ARPA_DIVISION')$divisionIds[]=(string)($proposal['arpa_division_location_id']??'');
+        $this->lockDivisions($divisionIds);
+        $correctionId=$this->uuid();
+
+        if($action==='RESOLVE_CANONICAL_ASSIGNMENT'){
+            $this->applyAmendmentPromotion($target,$source,$amendment,$actorId,$correctionId);
+        }elseif($action==='KEEP_AS_HISTORICAL_EXCEPTION'){
+            $this->assertLegacyCorrection($target);
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=1,legacy_exception=1 WHERE id=?')
+                ->execute([$target['id']]);
+            $this->pdo->prepare("UPDATE arpa_division_appointment_request
+                SET legacy_history_only=1,legacy_exception=1,updated_by=?,updated_at=NOW(),version=version+1
+                WHERE id=? AND record_origin='LEGACY_IMPORT'")->execute([$actorId,$target['request_id']]);
+        }else{
+            $this->validateAmendmentWrite($action,$target,$before,$input);
+            if($action==='CLEAR_EFFECTIVE_TO'){
+                if($target['closure_id']===null)throw new DomainException('This appointment is already open.');
+                $this->pdo->prepare('DELETE FROM arpa_division_appointment_closure WHERE id=?')->execute([$target['closure_id']]);
+            }else{
+                $this->apply($action,$target,$before,$input,$correctionId);
+            }
+        }
+
+        $after=$this->appointments($related);
+        $resolution=$action==='KEEP_AS_HISTORICAL_EXCEPTION'?'KEPT_HISTORICAL_EXCEPTION':'RESOLVED_BY_CORRECTION';
+        $this->pdo->prepare('INSERT INTO arpa_appointment_data_correction(
+            id,issue_row_key,issue_type,officer_id,appointment_id,request_id,related_appointment_ids_json,
+            asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,remarks,
+            evidence_reference,before_json,after_json,record_origin,legacy_source_references_json,
+            supersedes_correction_id,amendment_request_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')->execute([
+            $correctionId,$source['issue_row_key'],$source['issue_type'],$target['officer_id'],$target['id'],$target['request_id'],$this->json($related),
+            $target['asc_location_id'],$actorId,$action,$resolution,$amendment['correction_reason'],$amendment['remarks'],
+            $amendment['evidence_reference'],$this->json($before),$this->json($after),$target['record_origin'],
+            $source['legacy_source_references_json'],$source['id'],$amendmentId,
+        ]);
+        $this->pdo->prepare("INSERT INTO audit_event(actor_user_id,action_key,target_type,target_id,details_json,severity,source_ip)
+            VALUES(?,'arpa.appointment.correction-amendment.apply','ARPA_APPOINTMENT_DATA_CORRECTION',?,?,'WARNING',?)")
+            ->execute([$actorId,$correctionId,$this->json([
+                'amendment_request_id'=>$amendmentId,'supersedes_correction_id'=>$source['id'],
+                'appointment_id'=>$target['id'],'action'=>$action,'before'=>$before,'after'=>$after,
+            ]),$_SERVER['REMOTE_ADDR']??'CLI']);
+        return ['correction_id'=>$correctionId,'resolution_status'=>$resolution];
     }
 
     /** @return array<string,mixed> Backwards-compatible name for existing callers/tests. */
@@ -155,7 +261,8 @@ final class ArpaAppointmentDataIssueCorrectionService
         return $this->transaction(function()use($rowKey,$input,$actorId,$reason,$action):array{
             $issue=$this->issue($rowKey);
             if(!$issue){
-                $s=$this->pdo->prepare("SELECT COUNT(*) FROM arpa_appointment_data_correction WHERE issue_row_key=? AND resolution_status='RESOLVED_BY_CORRECTION'");$s->execute([$rowKey]);
+                $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'decision');
+                $s=$this->pdo->prepare("SELECT COUNT(*) FROM arpa_appointment_data_correction decision WHERE decision.issue_row_key=? AND decision.resolution_status='RESOLVED_BY_CORRECTION' AND {$effective}");$s->execute([$rowKey]);
                 if((int)$s->fetchColumn()>0)throw new DomainException('This Data Issue has already been resolved.');
                 throw new DomainException('The issue is no longer active. Refresh the diagnostic before correcting it.');
             }
@@ -196,14 +303,14 @@ final class ArpaAppointmentDataIssueCorrectionService
 
     public function correctionsForOfficer(string $officerId,?array $ascIds=null):array
     {
-        $sql='SELECT c.*,u.username,u.display_name,l.name_en asc_name,a.appointment_type,a.arpa_name_snapshot FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by JOIN location l ON l.id=c.asc_location_id LEFT JOIN arpa_division_appointment a ON a.id=c.appointment_id WHERE c.officer_id=?';$params=[$officerId];
+        $sql='SELECT '.self::CORRECTION_COLUMNS.',u.username,u.display_name,l.name_en asc_name,a.appointment_type,a.arpa_name_snapshot FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by JOIN location l ON l.id=c.asc_location_id LEFT JOIN arpa_division_appointment a ON a.id=c.appointment_id WHERE c.officer_id=?';$params=[$officerId];
         if($ascIds!==null){if($ascIds===[])return [];$sql.=' AND c.asc_location_id IN('.implode(',',array_fill(0,count($ascIds),'?')).')';$params=array_merge($params,$ascIds);}
         $sql.=' ORDER BY c.corrected_at DESC,c.id DESC';$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchAll();
     }
 
     public function correctionsForAppointment(string $appointmentId):array
     {
-        $s=$this->pdo->prepare('SELECT c.*,COALESCE(NULLIF(u.display_name,\'\'),u.username) corrected_by_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by WHERE c.appointment_id=? OR JSON_CONTAINS(c.related_appointment_ids_json,JSON_QUOTE(?)) ORDER BY c.corrected_at,c.id');
+        $s=$this->pdo->prepare('SELECT '.self::CORRECTION_COLUMNS.',COALESCE(NULLIF(u.display_name,\'\'),u.username) corrected_by_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by WHERE c.appointment_id=? OR JSON_CONTAINS(c.related_appointment_ids_json,JSON_QUOTE(?)) ORDER BY c.corrected_at,c.id');
         $s->execute([$appointmentId,$appointmentId]);return $s->fetchAll();
     }
 
@@ -251,7 +358,7 @@ final class ArpaAppointmentDataIssueCorrectionService
 
     public function correction(string $id,string $viewerId):array
     {
-        $s=$this->pdo->prepare('SELECT c.*,u.username,u.display_name,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,l.dad_number asc_number,l.name_en asc_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by JOIN officer o ON o.id=c.officer_id JOIN location l ON l.id=c.asc_location_id WHERE c.id=?');$s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('Correction record was not found.');
+        $s=$this->pdo->prepare('SELECT '.self::CORRECTION_COLUMNS.',u.username,u.display_name,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,l.dad_number asc_number,l.name_en asc_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by JOIN officer o ON o.id=c.officer_id JOIN location l ON l.id=c.asc_location_id WHERE c.id=?');$s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('Correction record was not found.');
         if(!ScopeService::canAccessLocation($viewerId,(string)$row['asc_location_id'],date('Y-m-d')))throw new DomainException('You cannot view corrections outside your assigned location.');
         $row['technical_details_allowed']=$this->canViewTechnicalDetails($viewerId);
         return $row;
@@ -424,6 +531,87 @@ final class ArpaAppointmentDataIssueCorrectionService
             ->execute([$this->uuid(),$target['record_origin'],$target['id'],$target['request_id'],$date,$reason,$correctionId,'Direct appointment data-issue correction; see append-only correction ledger.',$target['hierarchy_snapshot_json'],$legacy?'UNAVAILABLE_FROM_LEGACY_SOURCE':'DATA_CORRECTION_RECORDED',$this->json($metadata)]);
     }
 
+    /** @param array<string,mixed> $target @param array<int,array<string,mixed>> $all @param array<string,mixed> $input */
+    private function validateAmendmentWrite(string $action,array $target,array $all,array $input):void
+    {
+        $division=(string)$target['arpa_division_location_id'];
+        $from=(string)$target['effective_from'];
+        $to=$target['effective_to']===null?null:(string)$target['effective_to'];
+        if($action==='SET_EFFECTIVE_TO')$to=$this->date($input['effective_to']??null,'Correct End Date');
+        if($action==='CLEAR_EFFECTIVE_TO')$to=null;
+        if($action==='CORRECT_EFFECTIVE_FROM')$from=$this->date($input['effective_from']??null,'Correct Start Date');
+        if($action==='CORRECT_ARPA_DIVISION')$division=(string)($input['arpa_division_location_id']??'');
+        $type=$action==='CORRECT_APPOINTMENT_TYPE'?strtoupper(trim((string)($input['appointment_type']??''))):(string)$target['appointment_type'];
+
+        if(in_array($action,['SET_EFFECTIVE_TO','CLEAR_EFFECTIVE_TO','CORRECT_EFFECTIVE_FROM','CORRECT_ARPA_DIVISION','CORRECT_APPOINTMENT_TYPE'],true)){
+            if($to!==null&&$to<$from)throw new DomainException('The corrected end date cannot be earlier than the start date.');
+            $this->assertHistoricalPeriodAvailable($division,$from,$to,(string)$target['id'],(string)$target['request_id']);
+            $this->assertFollowingContinuity((string)$target['id'],$division,$from,$to,(string)$target['request_id']);
+            (new ArpaAppointmentReadService($this->pdo))->assertAppointmentTypeAvailable(
+                (string)$target['officer_id'],$type,$division,$from,$to,(string)$target['request_id'],(string)$target['id']
+            );
+        }
+        if($action==='SELECT_CURRENT_RECORD'){
+            $selected=(string)($input['appointment_id']??'');
+            if(!in_array($selected,array_map(static fn(array $row):string=>(string)$row['id'],$all),true)){
+                throw new DomainException('The selected appointment is not part of the source correction decision.');
+            }
+        }
+    }
+
+    /** @param array<string,mixed> $target @param array<string,mixed> $source @param array<string,mixed> $amendment */
+    private function applyAmendmentPromotion(array $target,array $source,array $amendment,string $actorId,string $correctionId):void
+    {
+        if((string)$target['record_origin']!=='LEGACY_IMPORT'||(int)$target['legacy_history_only']!==1){
+            throw new DomainException('Only an imported open history-only appointment can be made authoritative through this amendment.');
+        }
+        if($target['closure_id']!==null||$target['effective_to']!==null)throw new DomainException('An ended historical appointment cannot be promoted as the current assignment.');
+        $assessment=$this->validateCanonicalPromotion((string)$target['id'],null,false,(string)$source['id']);
+        if(!$assessment['eligible'])throw new DomainException((string)$assessment['blocker_reason']);
+        if((int)($assessment['exact_duplicate_count']??0)>0){
+            throw new DomainException('A native workflow request already represents this assignment. Resolve that request before approving this amendment.');
+        }
+        $this->assertHistoricalPeriodAvailable((string)$target['arpa_division_location_id'],(string)$target['effective_from'],null,(string)$target['id'],(string)$target['request_id']);
+        (new ArpaAppointmentReadService($this->pdo))->assertAppointmentTypeAvailable(
+            (string)$target['officer_id'],(string)$target['appointment_type'],(string)$target['arpa_division_location_id'],
+            (string)$target['effective_from'],null,(string)$target['request_id'],(string)$target['id']
+        );
+        $metadata=$this->decode((string)$target['origin_metadata_json']);
+        $metadata['correction_amendment_resolution']=[
+            'amendment_request_id'=>$amendment['id'],'replacement_correction_id'=>$correctionId,
+            'supersedes_correction_id'=>$source['id'],'approved_by'=>$actorId,'approved_at'=>date(DATE_ATOM),
+        ];
+        $encoded=$this->json($metadata);
+        $this->pdo->prepare('UPDATE arpa_division_appointment SET legacy_history_only=0,legacy_exception=0,origin_metadata_json=? WHERE id=?')
+            ->execute([$encoded,$target['id']]);
+        $this->pdo->prepare("UPDATE arpa_division_appointment_request
+            SET legacy_history_only=0,legacy_exception=0,origin_metadata_json=?,updated_by=?,updated_at=NOW(),version=version+1
+            WHERE id=?")
+            ->execute([$encoded,$actorId,$target['request_id']]);
+    }
+
+    /** @param array<int,string> $divisionIds */
+    private function lockDivisions(array $divisionIds):void
+    {
+        $divisionIds=array_values(array_unique(array_filter($divisionIds,static fn(string $id):bool=>$id!=='')));
+        sort($divisionIds,SORT_STRING);
+        foreach($divisionIds as $divisionId)$this->lockDivision($divisionId);
+    }
+
+    /** @param array<int,string> $appointmentIds */
+    private function lockRelatedAppointmentState(array $appointmentIds):void
+    {
+        if($appointmentIds===[])return;
+        $marks=implode(',',array_fill(0,count($appointmentIds),'?'));
+        $stmt=$this->pdo->prepare("SELECT r.id FROM arpa_division_appointment_request r
+            JOIN arpa_division_appointment a ON a.request_id=r.id
+            WHERE a.id IN({$marks}) ORDER BY r.id FOR UPDATE");
+        $stmt->execute($appointmentIds);$stmt->fetchAll();
+        $stmt=$this->pdo->prepare("SELECT c.id FROM arpa_division_appointment_closure c
+            WHERE c.appointment_id IN({$marks}) ORDER BY c.id FOR UPDATE");
+        $stmt->execute($appointmentIds);$stmt->fetchAll();
+    }
+
     private function appointments(array $ids):array
     {
         if($ids===[])return [];$marks=implode(',',array_fill(0,count($ids),'?'));
@@ -452,7 +640,7 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
 
     /** @return array<int,array<string,mixed>> */
-    private function canonicalPromotionRows(?string $appointmentId,?string $businessDate,bool $onlyCandidates):array
+    private function canonicalPromotionRows(?string $appointmentId,?string $businessDate,bool $onlyCandidates,?string $ignoreCorrectionId=null):array
     {
         $date=$this->date($businessDate??date('Y-m-d'),'Business date');$asOf=$this->pdo->quote($date);
         $reserving="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
@@ -463,19 +651,28 @@ final class ArpaAppointmentDataIssueCorrectionService
                 AND r2.asc_location_id=a.asc_location_id AND r2.arpa_division_location_id=a.arpa_division_location_id
                 AND r2.requested_effective_from=a.effective_from AND r2.requested_effective_to IS NULL
                 AND r2.request_type='APPOINTMENT' AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment exact_a WHERE exact_a.request_id=r2.id)";
+        $effectiveDone=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'done2');
+        $effectiveKept=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'kept');
+        $effectiveResolved=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'resolved');
+        $ignoreDone=$ignoreCorrectionId===null?'':' AND done2.id<>'.$this->pdo->quote($ignoreCorrectionId);
+        $ignoreKept=$ignoreCorrectionId===null?'':' AND kept.id<>'.$this->pdo->quote($ignoreCorrectionId);
+        $ignoreResolved=$ignoreCorrectionId===null?'':' AND resolved.id<>'.$this->pdo->quote($ignoreCorrectionId);
         $activeLegacyCandidate="a2.record_origin='LEGACY_IMPORT' AND a2.legacy_history_only=1
                 AND c2.id IS NULL AND a2.effective_from<={$asOf}
                 AND NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction done2 WHERE done2.appointment_id=a2.id
                     AND done2.correction_action IN('RESOLVE_CANONICAL_ASSIGNMENT','KEEP_AS_HISTORICAL_EXCEPTION')
-                    AND done2.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+                    AND done2.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION')
+                    AND {$effectiveDone}{$ignoreDone})";
         $requestOverlap="r2.requested_effective_from IS NOT NULL AND COALESCE(r2.requested_effective_to,'9999-12-31')>=a.effective_from";
         $sql="SELECT a.*,r.workflow_status,r.deleted_at request_deleted_at,c.id closure_id,c.effective_to,{$asOf} business_date,
                      o.dad_number officer_number,o.name_with_initials officer_name,o.nic,o.arpa_service_permanency,
                      a.arpa_name_snapshot arpa_division_name,a.asc_name_snapshot asc_name,a.district_name_snapshot district_name,
                      EXISTS(SELECT 1 FROM arpa_appointment_data_correction kept WHERE kept.appointment_id=a.id
-                       AND kept.correction_action='KEEP_AS_HISTORICAL_EXCEPTION' AND kept.resolution_status='KEPT_HISTORICAL_EXCEPTION') kept_historical,
+                       AND kept.correction_action='KEEP_AS_HISTORICAL_EXCEPTION' AND kept.resolution_status='KEPT_HISTORICAL_EXCEPTION'
+                       AND {$effectiveKept}{$ignoreKept}) kept_historical,
                      EXISTS(SELECT 1 FROM arpa_appointment_data_correction resolved WHERE resolved.appointment_id=a.id
-                       AND resolved.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND resolved.resolution_status='RESOLVED_BY_CORRECTION') already_resolved,
+                       AND resolved.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND resolved.resolution_status='RESOLVED_BY_CORRECTION'
+                       AND {$effectiveResolved}{$ignoreResolved}) already_resolved,
                      (SELECT MIN(a2.effective_from) FROM arpa_division_appointment a2 LEFT JOIN arpa_division_appointment_closure c2 ON c2.appointment_id=a2.id
                        WHERE a2.id<>a.id AND a2.arpa_division_location_id=a.arpa_division_location_id
                          AND {$authoritativePeriod} AND a2.effective_from<='9999-12-31'
@@ -630,7 +827,11 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
     private function isDataIssueCanonical(string $appointmentId):bool
     {
-        $s=$this->pdo->prepare("SELECT COUNT(*) FROM arpa_appointment_data_correction WHERE appointment_id=? AND correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND resolution_status='RESOLVED_BY_CORRECTION'");$s->execute([$appointmentId]);return (int)$s->fetchColumn()>0;
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'decision');
+        $s=$this->pdo->prepare("SELECT COUNT(*) FROM arpa_appointment_data_correction decision
+            WHERE decision.appointment_id=? AND decision.correction_action='RESOLVE_CANONICAL_ASSIGNMENT'
+              AND decision.resolution_status='RESOLVED_BY_CORRECTION' AND {$effective}");
+        $s->execute([$appointmentId]);return (int)$s->fetchColumn()>0;
     }
     private function sourceReferencesForRequest(string $requestId):array
     {
@@ -673,8 +874,8 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
     private function appointment(string $id):array{$rows=$this->appointments([$id]);if(!$rows)throw new DomainException('Appointment was not found.');return $rows[0];}
     private function permanentAppointments(string $officerId):array{$s=$this->pdo->prepare("SELECT a.id,a.record_origin,a.arpa_name_snapshot,a.asc_name_snapshot,a.effective_from,c.effective_to,a.legacy_history_only,a.legacy_exception FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id WHERE a.officer_id=? AND a.appointment_type='PERMANENT' ORDER BY a.effective_from");$s->execute([$officerId]);return $s->fetchAll();}
-    private function corrections(string $rowKey):array{$s=$this->pdo->prepare('SELECT c.*,u.username,u.display_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by WHERE c.issue_row_key=? ORDER BY c.corrected_at DESC,c.id DESC');$s->execute([$rowKey]);return $s->fetchAll();}
-    private function issueFromLedger(string $rowKey):array{$s=$this->pdo->prepare('SELECT c.issue_row_key row_key,c.issue_type,c.resolution_status severity,c.officer_id,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,c.asc_location_id,l.name_en asc_name,COALESCE(a.arpa_name_snapshot,\'Reviewed issue\') arpa_divisions,COALESCE(a.appointment_type,\'\') appointment_types,COALESCE(CONCAT(a.effective_from,\' to Reviewed\'),\'Reviewed\') effective_periods,JSON_UNQUOTE(c.related_appointment_ids_json) related_ids,c.record_origin origin,\'Reviewed appointment data issue\' explanation,c.resolution_status recommended_action FROM arpa_appointment_data_correction c JOIN officer o ON o.id=c.officer_id JOIN location l ON l.id=c.asc_location_id LEFT JOIN arpa_division_appointment a ON a.id=c.appointment_id WHERE c.issue_row_key=? ORDER BY c.corrected_at DESC,c.id DESC LIMIT 1');$s->execute([$rowKey]);$row=$s->fetch();if(!$row)throw new DomainException('Correction record was not found.');$decoded=json_decode((string)$row['related_ids'],true);$row['related_ids']=is_array($decoded)?implode(',',$decoded):(string)$row['related_ids'];return $row;}
+    private function corrections(string $rowKey):array{$s=$this->pdo->prepare('SELECT '.self::CORRECTION_COLUMNS.',u.username,u.display_name FROM arpa_appointment_data_correction c JOIN system_user u ON u.id=c.corrected_by WHERE c.issue_row_key=? ORDER BY c.corrected_at DESC,c.id DESC');$s->execute([$rowKey]);return $s->fetchAll();}
+    private function issueFromLedger(string $rowKey):array{$effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'c');$s=$this->pdo->prepare('SELECT c.issue_row_key row_key,c.issue_type,c.resolution_status severity,c.officer_id,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,c.asc_location_id,l.name_en asc_name,COALESCE(a.arpa_name_snapshot,\'Reviewed issue\') arpa_divisions,COALESCE(a.appointment_type,\'\') appointment_types,COALESCE(CONCAT(a.effective_from,\' to Reviewed\'),\'Reviewed\') effective_periods,JSON_UNQUOTE(c.related_appointment_ids_json) related_ids,c.record_origin origin,\'Reviewed appointment data issue\' explanation,c.resolution_status recommended_action FROM arpa_appointment_data_correction c JOIN officer o ON o.id=c.officer_id JOIN location l ON l.id=c.asc_location_id LEFT JOIN arpa_division_appointment a ON a.id=c.appointment_id WHERE c.issue_row_key=? AND '.$effective.' ORDER BY c.corrected_at DESC,c.id DESC LIMIT 1');$s->execute([$rowKey]);$row=$s->fetch();if(!$row)throw new DomainException('Correction record was not found.');$decoded=json_decode((string)$row['related_ids'],true);$row['related_ids']=is_array($decoded)?implode(',',$decoded):(string)$row['related_ids'];return $row;}
     private function arpaDivisions(string $ascId):array{$s=$this->pdo->prepare("SELECT l.id,l.dad_number,l.name_en FROM location_relationship lr JOIN location l ON l.id=lr.child_location_id JOIN location_type lt ON lt.id=l.location_type_id AND lt.system_key='ARPA_DIVISION' WHERE lr.parent_location_id=? AND lr.relationship_type='ASC_ARPA_DIVISION' AND lr.active=1 AND lr.approval_status='APPROVED' ORDER BY l.name_en,l.dad_number");$s->execute([$ascId]);return $s->fetchAll();}
     private function locationSnapshot(string $ascId,string $arpaId,string $date):array
     {

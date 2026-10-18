@@ -216,11 +216,13 @@ final class ArpaAppointmentBulkCanonicalizationService
     /** @return array<int,array<string,mixed>> */
     private function normalizationRows(?string $appointmentId,bool $onlyEligible):array
     {
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'dc');
         $sql="SELECT a.id,a.record_origin,a.request_id,a.officer_id,a.appointment_type,a.asc_location_id,a.arpa_division_location_id,
                      a.asc_name_snapshot asc_name,a.arpa_name_snapshot arpa_division_name,a.effective_from,a.legacy_history_only,
                      a.legacy_exception,a.legacy_exception_codes_json,c.id closure_id,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,
                      (SELECT dc.id FROM arpa_appointment_data_correction dc WHERE dc.appointment_id=a.id
                         AND dc.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND dc.resolution_status='RESOLVED_BY_CORRECTION'
+                        AND {$effective}
                         ORDER BY dc.corrected_at DESC,dc.id DESC LIMIT 1) canonical_correction_id,
                      (JSON_SEARCH(COALESCE(a.legacy_exception_codes_json,JSON_ARRAY()),'one','DATA_ISSUE_RESOLUTION') IS NOT NULL) has_resolution_provenance
               FROM arpa_division_appointment a
@@ -231,7 +233,7 @@ final class ArpaAppointmentBulkCanonicalizationService
         if($onlyEligible)$sql.=" AND a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=0 AND a.legacy_exception=1 AND c.id IS NULL
             AND JSON_SEARCH(COALESCE(a.legacy_exception_codes_json,JSON_ARRAY()),'one','DATA_ISSUE_RESOLUTION') IS NOT NULL
             AND EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.appointment_id=a.id
-                AND dc.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND dc.resolution_status='RESOLVED_BY_CORRECTION')";
+                AND dc.correction_action='RESOLVE_CANONICAL_ASSIGNMENT' AND dc.resolution_status='RESOLVED_BY_CORRECTION' AND {$effective})";
         $sql.=' ORDER BY a.effective_from,a.id';$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchAll();
     }
 

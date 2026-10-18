@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Services\{ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,NotificationService,OfficerOfficeAssignmentService,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
+use App\Services\{ArpaAppointmentCorrectionAmendmentFeature,ArpaAppointmentCorrectionDecision,ArpaAppointmentIssuePresentation,ArpaAppointmentRules,ArpaDivisionTimelineService,ArpaOfficerTimelineService,ArpaWorkflowQueuePolicy,AssignmentDeletePolicy,AssignmentDirectEditPolicy,LocationDirectEditPolicy,NotificationService,OfficerOfficeAssignmentService,OfficerWorkflowService,UserAccessManagementService,UserAccountRequestService};
 use RuntimeException;
 
 final class DataTableRegistry
@@ -66,6 +66,8 @@ final class DataTableRegistry
             'arpa-officer-timelines' => self::arpaOfficerTimelines(),
             'arpa-appointment-issues' => self::arpaAppointmentIssues(),
             'arpa-appointment-corrections' => self::arpaAppointmentCorrections(),
+            'arpa-correction-amendments-pending' => self::arpaCorrectionAmendmentsPending(),
+            'arpa-correction-amendments-completed' => self::arpaCorrectionAmendmentsCompleted(),
             'arpa-subject-assignments' => self::arpaSubjectAssignments(),
             'arpa-pending-actions' => self::arpaPendingActions(),
             'arpa-officer-division-history' => self::arpaOfficerDivisionHistory($input),
@@ -1468,7 +1470,9 @@ final class DataTableRegistry
 
     private static function arpaAppointmentIssues():array
     {
-        $geo=self::geo('q.asc_location_id');$current=\App\Services\ArpaAppointmentReadService::currentActionIssuePredicate('q');$reviewed="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status='KEPT_HISTORICAL_EXCEPTION')";
+        $geo=self::geo('q.asc_location_id');$current=\App\Services\ArpaAppointmentReadService::currentActionIssuePredicate('q');
+        $effectiveDecision=ArpaAppointmentCorrectionDecision::effectivePredicate(Database::pdo(),'dc');
+        $reviewed="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status='KEPT_HISTORICAL_EXCEPTION' AND {$effectiveDecision})";
         return ['permission'=>'arpa.appointment.view','export'=>true,'filename'=>'arpa-appointment-data-issues','with'=>$geo['with'],'from'=>\App\Services\ArpaAppointmentReadService::issueSource().' q '.$geo['joinExpression'],
             'select'=>['q.row_key','q.issue_type','q.severity','q.officer_id','q.officer_number','q.officer_name','q.nic','q.asc_location_id','q.asc_name','q.arpa_divisions','q.appointment_types','q.effective_periods','q.related_ids','q.origin','q.explanation','q.recommended_action'],'count'=>'q.row_key','baseParams'=>$geo['params'],
             'searchable'=>['q.issue_type','q.officer_number','q.officer_name','q.nic','q.asc_name','q.arpa_divisions','q.appointment_types','q.explanation'],
@@ -1486,6 +1490,98 @@ final class DataTableRegistry
             'filters'=>['resolution_status'=>['column'=>'c.resolution_status','allowed'=>['RESOLVED_BY_CORRECTION','REVIEWED_UNRESOLVED','KEPT_HISTORICAL_EXCEPTION'],'ui'=>['label'=>'Result','options'=>['RESOLVED_BY_CORRECTION'=>'Corrected','REVIEWED_UNRESOLVED'=>'Reviewed - Please Check','KEPT_HISTORICAL_EXCEPTION'=>'Kept as Historical Record']]],'asc'=>['column'=>'c.asc_location_id','pattern'=>self::uuidPattern(),'ui'=>['label'=>'ASC']]],
             'columns'=>[self::col('Issue','issue_type','c.issue_type',fn($r)=>DataTableFormat::text(ArpaAppointmentIssuePresentation::for($r['issue_type'])['title'])),self::col('Result','resolution_status','c.resolution_status',fn($r)=>DataTableFormat::badge(ArpaAppointmentIssuePresentation::resolution($r['resolution_status']))),self::col('Officer','officer_name','o.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_number'].' - '.$r['officer_name'])),self::col('ASC','asc_name','asc_l.name_en',fn($r)=>DataTableFormat::text($r['asc_name'])),self::col('ARPA Division','arpa_name_snapshot','a.arpa_name_snapshot',fn($r)=>DataTableFormat::text($r['arpa_name_snapshot'])),self::col('Action','correction_action','c.correction_action',fn($r)=>DataTableFormat::text(ArpaAppointmentIssuePresentation::action($r['correction_action']))),self::col('Reason for Correction','correction_reason','c.correction_reason',fn($r)=>DataTableFormat::text($r['correction_reason'])),self::col('Reviewed By','corrected_by_name','u.display_name',fn($r)=>DataTableFormat::text($r['corrected_by_name'])),self::col('Reviewed At','corrected_at','c.corrected_at',fn($r)=>DataTableFormat::dateTime($r['corrected_at'])),self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/issues/corrections/'.$r['id'])).'">View</a>')],
             'defaultOrder'=>[8,'DESC']];
+    }
+
+    private static function arpaCorrectionAmendmentsPending():array
+    {
+        if(!self::correctionAmendmentTablesAvailable())return self::unavailableCorrectionAmendmentDataTable();
+        $actor=(string)(Auth::user()['id']??'');
+        $policy=new ArpaWorkflowQueuePolicy(Database::pdo());
+        $access=$policy->requestAccess($actor,'ar');
+        $makerChecker="NOT ((ar.workflow_status='ASC_VERIFIED' AND ar.created_by=?) OR EXISTS(
+            SELECT 1 FROM arpa_appointment_correction_amendment_event maker_event
+            WHERE maker_event.amendment_request_id=ar.id AND maker_event.user_id=?
+              AND maker_event.action='VERIFY'
+              AND maker_event.stage=CASE ar.workflow_status
+                WHEN 'ASC_VERIFIED' THEN 'ASC'
+                WHEN 'DISTRICT_VERIFIED' THEN 'DISTRICT'
+                WHEN 'NATIONAL_VERIFIED' THEN 'NATIONAL'
+                ELSE 'CREATOR' END))";
+        return [
+            'permission'=>'arpa.appointment.view','export'=>true,'filename'=>'pending-correction-amendment-approvals',
+            'authenticatedOnly'=>true,
+            'authorize'=>static fn():bool=>ArpaAppointmentCorrectionAmendmentFeature::enabled()&&ArpaAppointmentCorrectionAmendmentFeature::schemaAvailable(Database::pdo())&&$policy->profiles($actor)!==[],
+            'with'=>$access['with'],
+            'from'=>'arpa_appointment_correction_amendment_request ar JOIN officer o ON o.id=ar.officer_id JOIN location asc_l ON asc_l.id=ar.asc_location_id JOIN arpa_division_appointment a ON a.id=ar.appointment_id JOIN location arpa_l ON arpa_l.id=a.arpa_division_location_id',
+            'select'=>['ar.id','ar.source_correction_id','ar.proposed_action','ar.workflow_status','ar.created_at','ar.submitted_at','ar.version','o.dad_number officer_number','o.name_with_initials officer_name','o.nic','asc_l.dad_number asc_number','asc_l.name_en asc_name','arpa_l.dad_number arpa_number','arpa_l.name_en arpa_name','a.appointment_type'],
+            'count'=>'ar.id','baseWhere'=>[$access['where'],"ar.workflow_status<>'RETURNED'",$makerChecker],
+            'baseParams'=>array_merge($access['params'],[$actor,$actor]),
+            'searchable'=>['ar.id','ar.source_correction_id','ar.proposed_action','ar.workflow_status','o.dad_number','o.name_with_initials','o.nic','asc_l.dad_number','asc_l.name_en','arpa_l.dad_number','arpa_l.name_en','a.appointment_type'],
+            'filters'=>['workflow_status'=>['column'=>'ar.workflow_status','allowed'=>['SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'],'ui'=>['label'=>'Current Stage','options'=>['SUBMITTED'=>'Submitted','ASC_VERIFIED'=>'ASC Verified','ASC_APPROVED'=>'ASC Approved','DISTRICT_VERIFIED'=>'District Verified','DISTRICT_APPROVED'=>'District Approved','NATIONAL_VERIFIED'=>'National Verified']]]],
+            'columns'=>[
+                self::col('Reference','reference','ar.id',fn($r)=>DataTableFormat::text(substr((string)$r['id'],0,8)),fn($r)=>$r['id']),
+                self::col('Officer','officer_name','o.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_number'].' - '.$r['officer_name'])),
+                self::col('ASC','asc_name','asc_l.name_en',fn($r)=>DataTableFormat::text($r['asc_number'].' - '.$r['asc_name'])),
+                self::col('ARPA Division','arpa_name','arpa_l.name_en',fn($r)=>DataTableFormat::text($r['arpa_number'].' - '.$r['arpa_name'])),
+                self::col('Proposed Action','proposed_action','ar.proposed_action',fn($r)=>DataTableFormat::enumText($r['proposed_action'])),
+                self::col('Current Stage','workflow_status','ar.workflow_status',fn($r)=>DataTableFormat::badge($r['workflow_status'])),
+                self::col('Submitted At','submitted_at','ar.submitted_at',fn($r)=>DataTableFormat::dateTime($r['submitted_at'],'—')),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-primary" href="'.e(url('hr/arpa-appointments/correction-amendments/'.$r['id'])).'">Review</a>'),
+            ],'defaultOrder'=>[6,'ASC'],'emptyMessage'=>'No correction amendments currently require action in your Active Working Context.',
+        ];
+    }
+
+    private static function arpaCorrectionAmendmentsCompleted():array
+    {
+        if(!self::correctionAmendmentTablesAvailable())return self::unavailableCorrectionAmendmentDataTable();
+        $actor=(string)(Auth::user()['id']??'');$policy=new ArpaWorkflowQueuePolicy(Database::pdo());$profiles=$policy->profiles($actor);
+        $system=$actor!==''&&(string)(ScopeService::scopeProfile($actor)['level']??'')==='SYSTEM';
+        $needsScope=false;$clauses=[];
+        foreach($profiles as $profile){
+            $stage=(string)$profile['stage'];$action=(string)$profile['action'];
+            $scope=($system||$stage==='NATIONAL')?'1=1':"EXISTS(SELECT 1 FROM workflow_scope_locations wsl WHERE wsl.stage='{$stage}' AND wsl.id=ar.asc_location_id)";
+            if(!$system&&$stage!=='NATIONAL')$needsScope=true;
+            $clauses[]="(ae.stage='{$stage}' AND ae.action IN('{$action}','RETURN_FOR_CORRECTION','REJECT') AND {$scope})";
+        }
+        $with=$needsScope?ScopeService::arpaWorkflowScopeCte($actor):'';
+        $params=$needsScope?ScopeService::arpaWorkflowScopeParams($actor):[];
+        $stageWhere=$clauses===[]?'1=0':'('.implode(' OR ',$clauses).')';
+        return [
+            'permission'=>'arpa.appointment.view','export'=>true,'filename'=>'my-completed-correction-amendment-reviews','authenticatedOnly'=>true,
+            'authorize'=>static fn():bool=>ArpaAppointmentCorrectionAmendmentFeature::enabled()&&ArpaAppointmentCorrectionAmendmentFeature::schemaAvailable(Database::pdo())&&$policy->profiles($actor)!==[],
+            'with'=>$with,
+            'from'=>'arpa_appointment_correction_amendment_event ae JOIN arpa_appointment_correction_amendment_request ar ON ar.id=ae.amendment_request_id JOIN officer o ON o.id=ar.officer_id JOIN location asc_l ON asc_l.id=ar.asc_location_id',
+            'select'=>['ae.id','ae.amendment_request_id','ae.action','ae.stage','ae.previous_status','ae.new_status','ae.action_at','ae.comments','ar.workflow_status current_workflow_status','ar.proposed_action','o.dad_number officer_number','o.name_with_initials officer_name','asc_l.dad_number asc_number','asc_l.name_en asc_name'],
+            'count'=>'ae.id','baseWhere'=>['ae.user_id=?',$stageWhere],'baseParams'=>array_merge($params,[$actor]),
+            'searchable'=>['ae.amendment_request_id','ae.action','ae.stage','ae.new_status','ae.comments','ar.workflow_status','ar.proposed_action','o.dad_number','o.name_with_initials','asc_l.dad_number','asc_l.name_en'],
+            'columns'=>[
+                self::col('Reference','reference','ae.amendment_request_id',fn($r)=>DataTableFormat::text(substr((string)$r['amendment_request_id'],0,8)),fn($r)=>$r['amendment_request_id']),
+                self::col('Officer','officer_name','o.name_with_initials',fn($r)=>DataTableFormat::text($r['officer_number'].' - '.$r['officer_name'])),
+                self::col('ASC','asc_name','asc_l.name_en',fn($r)=>DataTableFormat::text($r['asc_number'].' - '.$r['asc_name'])),
+                self::col('Action','action','ae.action',fn($r)=>DataTableFormat::badge($r['action'])),
+                self::col('Stage','stage','ae.stage',fn($r)=>DataTableFormat::text($r['stage'])),
+                self::col('Result','new_status','ae.new_status',fn($r)=>DataTableFormat::badge($r['new_status'])),
+                self::col('Action At','action_at','ae.action_at',fn($r)=>DataTableFormat::dateTime($r['action_at'])),
+                self::col('Current Status','current_workflow_status','ar.workflow_status',fn($r)=>DataTableFormat::badge($r['current_workflow_status'])),
+                self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/correction-amendments/'.$r['amendment_request_id'])).'">View</a>'),
+            ],'defaultOrder'=>[6,'DESC'],'emptyMessage'=>'No completed correction-amendment reviews are available in your Active Working Context.',
+        ];
+    }
+
+    private static function correctionAmendmentTablesAvailable():bool
+    {
+        return ArpaAppointmentCorrectionAmendmentFeature::enabled()
+            &&ArpaAppointmentCorrectionAmendmentFeature::schemaAvailable(Database::pdo());
+    }
+
+    private static function unavailableCorrectionAmendmentDataTable():array
+    {
+        return [
+            'authenticatedOnly'=>true,'authorize'=>static fn():bool=>false,'export'=>false,
+            'from'=>'(SELECT NULL id) unavailable_amendments','select'=>['unavailable_amendments.id'],'count'=>'unavailable_amendments.id','baseWhere'=>['1=0'],
+            'columns'=>[self::col('Unavailable','id',null)],'defaultOrder'=>[0,'ASC'],
+            'emptyMessage'=>'Correction amendments are not available.',
+        ];
     }
 
     private static function arpaOfficerDivisionHistory(array $input):array

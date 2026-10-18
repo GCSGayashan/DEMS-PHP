@@ -3,7 +3,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\{Auth,Controller,Database,Csrf,NumberService,Audit,DataTableRegistry,NicNormalizer,ScopeService};
-use App\Services\{ArpaAdministrativePolicy,OfficerAdminDirectEditPolicy,OfficerAdminDirectEditService,OfficerEditRequestService,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
+use App\Services\{ArpaAdministrativePolicy,ArpaAppointmentCorrectionAmendmentFeature,ArpaAppointmentCorrectionAmendmentService,OfficerAdminDirectEditPolicy,OfficerAdminDirectEditService,OfficerEditRequestService,OfficerOfficeAssignmentService,OfficerPersonnelValidator,OfficerProfileService,OfficerWorkflowService};
 
 final class OfficerController extends Controller
 {
@@ -32,7 +32,19 @@ final class OfficerController extends Controller
         $assignmentCandidateAccess=Auth::can('officer.office-assignment.create')&&ScopeService::canAccessOfficerForOfficeAssignment($userId,$id);
         if(!$demsAdmin&&!$workflowService->canAccess($id,$userId)&&!$assignmentCandidateAccess){http_response_code(404);$this->render('partials/not-found');return;}
         $restricted=!$demsAdmin&&ScopeService::requiresGeographicRestriction($userId);$offices=$demsAdmin?[]:ScopeService::scopedOffices($userId);$ascIds=$restricted?array_column(ScopeService::scopedLocations($userId,'ASC'),'id'):null;
-        $profile=(new OfficerProfileService($pdo))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds,$demsAdmin);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=$officeAssignmentService->initialForOfficer($id);$initialOfficeReconciliation=$initialOfficeAssignment===null?$workflowService->initialOfficeReconciliationCandidate($id,$userId):null;$officeAssignmentAction=$officeAssignmentService->actionForOfficer($id,$userId);$canAdminDateCorrect=ArpaAdministrativePolicy::canCorrectDates();$this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment','initialOfficeReconciliation','officeAssignmentAction','demsAdmin','canAdminDateCorrect'));
+        $profile=(new OfficerProfileService($pdo))->profile($id,$restricted?array_column($offices,'id'):[],$ascIds,$demsAdmin);$officerWorkflow=$workflowService->actions($id,$userId);$initialOfficeAssignment=$officeAssignmentService->initialForOfficer($id);$initialOfficeReconciliation=$initialOfficeAssignment===null?$workflowService->initialOfficeReconciliationCandidate($id,$userId):null;$officeAssignmentAction=$officeAssignmentService->actionForOfficer($id,$userId);$canAdminDateCorrect=ArpaAdministrativePolicy::canCorrectDates();
+        $correctionAmendmentUi=['enabled'=>ArpaAppointmentCorrectionAmendmentFeature::enabled(),'schema_available'=>false,'entries'=>[]];
+        if($correctionAmendmentUi['enabled']){
+            $correctionAmendmentUi['schema_available']=ArpaAppointmentCorrectionAmendmentFeature::schemaAvailable($pdo);
+            if($correctionAmendmentUi['schema_available']){
+                $amendments=new ArpaAppointmentCorrectionAmendmentService($pdo);
+                foreach($profile['appointment_corrections'] as $correction){
+                    try{$correctionAmendmentUi['entries'][$correction['id']]=$amendments->eligibility((string)$correction['id'],$userId);}
+                    catch(\DomainException){/* No controls outside the exact authorized ASC Subject Officer context. */}
+                }
+            }
+        }
+        $this->render('officers/show',$profile+compact('offices','officerWorkflow','initialOfficeAssignment','initialOfficeReconciliation','officeAssignmentAction','demsAdmin','canAdminDateCorrect','correctionAmendmentUi'));
     }
 
     public function search():void

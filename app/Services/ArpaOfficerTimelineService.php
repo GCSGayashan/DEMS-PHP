@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Core\Database;
 use App\Core\ScopeService;
 use DomainException;
 use PDO;
@@ -58,9 +59,10 @@ final class ArpaOfficerTimelineService
         $issueSource=ArpaAppointmentReadService::issueSource();
         $periodScope=$restricted?'JOIN visible_locations period_scope ON period_scope.id=p.asc_location_id':'';
         $issueScope=$restricted?'JOIN visible_locations issue_scope ON issue_scope.id=q.asc_location_id':'';
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate(Database::pdo(),'dc');
         $terminal="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
                               WHERE dc.issue_row_key=q.row_key
-                                AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+                                 AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective})";
         return "(SELECT o.id,o.dad_number,o.name_with_initials,o.nic,o.arpa_service_permanency,
                         GROUP_CONCAT(DISTINCT CASE WHEN p.appointment_type='PERMANENT'
                           THEN CONCAT(p.arpa_name,' (',p.effective_from,' - ',COALESCE(p.effective_to,'Open'),')') END
@@ -134,7 +136,8 @@ final class ArpaOfficerTimelineService
     {
         $restricted=ScopeService::requiresGeographicRestriction($viewerId);$with=$restricted?ScopeService::visibleLocationsCte($viewerId):'';
         $scope=$restricted?'JOIN visible_locations vl ON vl.id=q.asc_location_id':'';
-        $terminal="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION'))";
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'dc');
+        $terminal="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective})";
         $sql=($with!==''?$with.' ':'')."SELECT q.* FROM ".ArpaAppointmentReadService::issueSource()." q {$scope} WHERE q.officer_id=? AND {$terminal} ORDER BY q.row_key";
         $params=$restricted?ScopeService::visibleLocationParams($viewerId):[];$params[]=$officerId;
         $stmt=$this->pdo->prepare($sql);$stmt->execute($params);$rows=$stmt->fetchAll();

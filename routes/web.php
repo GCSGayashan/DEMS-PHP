@@ -1,6 +1,7 @@
 <?php
-use App\Controllers\{AuthController,DashboardController,LocationController,OfficeController,HrMasterController,OfficerController,ArpaAppointmentController,LegacyArpaReconciliationController,LegacyArpaAppointmentPreviewController,SubjectController,UserManagementController,UserContextController,ModuleController,DataTableController,NotificationController};
-use App\Core\Auth;
+use App\Controllers\{AuthController,DashboardController,LocationController,OfficeController,HrMasterController,OfficerController,ArpaAppointmentController,ArpaAppointmentCorrectionAmendmentController,LegacyArpaReconciliationController,LegacyArpaAppointmentPreviewController,SubjectController,UserManagementController,UserContextController,ModuleController,DataTableController,NotificationController};
+use App\Core\{Auth,View};
+use App\Services\ArpaCorrectionPermanentDeletePolicy;
 
 $router->get('/', [DashboardController::class, 'index']);
 $router->get('/login', [AuthController::class, 'login']);
@@ -105,6 +106,22 @@ $router->get('/hr/arpa-appointments/issues/bulk-current/active-reservations.csv'
 $router->post('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'executeBulkLegacyCurrentReconciliation']);
 $router->post('/hr/arpa-appointments/issues/bulk-current/normalize-stale-flags', [ArpaAppointmentController::class, 'executeStaleLegacyExceptionNormalization']);
 $router->get('/hr/arpa-appointments/issues/corrections/{id}', [ArpaAppointmentController::class, 'dataIssueCorrectionDetail']);
+$router->post('/hr/arpa-appointments/issues/corrections/{id}/permanent-delete', [ArpaAppointmentController::class, 'permanentlyDeleteDataIssueCorrection'], [static function():void {
+    Auth::requirePermission('arpa.appointment.view');
+    if(!ArpaCorrectionPermanentDeletePolicy::allowed()){
+        http_response_code(403);View::render('partials/forbidden',['permission'=>'the canonical DEMS System Administrator context']);exit;
+    }
+}]);
+$router->get('/hr/arpa-appointments/issues/corrections/{sourceCorrectionId}/amendments/new', [ArpaAppointmentCorrectionAmendmentController::class, 'create']);
+$router->post('/hr/arpa-appointments/issues/corrections/{sourceCorrectionId}/amendments', [ArpaAppointmentCorrectionAmendmentController::class, 'store']);
+$router->get('/hr/arpa-appointments/correction-amendments/pending', [ArpaAppointmentCorrectionAmendmentController::class, 'pending']);
+$router->get('/hr/arpa-appointments/correction-amendments/completed', [ArpaAppointmentCorrectionAmendmentController::class, 'completed']);
+$router->get('/hr/arpa-appointments/correction-amendments/{id}', [ArpaAppointmentCorrectionAmendmentController::class, 'show']);
+$router->get('/hr/arpa-appointments/correction-amendments/{id}/edit', [ArpaAppointmentCorrectionAmendmentController::class, 'edit']);
+$router->post('/hr/arpa-appointments/correction-amendments/{id}/edit', [ArpaAppointmentCorrectionAmendmentController::class, 'update']);
+$router->post('/hr/arpa-appointments/correction-amendments/{id}/withdraw', [ArpaAppointmentCorrectionAmendmentController::class, 'withdraw']);
+$router->post('/hr/arpa-appointments/correction-amendments/{id}/submit', [ArpaAppointmentCorrectionAmendmentController::class, 'submit']);
+$router->post('/hr/arpa-appointments/correction-amendments/{id}/review', [ArpaAppointmentCorrectionAmendmentController::class, 'review']);
 $router->get('/hr/arpa-appointments/issues/{key}', [ArpaAppointmentController::class, 'dataIssueDetail']);
 $router->post('/hr/arpa-appointments/issues/{key}/correct', [ArpaAppointmentController::class, 'correctDataIssue']);
 $router->get('/hr/arpa-appointments/divisions/{id}/correct-historical', [ArpaAppointmentController::class, 'editHistoricalCanonicalAssignment']);

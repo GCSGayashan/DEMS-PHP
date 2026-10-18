@@ -9,9 +9,13 @@ use App\Services\ArpaAppointmentCandidateService;
 use App\Services\ArpaAppointmentFormOptionsService;
 use App\Services\ArpaAppointmentReadService;
 use App\Services\ArpaAppointmentDataIssueCorrectionService;
+use App\Services\ArpaAppointmentCorrectionAmendmentFeature;
+use App\Services\ArpaAppointmentCorrectionAmendmentService;
+use App\Services\ArpaAppointmentCorrectionPermanentDeleteService;
 use App\Services\ArpaAppointmentBulkCanonicalizationService;
 use App\Services\ArpaAppointmentAdministrationService;
 use App\Services\ArpaAdministrativePolicy;
+use App\Services\ArpaCorrectionPermanentDeletePolicy;
 use App\Services\ArpaDivisionTimelineService;
 use App\Services\ArpaOfficerTimelineService;
 use App\Services\ArpaWorkflowQueuePolicy;
@@ -354,8 +358,49 @@ final class ArpaAppointmentController extends Controller
     public function dataIssueCorrectionDetail(string $id):void
     {
         Auth::requirePermission('arpa.appointment.view');
-        try{$correction=$this->dataIssueCorrectionService()->correction($id,(string)Auth::user()['id']);$this->render('arpa_appointments/issues/correction_detail',compact('correction'));}
+        try{
+            $actor=(string)Auth::user()['id'];$correction=$this->dataIssueCorrectionService()->correction($id,$actor);
+            $permanentDeleteUi=['authorized'=>false,'eligible'=>false,'code'=>'UNAUTHORIZED','reason'=>''];
+            if(ArpaCorrectionPermanentDeletePolicy::allowed()){
+                try{$permanentDeleteUi=['authorized'=>true]+(new ArpaAppointmentCorrectionPermanentDeleteService(Database::pdo()))->eligibility($id,$actor);}
+                catch(Throwable $e){
+                    error_log('ARPA correction deletion eligibility failed: '.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());
+                    $permanentDeleteUi=['authorized'=>true,'eligible'=>false,'code'=>'ELIGIBILITY_UNAVAILABLE','reason'=>'Deletion eligibility could not be verified safely.'];
+                }
+            }
+            $amendmentUi=['enabled'=>false,'eligibility'=>null,'predecessor_id'=>null,'successor_id'=>null];
+            if(ArpaAppointmentCorrectionAmendmentFeature::enabled()&&ArpaAppointmentCorrectionAmendmentFeature::schemaAvailable(Database::pdo())){
+                $amendmentUi['enabled']=true;$lineage=Database::pdo()->prepare('SELECT supersedes_correction_id FROM arpa_appointment_data_correction WHERE id=?');$lineage->execute([$id]);$amendmentUi['predecessor_id']=$lineage->fetchColumn()?:null;
+                $lineage=Database::pdo()->prepare('SELECT id FROM arpa_appointment_data_correction WHERE supersedes_correction_id=? LIMIT 1');$lineage->execute([$id]);$amendmentUi['successor_id']=$lineage->fetchColumn()?:null;
+                try{$amendmentUi['eligibility']=(new ArpaAppointmentCorrectionAmendmentService(Database::pdo()))->eligibility($id,$actor);}
+                catch(DomainException){/* No amendment control outside exact ASC correction scope. */}
+            }
+            $this->render('arpa_appointments/issues/correction_detail',compact('correction','amendmentUi','permanentDeleteUi'));
+        }
         catch(DomainException $e){http_response_code(404);$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues?category=RESOLVED_REVIEWED');}
+    }
+
+    public function permanentlyDeleteDataIssueCorrection(string $id):void
+    {
+        Auth::requirePermission('arpa.appointment.view');
+        $actor=(string)Auth::user()['id'];
+        if(!ArpaCorrectionPermanentDeletePolicy::allowed()||!Auth::isCurrentUser($actor)){
+            http_response_code(403);$this->render('partials/forbidden',['permission'=>'the canonical DEMS System Administrator context']);return;
+        }
+        Csrf::validate();
+        try{
+            (new ArpaAppointmentCorrectionPermanentDeleteService(Database::pdo()))->permanentlyDelete(
+                $id,(string)($_POST['deletion_reason']??''),(string)($_POST['confirmation']??''),$actor
+            );
+            $this->flash('success','The incorrect correction decision was permanently deleted. Its independent deletion audit was preserved.');
+            redirect('/hr/arpa-appointments/issues?category=RESOLVED_REVIEWED');
+        }catch(DomainException $e){
+            $this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/issues/corrections/'.$id);
+        }catch(Throwable $e){
+            error_log('ARPA correction permanent deletion failed: '.get_class($e).' code='.$e->getCode().' message='.$e->getMessage());
+            $this->flash('danger','The correction decision could not be deleted. No information was changed.');
+            redirect('/hr/arpa-appointments/issues/corrections/'.$id);
+        }
     }
 
     public function editHistoricalCanonicalAssignment(string $id):void
