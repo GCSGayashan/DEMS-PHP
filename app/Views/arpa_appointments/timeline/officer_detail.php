@@ -27,6 +27,7 @@ $label=static fn(?string $value):string=>DataTableFormat::enumLabel((string)$val
   <div class="table-responsive"><table class="table table-bordered align-middle">
     <thead><tr><th>Period</th><th>Appointment</th><th>Location</th><th>Operational / Approval Status</th><th>Data Issues</th><th>Action</th></tr></thead>
     <tbody>
+    <?php if(!$appointments): ?><tr><td colspan="6" class="text-muted">No canonical appointments or reserving requests in this context. Unresolved records are displayed separately below.</td></tr><?php endif; ?>
     <?php foreach($appointments as $appointment):
       $state=$appointment['display_status'];
     ?>
@@ -50,7 +51,7 @@ $label=static fn(?string $value):string=>DataTableFormat::enumLabel((string)$val
     <div class="border rounded p-3 mb-3">
       <div class="d-flex flex-wrap justify-content-between gap-2"><div><span class="badge text-bg-danger">Data Issue</span> <strong><?= e($presentation['title']) ?></strong></div><code><?= e((string)$issue['row_key']) ?></code></div>
       <div class="mt-2"><?= e($presentation['explanation']) ?></div>
-      <?php if(!empty($issue['issue_from'])): ?><div class="small mt-1">Affected period: <?= $date($issue['issue_from'],'—') ?> to <?= $date($issue['issue_to']) ?></div><?php endif; ?>
+      <?php if(!empty($issue['issue_from'])): ?><div class="small mt-1">Affected period: <?= $date($issue['issue_from'],'—') ?> to <?= $date($issue['issue_to']) ?></div><?php elseif(!empty($issue['effective_periods'])): ?><div class="small mt-1">Recorded source period: <?= e((string)$issue['effective_periods']) ?></div><?php endif; ?>
       <div class="small text-muted mt-1">Affected appointment rows: <?= e(implode(', ',(array)$issue['affected_source_ids'])) ?></div>
       <?php if($existing): ?><a class="btn btn-sm btn-outline-danger mt-2" href="<?= e(url('hr/arpa-appointments/issues/'.rawurlencode((string)$issue['row_key']))) ?>"><?= $correctable?'Review / Correct Data':'View Issue' ?></a><?php else: ?><div class="small text-muted mt-2">Review the affected canonical appointments. Existing records have not been changed.</div><?php endif; ?>
     </div>

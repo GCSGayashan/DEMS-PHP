@@ -75,6 +75,7 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
             $this->exerciseService();
             $this->exerciseWorkflow();
             $this->exerciseConsistencyCheckpoint();
+            $this->exerciseOfficerTimelineVisibility();
         }finally{
             $_SESSION=[];
             Auth::forgetRequestCache();
@@ -484,6 +485,71 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
         $definition=\App\Core\DataTableRegistry::definition('arpa-appointment-issues');
         [$currentFilter]=$definition['filters']['category']['build']('CURRENT_ACTION_REQUIRED');
         $this->same(true,str_contains($currentFilter,'successor_amendment.workflow_status=\'NATIONAL_APPROVED\''),'Data Issue DataTable reviewed filter uses the shared effective-decision predicate');
+    }
+
+    /** Request-only Officer Timeline regression, using this suite's disposable schema only. */
+    private function exerciseOfficerTimelineVisibility():void
+    {
+        $this->pdo->exec("ALTER TABLE officer ADD primary_office_id CHAR(36) NULL;
+            ALTER TABLE office ADD dad_number VARCHAR(50) NULL,ADD name_en VARCHAR(255) NULL;
+            ALTER TABLE arpa_division_appointment ADD asc_dad_snapshot VARCHAR(50) NULL,ADD district_dad_snapshot VARCHAR(50) NULL,ADD arpa_dad_snapshot VARCHAR(50) NULL;
+            INSERT IGNORE INTO application_role_permission SELECT id,'13000000-0000-4000-8000-000000000011' FROM application_role WHERE role_code IN('ASC_SUBJECT_OFFICER','ASC_ADMIN');");
+        $officer='be3c5c14-7393-4d54-9cab-92cd327deefa';$division='8376ac85-46cf-441e-b3ae-e39507bd8bf4';
+        $request2020='febc95d9-96f9-11f1-8055-fc5cee2ebe64';$request2026='f623cc94-96f8-11f1-8055-fc5cee2ebe64';
+        $insertOfficer=$this->pdo->prepare("INSERT INTO officer(id,dad_number,name_with_initials,arpa_service_permanency) VALUES(?,?,?,'PERMANENT_IN_SERVICE')");
+        foreach([[$officer,'70045-0002795','Synthetic <Timeline Officer>'],['timeline-canonical','70045-TLC','Synthetic canonical'],['timeline-mixed','70045-TLM','Synthetic mixed'],['timeline-outside','70045-TLO','Synthetic outside'],['timeline-empty','70045-TLE','Synthetic empty'],['timeline-terminal','70045-TLT','Synthetic terminal'],['timeline-reserving','70045-TLR','Synthetic reserving']] as $row)$insertOfficer->execute($row);
+        $location=$this->pdo->prepare("INSERT INTO location(id,location_type_id,dad_number,name_en) VALUES(?,'11000000-0000-4000-8000-000000000002',?,?)");
+        $relationship=$this->pdo->prepare("INSERT INTO location_relationship VALUES(?,?,?,'ASC_ARPA_DIVISION',1,'APPROVED','2025-01-01',NULL)");
+        foreach([[$division,'70007-0005666','Thalapitaoya',self::ASC_ONE],['timeline-saranagama','70007-TLS','Saranagama',self::ASC_ONE],['timeline-mixed-division','70007-TLM','Mixed Division',self::ASC_ONE],['timeline-other-division','70007-TLO','Foreign ASC Division',self::ASC_TWO]] as [$id,$dad,$name,$asc]){$location->execute([$id,$dad,$name]);$relationship->execute(['rel-'.substr(hash('sha256',$id),0,32),$asc,$id]);}
+        $request=$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,requested_effective_to,workflow_status,legacy_history_only,legacy_exception,legacy_exception_codes_json) VALUES(?,?,'APPOINTMENT',?,?,?,?,?,NULL,?,?,?,?)");
+        $legacy=function(string $id,string $who,string $type,string $where,string $date,string $asc=self::ASC_ONE)use($request):void{$request->execute([$id,'LEGACY_IMPORT',$who,$type,$asc,$where,$date,'CREATED',1,1,'["INCOMPLETE_LEGACY_WORKFLOW"]']);};
+        $legacy($request2020,$officer,'PERMANENT',$division,'2020-09-21');$legacy($request2026,$officer,'PERMANENT',$division,'2026-01-01');
+        $legacy('timeline-acting-2025',$officer,'ACTING','timeline-saranagama','2025-01-01');$legacy('timeline-acting-2026',$officer,'ACTING','timeline-saranagama','2026-01-01');
+        $legacy('timeline-shared-foreign',$officer,'PERMANENT','timeline-other-division','2026-01-01',self::ASC_TWO);
+        $legacy('timeline-foreign-only','timeline-outside','PERMANENT','timeline-other-division','2026-01-01',self::ASC_TWO);
+        $legacy('timeline-mixed-issue','timeline-mixed','ACTING','timeline-saranagama','2026-01-01');
+        foreach(['timeline-native-pending','timeline-native-deleted'] as $id)$request->execute([$id,'NATIVE','timeline-reserving','PERMANENT',self::ASC_ONE,$division,'2026-01-01','SUBMITTED',0,0,'[]']);
+        $this->pdo->exec("UPDATE arpa_division_appointment_request SET deleted_at=NOW() WHERE id='timeline-native-deleted'");
+        foreach(['keep','resolved'] as $suffix){
+            $id='timeline-terminal-'.$suffix;$legacy($id,'timeline-terminal','PERMANENT',$division,'2026-01-01');
+            $this->pdo->prepare("INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,request_id,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,before_json,after_json,record_origin) VALUES(?,?,'LEGACY_HISTORICAL_EXCEPTION','timeline-terminal',?,?,?, ?,?,'Synthetic terminal decision','{}','{}','LEGACY_IMPORT')")
+                ->execute([$id.'-c','LEGACY_HISTORICAL_EXCEPTION:'.$id,$id,self::ASC_ONE,self::ACTOR,$suffix==='keep'?'KEEP_AS_HISTORICAL_EXCEPTION':'RESOLVE_CANONICAL_ASSIGNMENT',$suffix==='keep'?'KEPT_HISTORICAL_EXCEPTION':'RESOLVED_BY_CORRECTION']);
+        }
+        $appointment=$this->pdo->prepare("INSERT INTO arpa_division_appointment(id,request_id,record_origin,officer_id,appointment_type,asc_location_id,arpa_division_location_id,effective_from,asc_name_snapshot,arpa_name_snapshot) VALUES(?,?,'NATIVE',?,?,?,?,'2025-01-01','ASC One',?)");
+        foreach([['timeline-permanent','timeline-canonical','PERMANENT',$division,'Thalapitaoya'],['timeline-acting','timeline-canonical','ACTING','timeline-saranagama','Saranagama'],['timeline-mixed-app','timeline-mixed','PERMANENT','timeline-mixed-division','Mixed Division']] as [$id,$who,$type,$where,$name]){
+            $request->execute(['r-'.$id,'NATIVE',$who,$type,self::ASC_ONE,$where,'2025-01-01','ASC_APPROVED',0,0,'[]']);$appointment->execute([$id,'r-'.$id,$who,$type,self::ASC_ONE,$where,$name]);
+        }
+        // Match ordinary current Office evidence so unrelated missing-placement issues do not
+        // obscure canonical timeline assertions. No Office assignment substitutes for an ARPA record.
+        $this->pdo->exec("INSERT INTO office_type VALUES('timeline-office-type','ASC_OFFICE');
+            INSERT INTO office(id,office_type_id,linked_location_id,dad_number,name_en) VALUES('timeline-office','timeline-office-type','".self::ASC_ONE."','71001-TL','Synthetic ASC Office');
+            INSERT INTO officer_office_assignment VALUES('timeline-office-canonical','timeline-canonical','timeline-office',1,'APPROVED','2025-01-01',NULL),('timeline-office-mixed','timeline-mixed','timeline-office',1,'APPROVED','2025-01-01',NULL);");
+        $state=function():array{$out=[];foreach($this->pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $table)$out[$table]=hash('sha256',serialize($this->pdo->query('SELECT * FROM `'.$table.'` ORDER BY 1')->fetchAll()));return $out;};$before=$state();
+        $render=static function(array $data):string{extract($data,EXTR_SKIP);ob_start();require BASE_PATH.'/app/Views/arpa_appointments/timeline/officer_detail.php';return ob_get_clean();};
+        $this->pdo->exec('SET TRANSACTION READ ONLY');$this->pdo->beginTransaction();
+        try{
+            foreach([self::ACTOR=>true,self::ASC_APPROVER=>false] as $actor=>$correctable){
+                $this->useContext($actor);$this->same(true,Auth::can('arpa.appointment.view'),'ASC role retains timeline view permission');
+                $service=new \App\Services\ArpaOfficerTimelineService($this->pdo);$detail=$service->timeline($officer,$actor);
+                $this->same(0,count($detail['appointments']),'issue-only Officer has no invented appointment periods');$this->same(0,$detail['summary']['permanent'],'Permanent issue is not an authoritative Permanent appointment');
+                $this->same(4,count($detail['issues']),'all four authorized Officer-wide issues included');$this->same(4,$detail['summary']['data_issues'],'detail issue count agrees');$this->same($correctable,$detail['can_correct'],'Subject Officer/Admin correction permissions preserved');
+                $byKey=array_column($detail['issues'],null,'row_key');$this->same('2020-09-21 to Open',$byKey['LEGACY_HISTORICAL_EXCEPTION:'.$request2020]['effective_periods'],'pre-baseline source date retained');$this->same('2026-01-01 to Open',$byKey['LEGACY_HISTORICAL_EXCEPTION:'.$request2026]['effective_periods'],'2026 source date retained');
+                $this->same(false,isset($byKey['LEGACY_HISTORICAL_EXCEPTION:timeline-shared-foreign']),'same Officer foreign ASC issue excluded');
+                $definition=DataTableRegistry::definition('arpa-officer-timelines');$s=$this->pdo->prepare($definition['with'].' SELECT t.* FROM '.$definition['from']);$s->execute($definition['baseParams']);$list=$s->fetchAll();$byId=array_column($list,null,'id');
+                $this->same(count($list),count($byId),'one DataTable row per Officer even with multiple evidence rows');$this->same(true,isset($byId[$officer]),'issue-only Officer appears in list');$this->same('DATA_ISSUE',$byId[$officer]['timeline_status'],'issue-only Officer not incorrectly complete');$this->same(4,(int)$byId[$officer]['data_issue_count'],'list/detail issue counts match');$this->same(0,(int)$byId[$officer]['additional_appointment_count'],'issue-only additional count is zero, not NULL or request count');
+                foreach(['timeline-empty','timeline-terminal','timeline-outside'] as $invisible)$this->same(false,isset($byId[$invisible]),'no accessible evidence: '.$invisible);
+                $page=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>10,'search'=>['value'=>'70045-0002795'],'order'=>[['column'=>1,'dir'=>'desc']]])))->response();$this->same(1,$page['recordsFiltered'],'Officer search yields one row');$this->same(count($list),$page['recordsTotal'],'DataTable total uses same population');$this->same(1,count($page['data']),'search/order/pagination render one deduplicated row');
+                $filtered=(new DataTableQuery($this->pdo,$definition,new DataTableRequest(['search'=>['value'=>'70045-0002795'],'filters'=>['timeline_status'=>'COMPLETE']])))->response();$this->same(0,$filtered['recordsFiltered'],'Complete filter excludes unresolved-only Officer');
+                $canonical=$service->timeline('timeline-canonical',$actor);$this->same(2,count($canonical['appointments']),'existing canonical periods unchanged');$this->same(1,$canonical['summary']['permanent'],'canonical Permanent count unchanged');$this->same(1,$canonical['summary']['acting'],'canonical Acting count unchanged');$this->same(0,$canonical['summary']['data_issues'],'normal canonical timeline remains clean');$this->same(1,(int)$byId['timeline-canonical']['additional_appointment_count'],'canonical Acting is not doubled as a reservation');
+                $mixed=$service->timeline('timeline-mixed',$actor);$this->same(1,count($mixed['appointments']),'mixed canonical/issue Officer has one actual period');$this->same(1,count($mixed['issues']),'mixed Officer issue remains separate');$this->same(1,(int)$byId['timeline-mixed']['data_issue_count'],'mixed Officer list count not multiplied');
+                $reserving=$service->timeline('timeline-reserving',$actor);$this->same(1,count($reserving['appointments']),'genuine pending request still visible; deleted request excluded');$this->same('RESERVATION',$reserving['appointments'][0]['source_kind'],'pending Native request keeps reservation semantics');$this->same(true,isset($byId['timeline-reserving']),'reservation-only Officer still listed');
+                foreach(['timeline-empty','timeline-terminal','timeline-outside'] as $denied)$this->throwsDomain(fn()=>$service->timeline($denied,$actor),'direct no-evidence/out-of-scope timeline denied '.$denied);
+                $_SERVER['REQUEST_URI']='/hr/arpa-appointments/timeline/officers/'.$officer;$html=$render($detail);$this->same(true,str_contains($html,'No canonical appointments or reserving requests'),'empty canonical section explained');$this->same(true,str_contains($html,'2020-09-21 to Open')&&str_contains($html,'2026-01-01 to Open'),'source periods rendered separately from canonical periods');$this->same(false,str_contains($html,'timeline-shared-foreign'),'foreign evidence not rendered');$this->same($correctable,str_contains($html,'Review / Correct Data'),'corrective controls remain role-specific');$this->same(true,str_contains($html,'Synthetic &lt;Timeline Officer&gt;'),'Officer text escaped');
+                $s=$this->pdo->prepare('SELECT COUNT(*) FROM '.\App\Services\ArpaOfficerTimelineService::periodSource(true).' p WHERE p.officer_id=?');$s->execute([$officer]);$this->same(0,(int)$s->fetchColumn(),'legacy CREATED requests still cannot become reservations');
+            }
+            $this->useContext(self::OTHER_ASC_ACTOR);$other=(new \App\Services\ArpaOfficerTimelineService($this->pdo))->timeline($officer,self::OTHER_ASC_ACTOR);$this->same(1,count($other['issues']),'other ASC sees only its own issue for a shared Officer');$this->same('LEGACY_HISTORICAL_EXCEPTION:timeline-shared-foreign',$other['issues'][0]['row_key'],'other ASC cannot borrow Padiyathalawa evidence');
+            $this->same($before,$state(),'all source, correction, audit and authorization tables unchanged by read-only viewing');
+        }finally{$this->pdo->rollBack();}
     }
 
     /** @param array<string,mixed> $request @return array<string,mixed> */

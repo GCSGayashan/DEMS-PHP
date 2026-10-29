@@ -56,31 +56,25 @@ final class ArpaOfficerTimelineService
     public static function officerListSource(bool $restricted):string
     {
         $periods=self::periodSource();
-        $issueSource=ArpaAppointmentReadService::issueSource();
         $periodScope=$restricted?'JOIN visible_locations period_scope ON period_scope.id=p.asc_location_id':'';
-        $issueScope=$restricted?'JOIN visible_locations issue_scope ON issue_scope.id=q.asc_location_id':'';
-        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate(Database::pdo(),'dc');
-        $terminal="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc
-                              WHERE dc.issue_row_key=q.row_key
-                                 AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective})";
+        $issues=self::unresolvedIssueSource(Database::pdo(),$restricted);
+        // Issues contribute visibility, never appointment periods or reservations. Grouping
+        // this union once also prevents issue joins from multiplying appointment counts.
+        $evidence="(SELECT p.officer_id,p.appointment_type,p.arpa_name,p.effective_from,p.effective_to,NULL issue_key
+                    FROM {$periods} p {$periodScope}
+                    UNION ALL
+                    SELECT q.officer_id,NULL,NULL,NULL,NULL,q.row_key FROM {$issues} q)";
         return "(SELECT o.id,o.dad_number,o.name_with_initials,o.nic,o.arpa_service_permanency,
                         GROUP_CONCAT(DISTINCT CASE WHEN p.appointment_type='PERMANENT'
                           THEN CONCAT(p.arpa_name,' (',p.effective_from,' - ',COALESCE(p.effective_to,'Open'),')') END
                           ORDER BY p.effective_from SEPARATOR '; ') permanent_appointments,
-                        SUM(p.appointment_type<>'PERMANENT') additional_appointment_count,
+                        COALESCE(SUM(p.appointment_type<>'PERMANENT'),0) additional_appointment_count,
                         GROUP_CONCAT(DISTINCT CASE WHEN p.appointment_type<>'PERMANENT'
                           THEN p.appointment_type END ORDER BY p.appointment_type SEPARATOR ', ') additional_appointment_types,
-                        COALESCE(MAX(i.data_issue_count),0) data_issue_count,
-                        CASE WHEN COALESCE(MAX(i.data_issue_count),0)>0 THEN 'DATA_ISSUE' ELSE 'COMPLETE' END timeline_status
-                 FROM {$periods} p
-                 {$periodScope}
+                        COUNT(DISTINCT p.issue_key) data_issue_count,
+                        CASE WHEN COUNT(DISTINCT p.issue_key)>0 THEN 'DATA_ISSUE' ELSE 'COMPLETE' END timeline_status
+                 FROM {$evidence} p
                  JOIN officer o ON o.id=p.officer_id
-                 LEFT JOIN (
-                   SELECT q.officer_id,COUNT(DISTINCT q.row_key) data_issue_count
-                   FROM {$issueSource} q {$issueScope}
-                   WHERE q.officer_id IS NOT NULL AND {$terminal}
-                   GROUP BY q.officer_id
-                 ) i ON i.officer_id=o.id
                  GROUP BY o.id,o.dad_number,o.name_with_initials,o.nic,o.arpa_service_permanency)";
     }
 
@@ -88,9 +82,9 @@ final class ArpaOfficerTimelineService
     public function timeline(string $officerId,string $viewerId):array
     {
         $appointments=$this->appointments($officerId,$viewerId);
-        if($appointments===[])throw new DomainException('This Officer has no ARPA appointments in your current working context.');
-        $officer=$this->officer($officerId);
         $issues=$this->existingIssues($officerId,$viewerId);
+        if($appointments===[]&&$issues===[])throw new DomainException('This Officer has no ARPA appointments or unresolved issues in your current working context.');
+        $officer=$this->officer($officerId);
         $known=[];$knownTypes=[];foreach($issues as $issue){$known[(string)$issue['row_key']]=true;$knownTypes[(string)$issue['issue_type']]=true;}
         $conflictRows=array_values(array_filter($appointments,static fn(array $row):bool=>(int)$row['legacy_history_only']===0||!empty($row['closure_id'])));
         foreach($this->derivedConflicts($conflictRows,(string)($officer['arpa_service_permanency']??'')) as $issue){
@@ -103,7 +97,8 @@ final class ArpaOfficerTimelineService
         }unset($appointment);
         $counts=array_fill_keys(ArpaAppointmentRules::APPOINTMENT_TYPES,0);
         foreach($appointments as $appointment)$counts[(string)$appointment['appointment_type']]++;
-        $canCorrect=(new ArpaAppointmentDataIssueCorrectionService($this->pdo))->canCorrect($viewerId,(string)$appointments[0]['asc_location_id']);
+        $ascId=$appointments[0]['asc_location_id']??$issues[0]['asc_location_id']??null;
+        $canCorrect=$ascId!==null&&(new ArpaAppointmentDataIssueCorrectionService($this->pdo))->canCorrect($viewerId,(string)$ascId);
         return ['officer'=>$officer,'appointments'=>$appointments,'issues'=>$issues,'can_correct'=>$canCorrect,'summary'=>[
             'total_appointments'=>count($appointments),'permanent'=>$counts['PERMANENT'],'acting'=>$counts['ACTING'],
             'attend_to_duty'=>$counts['ATTEND_TO_DUTY'],'duty_covering'=>$counts['DUTY_COVERING'],
@@ -135,14 +130,22 @@ final class ArpaOfficerTimelineService
     private function existingIssues(string $officerId,string $viewerId):array
     {
         $restricted=ScopeService::requiresGeographicRestriction($viewerId);$with=$restricted?ScopeService::visibleLocationsCte($viewerId):'';
-        $scope=$restricted?'JOIN visible_locations vl ON vl.id=q.asc_location_id':'';
-        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'dc');
-        $terminal="NOT EXISTS(SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective})";
-        $sql=($with!==''?$with.' ':'')."SELECT q.* FROM ".ArpaAppointmentReadService::issueSource()." q {$scope} WHERE q.officer_id=? AND {$terminal} ORDER BY q.row_key";
+        $sql=($with!==''?$with.' ':'')."SELECT q.* FROM ".self::unresolvedIssueSource($this->pdo,$restricted)." q WHERE q.officer_id=? ORDER BY q.row_key";
         $params=$restricted?ScopeService::visibleLocationParams($viewerId):[];$params[]=$officerId;
         $stmt=$this->pdo->prepare($sql);$stmt->execute($params);$rows=$stmt->fetchAll();
-        foreach($rows as &$row){$row['existing_data_issue']=true;$row['affected_source_ids']=array_values(array_filter(array_map('trim',explode(',',(string)($row['related_ids']??'')))));$row['issue_from']=null;$row['issue_to']=null;}unset($row);
+        foreach($rows as &$row){$row['existing_data_issue']=true;$row['affected_source_ids']=array_values(array_filter(array_map('trim',explode(',',(string)($row['related_ids']??'')))));$row['issue_from']??=null;$row['issue_to']??=null;}unset($row);
         return $rows;
+    }
+
+    /** Identical current-context scope and effective-decision filtering for list and detail. */
+    private static function unresolvedIssueSource(PDO $pdo,bool $restricted):string
+    {
+        $scope=$restricted?'JOIN visible_locations issue_scope ON issue_scope.id=q.asc_location_id':'';
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($pdo,'dc');
+        return "(SELECT q.* FROM ".ArpaAppointmentReadService::issueSource()." q {$scope}
+                 WHERE q.officer_id IS NOT NULL AND NOT EXISTS(
+                   SELECT 1 FROM arpa_appointment_data_correction dc WHERE dc.issue_row_key=q.row_key
+                     AND dc.resolution_status IN('RESOLVED_BY_CORRECTION','KEPT_HISTORICAL_EXCEPTION') AND {$effective}))";
     }
 
     /** @param array<int,array<string,mixed>> $rows @return array<int,array<string,mixed>> */
