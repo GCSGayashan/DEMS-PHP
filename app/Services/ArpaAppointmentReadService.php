@@ -133,6 +133,7 @@ final class ArpaAppointmentReadService
     public function eligibleOfficersForAsc(string $userId, string $ascLocationId, string $effectiveDate): array
     {
         if (!ScopeService::canAccessCurrentArpaStage($userId, 'ASC', $ascLocationId)) return [];
+        $officerStart=self::officerBusinessStartSql();
         $sql="SELECT DISTINCT o.id,o.dad_number,o.name_with_initials,o.nic,o.arpa_service_permanency
               FROM officer o
               JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER'
@@ -144,10 +145,25 @@ final class ArpaAppointmentReadService
                 AND ofc.effective_from<=CURRENT_DATE() AND (ofc.effective_to IS NULL OR ofc.effective_to>=CURRENT_DATE())
               JOIN office_type ot ON ot.id=ofc.office_type_id AND ot.system_key='ASC_OFFICE'
               WHERE o.approval_status='APPROVED' AND o.operational_status='ACTIVE'
-                AND o.effective_from<=? AND (o.effective_to IS NULL OR o.effective_to>=?)
+                AND {$officerStart}<=? AND (o.effective_to IS NULL OR o.effective_to>=?)
               ORDER BY o.name_with_initials,o.dad_number";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$effectiveDate,$effectiveDate]);
         return $this->withAppointmentTypeAvailability($stmt->fetchAll(),$effectiveDate);
+    }
+
+    private static function officerBusinessStartSql():string
+    {
+        // The importer created Officers without created_by, but also attached
+        // references to existing native Officers. A reference alone is not proof
+        // that effective_from is the old registration timestamp.
+        return "CASE WHEN o.created_by IS NULL AND o.initial_appointment_date IS NOT NULL
+                AND EXISTS(SELECT 1 FROM legacy_officer_reference officer_source
+                    WHERE officer_source.officer_id=o.id
+                      AND officer_source.source_system='AGRARIANADMIN_HR'
+                      AND officer_source.source_table='tbl_officer'
+                      AND LEFT(JSON_UNQUOTE(JSON_EXTRACT(officer_source.legacy_payload_json,'$.created_at')),10)=CAST(o.effective_from AS CHAR))
+                THEN o.initial_appointment_date
+                ELSE GREATEST(o.effective_from,COALESCE(o.initial_appointment_date,o.effective_from)) END";
     }
 
     /** @return array<int,array<string,mixed>> */
@@ -191,14 +207,16 @@ final class ArpaAppointmentReadService
 
     public function assertEligibleOfficer(string $officerId, string $ascLocationId, string $effectiveDate): void
     {
+        $officerStart=self::officerBusinessStartSql();
         $sql="SELECT COUNT(*) FROM officer o JOIN designation d ON d.id=o.primary_designation_id AND d.system_key='ARPA_OFFICER'
+                AND d.active=1 AND d.approval_status='APPROVED'
               JOIN officer_office_assignment oa ON oa.officer_id=o.id AND oa.active=1 AND oa.approval_status='APPROVED'
                 AND oa.effective_from<=CURRENT_DATE() AND (oa.effective_to IS NULL OR oa.effective_to>=CURRENT_DATE())
               JOIN office ofc ON ofc.id=oa.office_id AND ofc.linked_location_id=? AND ofc.approval_status='APPROVED' AND ofc.operational_status='ACTIVE'
                 AND ofc.effective_from<=CURRENT_DATE() AND (ofc.effective_to IS NULL OR ofc.effective_to>=CURRENT_DATE())
               JOIN office_type ot ON ot.id=ofc.office_type_id AND ot.system_key='ASC_OFFICE'
               WHERE o.id=? AND o.approval_status='APPROVED' AND o.operational_status='ACTIVE'
-                AND o.effective_from<=? AND (o.effective_to IS NULL OR o.effective_to>=?)";
+                AND {$officerStart}<=? AND (o.effective_to IS NULL OR o.effective_to>=?)";
         $stmt=$this->pdo->prepare($sql);$stmt->execute([$ascLocationId,$officerId,$effectiveDate,$effectiveDate]);
         if((int)$stmt->fetchColumn()===0)throw new DomainException('The selected ARPA Officer does not have an approved current assignment to the selected ASC Office.');
     }
