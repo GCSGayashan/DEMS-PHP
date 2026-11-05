@@ -75,6 +75,7 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
             $this->exerciseService();
             $this->exerciseWorkflow();
             $this->exerciseConsistencyCheckpoint();
+            $this->exerciseHistoricalPeerDecisions();
             $this->exerciseOfficerTimelineVisibility();
         }finally{
             $_SESSION=[];
@@ -487,12 +488,118 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
         $this->same(true,str_contains($currentFilter,'successor_amendment.workflow_status=\'NATIONAL_APPROVED\''),'Data Issue DataTable reviewed filter uses the shared effective-decision predicate');
     }
 
+    /** Two open request-only imports must respect an explicit, effective KEEP decision. */
+    private function exerciseHistoricalPeerDecisions():void
+    {
+        // Extend only the disposable fixture to exercise the real request-resolution path.
+        $this->pdo->exec("CREATE TABLE designation(id CHAR(36) PRIMARY KEY,system_key VARCHAR(80));
+            ALTER TABLE officer ADD primary_designation_id CHAR(36) NULL;
+            ALTER TABLE arpa_division_appointment_request ADD request_remarks TEXT NULL,ADD location_snapshot_json JSON NULL;
+            ALTER TABLE legacy_arpa_appointment_business_record ADD reconciliation_class VARCHAR(80) NULL,ADD source_snapshot_json JSON NULL,ADD officer_id CHAR(36) NULL;
+            CREATE TABLE legacy_arpa_appointment_source_reference(id CHAR(36) PRIMARY KEY,business_record_id CHAR(36) NULL,target_appointment_request_id CHAR(36),target_appointment_id CHAR(36) NULL,source_system VARCHAR(80),source_table VARCHAR(80),legacy_appointment_id VARCHAR(80));
+            ALTER TABLE arpa_division_appointment ADD province_location_id_snapshot CHAR(36) NULL,ADD district_location_id_snapshot CHAR(36) NULL,
+                ADD province_dad_snapshot VARCHAR(50) NULL,ADD province_name_snapshot VARCHAR(255) NULL,
+                ADD district_dad_snapshot VARCHAR(50) NULL,ADD asc_dad_snapshot VARCHAR(50) NULL,ADD arpa_dad_snapshot VARCHAR(50) NULL,
+                ADD approved_by CHAR(36) NULL,ADD approved_at DATETIME NULL,ADD approval_timestamp_provenance VARCHAR(80) NULL;");
+        $officer='be3c5c14-7393-4d54-9cab-92cd327deefa';$division='8376ac85-46cf-441e-b3ae-e39507bd8bf4';
+        $first='febc95d9-96f9-11f1-8055-fc5cee2ebe64';$second='f623cc94-96f8-11f1-8055-fc5cee2ebe64';
+        $key=static fn(string $id):string=>'LEGACY_HISTORICAL_EXCEPTION:'.$id;
+        $service=new \App\Services\ArpaAppointmentDataIssueCorrectionService($this->pdo);
+        $state=function():array{$out=[];foreach($this->pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $table)$out[$table]=$this->pdo->query('SELECT * FROM `'.$table.'` ORDER BY 1')->fetchAll();return $out;};
+        $beforeAll=$state();
+        $this->pdo->beginTransaction();
+        try{
+            $this->pdo->exec("INSERT INTO designation VALUES('peer-arpa','ARPA_OFFICER');
+                INSERT INTO officer(id,dad_number,name_with_initials,primary_designation_id) VALUES('{$officer}','70045-0002795','Synthetic historical peer Officer','peer-arpa');
+                INSERT INTO location VALUES('{$division}','11000000-0000-4000-8000-000000000002','70007-0005666','Thalapitaoya'),('peer-province','11000000-0000-4000-8000-000000000003','70001-PEER','Synthetic Province');
+                INSERT INTO location_relationship VALUES('peer-arpa','".self::ASC_ONE."','{$division}','ASC_ARPA_DIVISION',1,'APPROVED','2024-01-05',NULL),('peer-province','peer-province','19000000-0000-4000-8000-000000000001','PROVINCE_DISTRICT',1,'APPROVED','2024-01-05',NULL);");
+            $insert=$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,legacy_history_only,legacy_exception,legacy_exception_codes_json,origin_metadata_json) VALUES(?,'LEGACY_IMPORT','APPOINTMENT',?,'PERMANENT',?,?,?,'CREATED',1,1,'[\"INCOMPLETE_LEGACY_WORKFLOW\"]','{\"source\":\"synthetic evidence\"}')");
+            foreach([[$first,'2020-09-21'],[$second,'2026-01-01']] as [$id,$date]){
+                $insert->execute([$id,$officer,self::ASC_ONE,$division,$date]);
+                $this->pdo->prepare("INSERT INTO legacy_arpa_appointment_source_reference(id,target_appointment_request_id,source_system,source_table,legacy_appointment_id) VALUES(?,?,'SYNTHETIC_UAT','synthetic_legacy',?)")->execute(['ref-'.$date,$id,$date]);
+            }
+            $resolve=['correction_action'=>'RESOLVE_CANONICAL_ASSIGNMENT','correction_reason'=>'Synthetic evidence-backed resolution','appointment_status'=>'OPEN'];
+            $keep=['correction_action'=>'KEEP_AS_HISTORICAL_EXCEPTION','correction_reason'=>'Synthetic evidence confirms this remains non-authoritative history','evidence_reference'=>'Synthetic source ledger','remarks'=>'Preserve evidence; not a declaration of invalidity.'];
+            $this->useContext(self::ACTOR);
+            foreach([$first,$second] as $id){
+                $this->same(true,$service->detail($key($id),self::ACTOR)['correctable'],'assigned Subject Officer can review each request-only issue');
+                $this->throwsDomainMessage(fn()=>$service->correct($key($id),$resolve,self::ACTOR),'another unresolved historical appointment record','both open imports initially block canonical resolution');
+            }
+            $detail=$service->detail($key($first),self::ACTOR);
+            $render=static function(array $detail):string{extract($detail,EXTR_SKIP);ob_start();require BASE_PATH.'/app/Views/arpa_appointments/issues/detail.php';return (string)ob_get_clean();};
+            $html=$render($detail);
+            $this->same(true,str_contains($html,'Keep as Historical Exception')&&str_contains($html,'does not declare the record invalid'),'review form explains the actual non-canonical KEEP semantics');
+            $this->same(false,str_contains($html,'Mark Not Applicable'),'review form does not mislabel historical retention as invalidation');
+            $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_appointment_data_correction WHERE officer_id=?',[$officer]),'failed resolution attempts write no decisions');
+            $this->useContext(self::OTHER_ASC_ACTOR);
+            $this->throwsDomain(fn()=>$service->correct($key($first),$keep,self::OTHER_ASC_ACTOR),'foreign ASC cannot classify a peer issue');
+            $this->useContext(self::ASC_APPROVER);
+            $this->same(false,$service->detail($key($first),self::ASC_APPROVER)['correctable'],'ASC Admin retains read-only correction access');
+            $this->throwsDomain(fn()=>$service->correct($key($first),$keep,self::ASC_APPROVER),'ASC Admin does not gain Subject Officer correction powers');
+            $this->useContext(self::ACTOR);
+            $this->throwsDomain(fn()=>$service->correct($key($first),$keep,self::OTHER_ASC_ACTOR),'actor identity cannot forge a foreign correction');
+            $missingReason=$keep;$missingReason['correction_reason']=' ';
+            $this->throwsDomain(fn()=>$service->correct($key($first),$missingReason,self::ACTOR),'classification requires a reason');
+            $requestsBefore=$this->pdo->query("SELECT * FROM arpa_division_appointment_request WHERE officer_id='{$officer}' ORDER BY id")->fetchAll();
+            $keptRequestBefore=$this->row('SELECT * FROM arpa_division_appointment_request WHERE id=?',[$first]);
+            $refsBefore=$this->pdo->query('SELECT * FROM legacy_arpa_appointment_source_reference ORDER BY id')->fetchAll();
+            $kept=$service->correct($key($first),$keep,self::ACTOR);
+            $this->same('KEPT_HISTORICAL_EXCEPTION',$kept['resolution_status'],'supported non-canonical decision succeeds without resolving its peer first');
+            $ledger=$service->correction($kept['correction_id'],self::ACTOR);
+            $this->same(null,$ledger['appointment_id'],'KEEP creates no canonical appointment');
+            $this->same($ledger['before_json'],$ledger['after_json'],'KEEP snapshot proves source unchanged');
+            foreach(['corrected_by'=>self::ACTOR,'correction_reason'=>$keep['correction_reason'],'evidence_reference'=>$keep['evidence_reference']] as $field=>$expected)$this->same($expected,$ledger[$field],'classification audit retains '.$field);
+            $this->same(true,!empty($ledger['corrected_at']),'classification records a timestamp');
+            $this->same($requestsBefore,$this->pdo->query("SELECT * FROM arpa_division_appointment_request WHERE officer_id='{$officer}' ORDER BY id")->fetchAll(),'classification does not alter either imported request');
+            $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE officer_id=?',[$officer]),'KEEP does not create or promote any appointment');
+
+            // A reviewed-but-unresolved or mismatched decision must not unlock its peer.
+            foreach([['resolution_status','REVIEWED_UNRESOLVED'],['issue_row_key','unrelated-key'],['request_id',$second],['asc_location_id',self::ASC_TWO],['officer_id','20000000-0000-4000-8000-000000000001']] as [$column,$value]){
+                $this->pdo->prepare("UPDATE arpa_appointment_data_correction SET {$column}=? WHERE id=?")->execute([$value,$kept['correction_id']]);
+                $this->throwsDomainMessage(fn()=>$service->correct($key($second),$resolve,self::ACTOR),'another unresolved historical appointment record','only matching terminal KEEP exempts a peer: '.$column);
+                $this->pdo->prepare("UPDATE arpa_appointment_data_correction SET {$column}=? WHERE id=?")->execute([$ledger[$column],$kept['correction_id']]);
+            }
+            $this->pdo->prepare("INSERT INTO arpa_appointment_data_correction(id,issue_row_key,issue_type,officer_id,request_id,asc_location_id,corrected_by,correction_action,resolution_status,correction_reason,before_json,after_json,record_origin,supersedes_correction_id) VALUES('peer-successor',?,'LEGACY_HISTORICAL_EXCEPTION',?,?,?,?,'MARK_HISTORICAL_ONLY','REVIEWED_UNRESOLVED','Synthetic successor','{}','{}','LEGACY_IMPORT',?)")->execute([$key($first),$officer,$first,self::ASC_ONE,self::ACTOR,$kept['correction_id']]);
+            $this->throwsDomainMessage(fn()=>$service->correct($key($second),$resolve,self::ACTOR),'another unresolved historical appointment record','superseded KEEP cannot exempt a peer');
+            $this->pdo->exec("DELETE FROM arpa_appointment_data_correction WHERE id='peer-successor'"); // disposable fixture only
+
+            $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status) VALUES('peer-native','NATIVE','APPOINTMENT',?,'PERMANENT',?,?,'2026-01-01','SUBMITTED')")->execute([$officer,self::ASC_ONE,$division]);
+            $this->throwsDomainMessage(fn()=>$service->correct($key($second),$resolve,self::ACTOR),'overlaps a submitted or scheduled assignment','reviewed legacy evidence does not bypass genuine native reservations');
+            $this->pdo->exec("DELETE FROM arpa_division_appointment_request WHERE id='peer-native'"); // disposable fixture only
+            $resolved=$service->correct($key($second),$resolve,self::ACTOR);
+            $this->same('RESOLVED_BY_CORRECTION',$resolved['resolution_status'],'remaining issue resolves after an effective KEEP classification');
+            $this->same(1,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE officer_id=?',[$officer]),'only the explicitly resolved request becomes canonical');
+            $assessment=$service->validateCanonicalPromotion($resolved['appointment_id']);
+            $this->same(0,(int)$assessment['unresolved_legacy_record'],'bulk/shared promotion assessment also honors effective request-only KEEP');
+            $this->pdo->prepare("UPDATE arpa_appointment_data_correction SET resolution_status='REVIEWED_UNRESOLVED' WHERE id=?")->execute([$kept['correction_id']]);
+            $assessment=$service->validateCanonicalPromotion($resolved['appointment_id']);
+            $this->same(1,(int)$assessment['unresolved_legacy_record'],'bulk/shared assessment retains an actually unresolved imported peer');
+            $this->pdo->prepare("UPDATE arpa_appointment_data_correction SET resolution_status='KEPT_HISTORICAL_EXCEPTION' WHERE id=?")->execute([$kept['correction_id']]);
+            $this->same($refsBefore[0]['target_appointment_id'],$this->row('SELECT target_appointment_id FROM legacy_arpa_appointment_source_reference WHERE id=?',[$refsBefore[0]['id']])['target_appointment_id'],'kept source reference is preserved');
+            $this->same($ledger,$service->correction($kept['correction_id'],self::ACTOR),'original KEEP history remains unchanged after peer resolution');
+            $this->same($keptRequestBefore,$this->row('SELECT * FROM arpa_division_appointment_request WHERE id=?',[$first]),'kept import remains unchanged after peer resolution');
+            $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id=?',[$resolved['appointment_id']]),'no fabricated closure');
+            $this->same(2,$this->count("SELECT COUNT(*) FROM audit_event WHERE target_id IN(?,?) AND action_key='arpa.appointment.data-issue.correct'",[$kept['correction_id'],$resolved['correction_id']]),'both explicit decisions have independent audit events');
+            $this->throwsDomainMessage(fn()=>$service->correct($key($first),$resolve,self::ACTOR),'another assignment already starts','KEEP does not bypass the remaining authoritative canonical overlap');
+            $this->same(1,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE officer_id=?',[$officer]),'failed overlap cannot duplicate canonical appointments');
+            $after=$state();
+            foreach($beforeAll as $table=>$rows){
+                if(in_array($table,['designation','officer','location','location_relationship','legacy_arpa_appointment_source_reference','arpa_division_appointment_request','arpa_division_appointment','arpa_appointment_data_correction','audit_event'],true))continue;
+                $this->same($rows,$after[$table],'unrelated table unchanged: '.$table);
+            }
+            foreach(['arpa_division_appointment_request','arpa_division_appointment','arpa_appointment_data_correction'] as $table){
+                $unrelated=array_values(array_filter($after[$table],static fn(array $row):bool=>$row['officer_id']!==$officer));
+                $this->same($beforeAll[$table],$unrelated,'unrelated officers and Divisions unchanged: '.$table);
+            }
+        }finally{$this->pdo->rollBack();}
+        $this->same($beforeAll,$state(),'isolated scenario leaves all prior fixture records intact');
+    }
+
     /** Request-only Officer Timeline regression, using this suite's disposable schema only. */
     private function exerciseOfficerTimelineVisibility():void
     {
         $this->pdo->exec("ALTER TABLE officer ADD primary_office_id CHAR(36) NULL;
             ALTER TABLE office ADD dad_number VARCHAR(50) NULL,ADD name_en VARCHAR(255) NULL;
-            ALTER TABLE arpa_division_appointment ADD asc_dad_snapshot VARCHAR(50) NULL,ADD district_dad_snapshot VARCHAR(50) NULL,ADD arpa_dad_snapshot VARCHAR(50) NULL;
             INSERT IGNORE INTO application_role_permission SELECT id,'13000000-0000-4000-8000-000000000011' FROM application_role WHERE role_code IN('ASC_SUBJECT_OFFICER','ASC_ADMIN');");
         $officer='be3c5c14-7393-4d54-9cab-92cd327deefa';$division='8376ac85-46cf-441e-b3ae-e39507bd8bf4';
         $request2020='febc95d9-96f9-11f1-8055-fc5cee2ebe64';$request2026='f623cc94-96f8-11f1-8055-fc5cee2ebe64';

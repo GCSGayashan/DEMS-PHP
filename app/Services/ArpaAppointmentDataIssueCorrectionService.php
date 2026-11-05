@@ -654,6 +654,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         $effectiveDone=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'done2');
         $effectiveKept=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'kept');
         $effectiveResolved=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'resolved');
+        $keptLegacyRequest=$this->keptHistoricalRequestPredicate('lr');
         $ignoreDone=$ignoreCorrectionId===null?'':' AND done2.id<>'.$this->pdo->quote($ignoreCorrectionId);
         $ignoreKept=$ignoreCorrectionId===null?'':' AND kept.id<>'.$this->pdo->quote($ignoreCorrectionId);
         $ignoreResolved=$ignoreCorrectionId===null?'':' AND resolved.id<>'.$this->pdo->quote($ignoreCorrectionId);
@@ -690,6 +691,7 @@ final class ArpaAppointmentDataIssueCorrectionService
                        WHERE lr.deleted_at IS NULL AND lr.record_origin='LEGACY_IMPORT' AND lr.legacy_exception=1
                          AND lr.id<>a.request_id AND lr.arpa_division_location_id=a.arpa_division_location_id
                          AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment la WHERE la.request_id=lr.id)
+                         AND NOT ({$keptLegacyRequest})
                          AND lr.requested_effective_from<='9999-12-31' AND COALESCE(lr.requested_effective_to,'9999-12-31')>=a.effective_from) unresolved_legacy_record,
                      (EXISTS(SELECT 1 FROM arpa_division_appointment pa LEFT JOIN arpa_division_appointment_closure pc ON pc.appointment_id=pa.id
                         WHERE pa.id<>a.id AND pa.officer_id=a.officer_id AND pa.appointment_type='PERMANENT' AND pa.legacy_history_only=0
@@ -854,9 +856,23 @@ final class ArpaAppointmentDataIssueCorrectionService
         $statuses="'".implode("','",ArpaAppointmentReadService::RESERVING_REQUEST_STATUSES)."'";
         $s=$this->pdo->prepare("SELECT MIN(r.requested_effective_from) FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND r.record_origin='NATIVE' AND r.legacy_history_only=0 AND r.workflow_status IN({$statuses}) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=?");
         $s->execute([$divisionId,$excludeRequestId,$end,$from]);$reservation=$s->fetchColumn();if($reservation)return ['classification'=>'SKIPPED_ACTIVE_WORKFLOW_RESERVATION','code'=>'ACTIVE_WORKFLOW_RESERVATION','message'=>'The corrected appointment period overlaps a submitted or scheduled assignment starting on '.$this->displayDate((string)$reservation).'.'];
-        $s=$this->pdo->prepare("SELECT r.id FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1 AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=? LIMIT 1");
+        $keptLegacyRequest=$this->keptHistoricalRequestPredicate('r');
+        $s=$this->pdo->prepare("SELECT r.id FROM arpa_division_appointment_request r WHERE r.deleted_at IS NULL AND r.record_origin='LEGACY_IMPORT' AND r.legacy_exception=1 AND r.arpa_division_location_id=? AND r.id<>COALESCE(?,'') AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment a WHERE a.request_id=r.id) AND NOT ({$keptLegacyRequest}) AND r.requested_effective_from<=? AND COALESCE(r.requested_effective_to,'9999-12-31')>=? LIMIT 1");
         $s->execute([$divisionId,$excludeRequestId,$end,$from]);if($s->fetchColumn())return ['classification'=>'SKIPPED_OTHER_DATA_ISSUE','code'=>'UNRESOLVED_LEGACY_RECORD','message'=>'This ARPA Division has another unresolved historical appointment record for the corrected period. Resolve that Appointment Data Issue first.'];
         return null;
+    }
+    /** A reviewed non-operational source is retained evidence, not an unresolved peer. */
+    private function keptHistoricalRequestPredicate(string $requestAlias):string
+    {
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'kept_request');
+        return "{$requestAlias}.legacy_history_only=1 AND EXISTS(
+            SELECT 1 FROM arpa_appointment_data_correction kept_request
+            WHERE kept_request.issue_row_key=CONCAT('LEGACY_HISTORICAL_EXCEPTION:',{$requestAlias}.id)
+              AND kept_request.request_id={$requestAlias}.id AND kept_request.appointment_id IS NULL
+              AND kept_request.officer_id={$requestAlias}.officer_id
+              AND kept_request.asc_location_id={$requestAlias}.asc_location_id
+              AND kept_request.correction_action='KEEP_AS_HISTORICAL_EXCEPTION'
+              AND kept_request.resolution_status='KEPT_HISTORICAL_EXCEPTION' AND {$effective})";
     }
     private function assertFollowingContinuity(string $appointmentId,string $divisionId,string $from,?string $to,string $requestId):void
     {
