@@ -285,6 +285,9 @@ final class ArpaAppointmentCorrectionAmendmentService
                 if($stmt->rowCount()!==1)throw new DomainException('The amendment changed while the final approval was being completed. Reload it and try again.');
                 $after=$this->lockedRequest($amendmentId);
                 $this->event($amendmentId,'APPROVE','NATIONAL',$actorId,'NATIONAL_VERIFIED',$newStatus,$before,$this->eventSnapshot($after),$reason);
+                if($request['proposed_action']==='RESOLVE_CANONICAL_ASSIGNMENT'){
+                    (new ArpaHistoricalAppointmentApprovalService($this->pdo))->registerCanonicalCorrectionInTransaction($application['correction_id'],$actorId,'AMENDMENT');
+                }
                 return $this->present($after,$this->events($amendmentId));
             }
             $newStatus=$action==='REJECT'?'REJECTED':$transition['status'];
@@ -753,8 +756,8 @@ final class ArpaAppointmentCorrectionAmendmentService
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
     private function transaction(callable $work):mixed
     {
-        $owned=!$this->pdo->inTransaction();if($owned)$this->pdo->beginTransaction();
-        try{$result=$work();if($owned)$this->pdo->commit();return $result;}
-        catch(Throwable $e){if($owned&&$this->pdo->inTransaction())$this->pdo->rollBack();throw $e;}
+        $owned=!$this->pdo->inTransaction();if($owned)$this->pdo->beginTransaction();else $this->pdo->exec('SAVEPOINT arpa_correction_amendment');
+        try{$result=$work();if($owned)$this->pdo->commit();else $this->pdo->exec('RELEASE SAVEPOINT arpa_correction_amendment');return $result;}
+        catch(Throwable $e){if($this->pdo->inTransaction()){if($owned)$this->pdo->rollBack();else{$this->pdo->exec('ROLLBACK TO SAVEPOINT arpa_correction_amendment');$this->pdo->exec('RELEASE SAVEPOINT arpa_correction_amendment');}}throw $e;}
     }
 }

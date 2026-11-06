@@ -72,6 +72,7 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
             $this->pdo->exec($migration);
             $this->insertFixtures();
             $this->installIsolatedDatabase();
+            $this->prepareHistoricalApprovalFixture();
             $this->exerciseService();
             $this->exerciseWorkflow();
             $this->exerciseConsistencyCheckpoint();
@@ -491,12 +492,13 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
     /** Two open request-only imports must respect an explicit, effective KEEP decision. */
     private function exerciseHistoricalPeerDecisions():void
     {
+        $this->prepareHistoricalApprovalFixture();
         // Extend only the disposable fixture to exercise the real request-resolution path.
         $this->pdo->exec("CREATE TABLE designation(id CHAR(36) PRIMARY KEY,system_key VARCHAR(80));
             ALTER TABLE officer ADD primary_designation_id CHAR(36) NULL;
             ALTER TABLE arpa_division_appointment_request ADD request_remarks TEXT NULL,ADD location_snapshot_json JSON NULL;
             ALTER TABLE legacy_arpa_appointment_business_record ADD reconciliation_class VARCHAR(80) NULL,ADD source_snapshot_json JSON NULL,ADD officer_id CHAR(36) NULL;
-            CREATE TABLE legacy_arpa_appointment_source_reference(id CHAR(36) PRIMARY KEY,business_record_id CHAR(36) NULL,target_appointment_request_id CHAR(36),target_appointment_id CHAR(36) NULL,source_system VARCHAR(80),source_table VARCHAR(80),legacy_appointment_id VARCHAR(80));
+            CREATE TABLE IF NOT EXISTS legacy_arpa_appointment_source_reference(id CHAR(36) PRIMARY KEY,business_record_id CHAR(36) NULL,target_appointment_request_id CHAR(36),target_appointment_id CHAR(36) NULL,source_system VARCHAR(80),source_table VARCHAR(80),legacy_appointment_id VARCHAR(80));
             ALTER TABLE arpa_division_appointment ADD province_location_id_snapshot CHAR(36) NULL,ADD district_location_id_snapshot CHAR(36) NULL,
                 ADD province_dad_snapshot VARCHAR(50) NULL,ADD province_name_snapshot VARCHAR(255) NULL,
                 ADD district_dad_snapshot VARCHAR(50) NULL,ADD asc_dad_snapshot VARCHAR(50) NULL,ADD arpa_dad_snapshot VARCHAR(50) NULL,
@@ -543,6 +545,7 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
             $requestsBefore=$this->pdo->query("SELECT * FROM arpa_division_appointment_request WHERE officer_id='{$officer}' ORDER BY id")->fetchAll();
             $keptRequestBefore=$this->row('SELECT * FROM arpa_division_appointment_request WHERE id=?',[$first]);
             $refsBefore=$this->pdo->query('SELECT * FROM legacy_arpa_appointment_source_reference ORDER BY id')->fetchAll();
+            $keptRefsBefore=$this->pdo->query("SELECT * FROM legacy_arpa_appointment_source_reference WHERE target_appointment_request_id='{$first}' ORDER BY id")->fetchAll();
             $kept=$service->correct($key($first),$keep,self::ACTOR);
             $this->same('KEPT_HISTORICAL_EXCEPTION',$kept['resolution_status'],'supported non-canonical decision succeeds without resolving its peer first');
             $ledger=$service->correction($kept['correction_id'],self::ACTOR);
@@ -575,7 +578,7 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
             $assessment=$service->validateCanonicalPromotion($resolved['appointment_id']);
             $this->same(1,(int)$assessment['unresolved_legacy_record'],'bulk/shared assessment retains an actually unresolved imported peer');
             $this->pdo->prepare("UPDATE arpa_appointment_data_correction SET resolution_status='KEPT_HISTORICAL_EXCEPTION' WHERE id=?")->execute([$kept['correction_id']]);
-            $this->same($refsBefore[0]['target_appointment_id'],$this->row('SELECT target_appointment_id FROM legacy_arpa_appointment_source_reference WHERE id=?',[$refsBefore[0]['id']])['target_appointment_id'],'kept source reference is preserved');
+            $this->same($keptRefsBefore,$this->pdo->query("SELECT * FROM legacy_arpa_appointment_source_reference WHERE target_appointment_request_id='{$first}' ORDER BY id")->fetchAll(),'kept source references are preserved');
             $this->same($ledger,$service->correction($kept['correction_id'],self::ACTOR),'original KEEP history remains unchanged after peer resolution');
             $this->same($keptRequestBefore,$this->row('SELECT * FROM arpa_division_appointment_request WHERE id=?',[$first]),'kept import remains unchanged after peer resolution');
             $this->same(0,$this->count('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE appointment_id=?',[$resolved['appointment_id']]),'no fabricated closure');
@@ -583,8 +586,14 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
             $this->throwsDomainMessage(fn()=>$service->correct($key($first),$resolve,self::ACTOR),'another assignment already starts','KEEP does not bypass the remaining authoritative canonical overlap');
             $this->same(1,$this->count('SELECT COUNT(*) FROM arpa_division_appointment WHERE officer_id=?',[$officer]),'failed overlap cannot duplicate canonical appointments');
             $after=$state();
+            $historical=$this->row('SELECT * FROM arpa_appointment_historical_approval_case WHERE appointment_id=?',[$resolved['appointment_id']]);
+            $this->same('DRAFT',$historical['workflow_status'],'canonical peer resolution automatically registers only a Draft');
+            $this->same($resolved['correction_id'],$historical['source_correction_id'],'automatic case links its canonical correction');
+            $this->same(1,$this->count("SELECT COUNT(*) FROM arpa_appointment_historical_approval_event WHERE approval_case_id=? AND action='REGISTER'",[$historical['id']]),'automatic case has one registration audit');
+            $this->same($beforeAll['arpa_appointment_historical_approval_case'],array_values(array_filter($after['arpa_appointment_historical_approval_case'],fn($row)=>$row['id']!==$historical['id'])),'unrelated historical cases preserved');
+            $this->same($beforeAll['arpa_appointment_historical_approval_event'],array_values(array_filter($after['arpa_appointment_historical_approval_event'],fn($row)=>$row['approval_case_id']!==$historical['id'])),'unrelated historical events preserved');
             foreach($beforeAll as $table=>$rows){
-                if(in_array($table,['designation','officer','location','location_relationship','legacy_arpa_appointment_source_reference','arpa_division_appointment_request','arpa_division_appointment','arpa_appointment_data_correction','audit_event'],true))continue;
+                if(in_array($table,['designation','officer','location','location_relationship','legacy_arpa_appointment_source_reference','arpa_division_appointment_request','arpa_division_appointment','arpa_appointment_data_correction','audit_event','arpa_appointment_historical_approval_case','arpa_appointment_historical_approval_event'],true))continue;
                 $this->same($rows,$after[$table],'unrelated table unchanged: '.$table);
             }
             foreach(['arpa_division_appointment_request','arpa_division_appointment','arpa_appointment_data_correction'] as $table){
@@ -725,6 +734,11 @@ final class ArpaAppointmentCorrectionAmendmentDraftTest
         Auth::forgetRequestCache();
     }
 
+    private function prepareHistoricalApprovalFixture():void
+    {
+        if(!(new \App\Services\ArpaHistoricalApprovalReadService($this->pdo))->available())$this->pdo->exec(file_get_contents(BASE_PATH.'/database/migrations/067_arpa_historical_approval_foundation.sql'));
+    }
+
     private function createFixtureSchema():void
     {
         $this->pdo->exec(<<<'SQL'
@@ -746,6 +760,8 @@ CREATE TABLE arpa_division_appointment_request(
  legacy_exception TINYINT NOT NULL DEFAULT 0,legacy_exception_codes_json JSON NULL,origin_metadata_json JSON NULL,version BIGINT NOT NULL DEFAULT 0,
  deleted_at DATETIME NULL,deleted_by CHAR(36) NULL,delete_reason VARCHAR(500) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE arpa_appointment_workflow_action(id BIGINT AUTO_INCREMENT PRIMARY KEY,request_id CHAR(36),action VARCHAR(50),stage VARCHAR(50),user_id CHAR(36),action_at DATETIME NULL,record_origin VARCHAR(40),previous_status VARCHAR(50),new_status VARCHAR(50),comments TEXT,timestamp_provenance VARCHAR(80)) ENGINE=InnoDB;
+CREATE TABLE legacy_arpa_appointment_source_reference(id CHAR(36) PRIMARY KEY,business_record_id CHAR(36) NULL,target_appointment_request_id CHAR(36),target_appointment_id CHAR(36) NULL,source_system VARCHAR(80),source_table VARCHAR(80),legacy_appointment_id VARCHAR(80));
 CREATE TABLE arpa_division_appointment(
  id CHAR(36) PRIMARY KEY,record_origin VARCHAR(40) NOT NULL,request_id CHAR(36) NOT NULL,officer_id CHAR(36) NOT NULL,appointment_type VARCHAR(50) NOT NULL,
  service_permanency_snapshot VARCHAR(60) NULL,service_permanency_source VARCHAR(80) NULL,asc_location_id CHAR(36) NOT NULL,arpa_division_location_id CHAR(36) NOT NULL,
@@ -946,6 +962,8 @@ SQL);
  '20000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000004','40000000-0000-4000-8000-000000000004',?,?,NOW(),
  'KEEP_AS_HISTORICAL_EXCEPTION','RESOLVED_BY_CORRECTION','Superseding decision','{}','{}','APPOINTMENT_DATA_ISSUE','NATIVE','[]',?)")
             ->execute([self::ASC_ONE,self::ACTOR,self::SUPERSEDED_CORRECTION]);
+        $this->pdo->exec("INSERT INTO legacy_arpa_appointment_source_reference(id,target_appointment_request_id,target_appointment_id,source_system,source_table,legacy_appointment_id)
+            SELECT UUID(),r.id,a.id,'SYNTHETIC_TEST','synthetic_legacy',r.id FROM arpa_division_appointment_request r JOIN arpa_division_appointment a ON a.request_id=r.id WHERE r.record_origin='LEGACY_IMPORT'");
     }
 
     private function insertCorrection(PDOStatement $statement,string $id,string $rowKey,?string $appointmentId,?string $requestId,array $base):void
@@ -1027,5 +1045,6 @@ SQL);
     }
 }
 
+if(defined('ARPA_CORRECTION_DRAFT_FIXTURE_ONLY')&&ARPA_CORRECTION_DRAFT_FIXTURE_ONLY)return;
 try{exit((new ArpaAppointmentCorrectionAmendmentDraftTest())->run($argv));}
 catch(Throwable $e){fwrite(STDERR,$e->getMessage()."\n".$e->getTraceAsString()."\n");exit(1);}

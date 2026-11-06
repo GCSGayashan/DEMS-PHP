@@ -28,6 +28,14 @@ final class ArpaAdministrativePolicy
             && (string)($context['scope_mode']??'')==='NATIONAL';
     }
 
+    /** Identity alone must not bypass the currently selected Working Context. */
+    public static function isCanonicalSystemAdministrator():bool
+    {
+        $context=Auth::activeContext(false);
+        return $context!==null&&$context['role_code']==='SYSTEM_ADMIN'&&$context['role_level']==='SYSTEM'
+            &&Auth::can('arpa.appointment.view')&&self::isCanonicalDemsAdmin();
+    }
+
     /** @return array<string,mixed> */
     public static function assertDateCorrection():array
     {

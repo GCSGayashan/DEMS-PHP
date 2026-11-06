@@ -99,8 +99,13 @@ final class ArpaAppointmentAdministrationService
         });
     }
 
-    public function deleteRequest(string $requestId,string $reason,string $actorId):void
+    public function deleteRequest(string $requestId,string $reason,string $actorId,array $legacyInput=[]):void
     {
+        // The older delete endpoint must not bypass the stricter legacy preview.
+        $request=$this->request($requestId);
+        if($request['record_origin']==='LEGACY_IMPORT'){
+            (new ArpaLegacyRequestExclusionService($this->pdo))->exclude($requestId,array_merge($legacyInput,['delete_reason'=>$reason]),$actorId);return;
+        }
         $context=ArpaAdministrativePolicy::assertDelete();$reason=trim($reason);
         if($reason==='')throw new DomainException('Delete Reason is required.');
         $this->transaction(function()use($requestId,$reason,$actorId,$context):void{

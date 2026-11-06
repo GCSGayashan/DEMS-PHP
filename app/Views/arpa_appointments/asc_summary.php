@@ -43,3 +43,4 @@
 </div>
 
 <?php require BASE_PATH.'/app/Views/components/datatable.php'; ?>
+<?php require BASE_PATH.'/app/Views/arpa_appointments/historical_approval_panel.php'; ?>

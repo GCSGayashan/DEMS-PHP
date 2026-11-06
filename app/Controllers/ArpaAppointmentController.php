@@ -758,8 +758,8 @@ final class ArpaAppointmentController extends Controller
 
     public function deleteWorkflowRequestForm(string $id):void
     {
-        try{ArpaAdministrativePolicy::assertDelete();$request=(new ArpaAppointmentAdministrationService(Database::pdo()))->request($id);$this->render('arpa_appointments/request_delete_confirm',compact('request'));}
-        catch(DomainException $e){http_response_code(403);$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments');}
+        try{ArpaAdministrativePolicy::assertDelete();$request=(new ArpaAppointmentAdministrationService(Database::pdo()))->request($id);if($request['record_origin']==='LEGACY_IMPORT'){\App\Services\ArpaLegacyRequestExclusionService::authorize((string)Auth::user()['id']);redirect('/hr/arpa-appointments/legacy-requests/'.$id.'/exclude');}$this->render('arpa_appointments/request_delete_confirm',compact('request'));}
+        catch(DomainException $e){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}
     }
 
     public function deleteWorkflowRequest(string $id):void
@@ -768,8 +768,8 @@ final class ArpaAppointmentController extends Controller
         Csrf::validate();
         try{
             if((string)($_POST['confirm_delete']??'')!=='1')throw new DomainException('Confirm deletion of this workflow request.');
-            $service=new ArpaAppointmentAdministrationService(Database::pdo());$request=$service->request($id);$service->deleteRequest($id,(string)($_POST['delete_reason']??''),(string)Auth::user()['id']);$this->flash('success','ARPA workflow request deleted.');redirect('/hr/officers/'.$request['officer_id']);
-        }catch(DomainException $e){$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/requests/division/'.$id.'/delete');}
+            $service=new ArpaAppointmentAdministrationService(Database::pdo());$request=$service->request($id);$service->deleteRequest($id,(string)($_POST['delete_reason']??''),(string)Auth::user()['id'],$_POST);$this->flash('success','ARPA workflow request deleted.');redirect('/hr/officers/'.$request['officer_id']);
+        }catch(DomainException $e){if($e->getCode()===403){http_response_code(403);$this->render('partials/forbidden',['permission'=>$e->getMessage()]);return;}$this->flash('danger',$e->getMessage());redirect('/hr/arpa-appointments/requests/division/'.$id.'/delete');}
         catch(Throwable $e){error_log('ARPA workflow request deletion failed: '.get_class($e).' '.$e->getMessage());$this->flash('danger','The workflow request could not be deleted. No information was changed.');redirect('/hr/arpa-appointments/requests/division/'.$id.'/delete');}
     }
 
@@ -816,9 +816,19 @@ final class ArpaAppointmentController extends Controller
 
     public function requestDetail(string $entity,string $id):void
     {
-        Auth::requirePermission('arpa.appointment.view');$division=$entity==='division';$history=$division?'arpa_appointment_workflow_action':'arpa_subject_workflow_action';
-        $request=(new ArpaAppointmentReadService(Database::pdo()))->workflowRequestDetail($entity,$id);if(!$request||($division&&$request['deleted_at']!==null&&!ArpaAdministrativePolicy::isCanonicalDemsAdmin())){http_response_code(404);$this->flash('danger','Request was not found.');redirect('/hr/arpa-appointments/pending');}
-        $location=$this->requestLocation($entity,$id);if($location&&!ArpaAdministrativePolicy::isCanonicalDemsAdmin())$this->assertLocationScope($location);
+        Auth::requirePermission('arpa.appointment.view');
+        if(!in_array($entity,['division','subject'],true)){http_response_code(404);echo '<h1>Request not found.</h1>';return;}
+        $division=$entity==='division';$history=$division?'arpa_appointment_workflow_action':'arpa_subject_workflow_action';
+        $table=$division?'arpa_division_appointment_request':'arpa_subject_assignment_request';
+        $s=Database::pdo()->prepare('SELECT asc_location_id'.($division?',deleted_at':'').' FROM '.$table.' WHERE id=?');$s->execute([$id]);$identity=$s->fetch();
+        if(!$identity){http_response_code(404);echo '<h1>Request not found.</h1>';return;}
+        $systemAudit=ArpaAdministrativePolicy::isCanonicalSystemAdministrator();
+        if($division&&$identity['deleted_at']!==null&&!$systemAudit)throw new AuthorizationException('Deleted request evidence requires the canonical SYSTEM administrator context.','the canonical DEMS System Administrator / SYSTEM context');
+        if(!$systemAudit)$this->assertLocationScope((string)$identity['asc_location_id']);
+        $request=(new ArpaAppointmentReadService(Database::pdo()))->workflowRequestDetail($entity,$id);
+        if(!$request){http_response_code(404);echo '<h1>Request not found.</h1>';return;}
+        // Recheck the returned record if its scope/deletion changed between reads.
+        if(!$systemAudit){if($division&&($request['deleted_at']??null)!==null)throw new AuthorizationException('Deleted request evidence requires the canonical SYSTEM administrator context.','the canonical DEMS System Administrator / SYSTEM context');$this->assertLocationScope((string)$request['asc_location_id']);}
         $s=Database::pdo()->prepare("SELECT w.*,COALESCE(NULLIF(u.display_name,''),u.username) performed_by,u.username FROM {$history} w JOIN system_user u ON u.id=w.user_id WHERE w.request_id=? ORDER BY w.id");$s->execute([$id]);$workflowHistory=$s->fetchAll();
         $s=Database::pdo()->prepare('SELECT sr.*,u.username updated_by_name FROM arpa_appointment_stage_review sr JOIN system_user u ON u.id=sr.updated_by WHERE sr.entity_type=? AND sr.request_id=? ORDER BY FIELD(sr.review_stage,\'DISTRICT\',\'NATIONAL\')');$s->execute([strtoupper($entity),$id]);$stageReviews=$s->fetchAll();
         $impact=json_decode((string)($request['impact_snapshot_json']??'[]'),true);if(!is_array($impact))$impact=[];

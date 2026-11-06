@@ -182,7 +182,7 @@ final class ArpaAppointmentDataIssueCorrectionService
                 'batch_id'=>$batchId,
                 'remarks'=>'Automated bulk reconciliation batch '.$batchId,
                 'evidence_reference'=>'Automated conflict validation; batch '.$batchId,
-            ],$actorId,'Bulk canonical reconciliation: imported open appointment confirmed as the unique authoritative current assignment after automated conflict validation.',[$target]);
+            ],$actorId,'Bulk canonical reconciliation: imported open appointment confirmed as the unique authoritative current assignment after automated conflict validation.',[$target],'BULK');
         });
     }
 
@@ -413,6 +413,7 @@ final class ArpaAppointmentDataIssueCorrectionService
         $this->pdo->prepare('UPDATE legacy_arpa_appointment_source_reference SET target_appointment_id=? WHERE target_appointment_request_id=?')->execute([$appointmentId,$requestId]);
         $after=$this->appointment($appointmentId);
         $this->writeCorrection($correctionId,$rowKey,(string)$issue['issue_type'],$after,$actorId,'RESOLVE_CANONICAL_ASSIGNMENT',$reason,$input,$before,[$after]);
+        (new ArpaHistoricalAppointmentApprovalService($this->pdo))->registerCanonicalCorrectionInTransaction($correctionId,$actorId,'DIRECT');
         return ['correction_id'=>$correctionId,'appointment_id'=>$appointmentId,'resolution_status'=>'RESOLVED_BY_CORRECTION','issue_remaining'=>false,'appointment_status'=>$effectiveTo===null?'OPEN':'CLOSED'];
     }
 
@@ -428,7 +429,7 @@ final class ArpaAppointmentDataIssueCorrectionService
     }
 
     /** @param array<int,array<string,mixed>> $appointments @return array<string,mixed> */
-    private function promoteHistoricalAppointment(string $rowKey,array $issue,array $input,string $actorId,string $reason,array $appointments):array
+    private function promoteHistoricalAppointment(string $rowKey,array $issue,array $input,string $actorId,string $reason,array $appointments,string $registrationPath='DIRECT'):array
     {
         if(count($appointments)!==1)throw new DomainException('Select one imported appointment to make authoritative.');
         $appointmentId=trim((string)($input['appointment_id']??$appointments[0]['id']));
@@ -465,6 +466,8 @@ final class ArpaAppointmentDataIssueCorrectionService
         $afterDuplicates=[];foreach($duplicates as $duplicate){$after=$this->requestRecord((string)$duplicate['id']);$after['workflow_actions']=$this->workflowActions((string)$duplicate['id']);$afterDuplicates[]=$after;}
         $after=['appointment'=>$afterTarget,'request'=>$afterRequest,'duplicate_requests'=>$afterDuplicates];
         $this->writeCorrection($correctionId,$rowKey,(string)$issue['issue_type'],$afterTarget,$actorId,'RESOLVE_CANONICAL_ASSIGNMENT',$reason,$input,$before,$after);
+        $batchId=$this->nullText($input['batch_id']??null);
+        (new ArpaHistoricalAppointmentApprovalService($this->pdo))->registerCanonicalCorrectionInTransaction($correctionId,$actorId,$registrationPath,$batchId);
         return ['correction_id'=>$correctionId,'appointment_id'=>$appointmentId,'resolution_status'=>'RESOLVED_BY_CORRECTION','issue_remaining'=>false,'appointment_status'=>'OPEN','superseded_request_ids'=>array_column($duplicates,'id')];
     }
 
@@ -631,7 +634,7 @@ final class ArpaAppointmentDataIssueCorrectionService
               FROM arpa_division_appointment_request r
               LEFT JOIN legacy_arpa_appointment_source_reference sr ON sr.id=(SELECT MIN(sr1.id) FROM legacy_arpa_appointment_source_reference sr1 WHERE sr1.target_appointment_request_id=r.id)
               LEFT JOIN legacy_arpa_appointment_business_record br ON br.id=sr.business_record_id
-              WHERE r.id=? AND r.record_origin='LEGACY_IMPORT'".($lock?' FOR UPDATE':'');
+              WHERE r.id=? AND r.record_origin='LEGACY_IMPORT' AND r.deleted_at IS NULL".($lock?' FOR UPDATE':'');
         $s=$this->pdo->prepare($sql);$s->execute([$id]);$row=$s->fetch();return $row?:null;
     }
     private function requestRecord(string $id,bool $lock=false):array
@@ -920,5 +923,10 @@ final class ArpaAppointmentDataIssueCorrectionService
     private function json(mixed $value):string{return json_encode($value,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);}
     private function nullText(mixed $value):?string{$value=trim((string)$value);return $value===''?null:$value;}
     private function uuid():string{return (string)$this->pdo->query('SELECT UUID()')->fetchColumn();}
-    private function transaction(callable $work):mixed{$owned=!$this->pdo->inTransaction();if($owned)$this->pdo->beginTransaction();try{$result=$work();if($owned)$this->pdo->commit();return $result;}catch(Throwable $e){if($owned&&$this->pdo->inTransaction())$this->pdo->rollBack();throw $e;}}
+    private function transaction(callable $work):mixed
+    {
+        $owned=!$this->pdo->inTransaction();if($owned)$this->pdo->beginTransaction();else $this->pdo->exec('SAVEPOINT arpa_data_issue_correction');
+        try{$result=$work();if($owned)$this->pdo->commit();else $this->pdo->exec('RELEASE SAVEPOINT arpa_data_issue_correction');return $result;}
+        catch(Throwable $e){if($this->pdo->inTransaction()){if($owned)$this->pdo->rollBack();else{$this->pdo->exec('ROLLBACK TO SAVEPOINT arpa_data_issue_correction');$this->pdo->exec('RELEASE SAVEPOINT arpa_data_issue_correction');}}throw $e;}
+    }
 }

@@ -93,7 +93,8 @@ final class ArpaWorkflowQueuePolicy
             UNION ALL
             SELECT workflow_status,asc_location_id FROM arpa_subject_assignment_request WHERE legacy_history_only=0
         ) q WHERE {$access['where']}";
-        $stmt=$this->pdo->prepare($sql);$stmt->execute($access['params']);return (int)$stmt->fetchColumn();
+        $stmt=$this->pdo->prepare($sql);$stmt->execute($access['params']);
+        return (int)$stmt->fetchColumn()+(new ArpaHistoricalApprovalReadService($this->pdo))->count($userId);
     }
 
     /** @return array<string,true> */

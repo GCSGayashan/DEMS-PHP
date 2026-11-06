@@ -47,6 +47,8 @@ final class DataTableRegistry
             'arpa-new-appointments' => self::applyArpaAscContext(self::arpaNewAppointments(), $input, 'r.asc_location_id'),
             'arpa-submitted-appointments' => self::applyArpaAscContext(self::arpaSubmittedAppointments(), $input, 'r.asc_location_id'),
             'arpa-approval-verification' => self::applyArpaAscContext(self::arpaApprovalVerification(), $input, 'r.asc_location_id'),
+            'arpa-historical-approvals-pending' => self::arpaHistoricalApprovals(false,$input),
+            'arpa-historical-approvals-completed' => self::arpaHistoricalApprovals(true,$input),
             'arpa-open-appointments' => self::applyArpaAscContext(self::arpaOpenAppointments(), $input, 'a.asc_location_id'),
             'arpa-historical-appointments' => self::applyArpaAscContext(self::arpaHistoricalAppointments(), $input, 'a.asc_location_id'),
             'arpa-new-appointments-summary' => self::arpaAppointmentAscSummary('new', $input),
@@ -650,16 +652,16 @@ final class DataTableRegistry
                 'Total Records',
             ],
             'submitted'=>[
-                self::arpaSubmittedAppointments(),
-                'r.asc_location_id',
-                'r.appointment_type',
+                self::historicalApprovalSummary(self::arpaSubmittedAppointments(),false),
+                'summary_cases.asc_location_id',
+                'summary_cases.appointment_type',
                 'submitted',
                 'Total Records',
             ],
             'approval'=>[
-                self::arpaApprovalVerification(),
-                'r.asc_location_id',
-                'r.appointment_type',
+                self::historicalApprovalSummary(self::arpaApprovalVerification(),true),
+                'summary_cases.asc_location_id',
+                'summary_cases.appointment_type',
                 'approval',
                 'Total Records',
             ],
@@ -1244,6 +1246,46 @@ final class DataTableRegistry
                 self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/requests/division/'.$r['request_id'])).'">View</a>'),
             ],'defaultOrder'=>[11,'DESC'],
         ];
+    }
+
+    private static function arpaHistoricalApprovals(bool $completed,array $input):array
+    {
+        $actor=(string)(Auth::user()['id']??'');$read=new \App\Services\ArpaHistoricalApprovalReadService(Database::pdo());$allowed=true;
+        try{$q=$read->query($actor,$completed,$input);}catch(\DomainException){
+            $allowed=false;$fields=['row_id','case_id','appointment_id','request_id','source_correction_id','officer_id','asc_location_id','entry_type','officer_number','officer_name','appointment_type','asc_name','arpa_name','effective_from','effective_to','original_workflow_status','historical_status','reason','evidence_reference','correction_action','correction_reason','correction_evidence','operational_status','event_action','event_stage','resulting_status','action_at'];
+            $q=['sql'=>'SELECT '.implode(',',array_map(static fn($f)=>'NULL '.$f,$fields)).' WHERE 1=0','params'=>[]];
+        }
+        $columns=[
+            self::col('Record Kind','entry_type','h.entry_type',fn($r)=>DataTableFormat::badge($r['entry_type'])),
+            self::col('Officer','officer','h.officer_number',fn($r)=>DataTableFormat::text($r['officer_number'].' - '.$r['officer_name'])),
+            self::col('Appointment Type','appointment_type','h.appointment_type',fn($r)=>DataTableFormat::enumText($r['appointment_type'])),
+            self::col('ASC','asc_name','h.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),
+            self::col('ARPA Division','arpa_name','h.arpa_name',fn($r)=>DataTableFormat::text($r['arpa_name'])),
+            self::col('Effective From','effective_from','h.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+            self::col('Effective To','effective_to','h.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Open')),
+            self::col('Original Workflow Status','original_workflow_status','h.original_workflow_status',fn($r)=>DataTableFormat::badge($r['original_workflow_status'])),
+            self::col('Historical Approval Status','historical_status','h.historical_status',fn($r)=>DataTableFormat::badge($r['historical_status'])),
+            self::col('Operational Appointment Status','operational_status','h.operational_status',fn($r)=>DataTableFormat::text($r['operational_status'])),
+            self::col('Correction Evidence','correction','h.correction_reason',fn($r)=>DataTableFormat::text($r['correction_action'].' / '.$r['correction_reason'].' / '.($r['correction_evidence']?:'Not recorded'))),
+        ];
+        if($completed)$columns[]=self::col('Completed Action','event_action','h.action_at',fn($r)=>DataTableFormat::text($r['event_stage'].' '.$r['event_action'].' / '.$r['action_at']));
+        $columns[]=self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/historical-approvals/'.$r['case_id'])).'">View Case</a>');
+        return ['permission'=>'arpa.appointment.view','authorize'=>fn():bool=>$allowed&&$read->canUse($actor),'export'=>false,'filename'=>'historical-appointments',
+            'from'=>'('.$q['sql'].') h','select'=>['h.*'],'count'=>'h.row_id','baseParams'=>$q['params'],
+            'searchable'=>['h.officer_number','h.officer_name','h.asc_name','h.arpa_name','h.appointment_type','h.historical_status','h.correction_reason','h.evidence_reference'],
+            'filters'=>[],'columns'=>$columns,'defaultOrder'=>[1,'ASC'],'emptyMessage'=>'No Historical Appointment cases are actionable in this Working Context.'];
+    }
+
+    /** Only summary population is combined; native pending/completed definitions remain intact. */
+    private static function historicalApprovalSummary(array $native,bool $completed):array
+    {
+        $where=$native['baseWhere']??[];$condition=$where===[]?'':' WHERE '.implode(' AND ',$where);
+        $n=($native['with']??'')." SELECT CONCAT('N:',{$native['count']}) id,r.asc_location_id,r.appointment_type FROM {$native['from']}{$condition}";
+        $parts=['SELECT * FROM ('.$n.') native_summary'];$params=$native['baseParams']??[];
+        $read=new \App\Services\ArpaHistoricalApprovalReadService(Database::pdo());$actor=(string)(Auth::user()['id']??'');
+        if($read->available()&&$read->canUse($actor)){$h=$read->query($actor,$completed);$parts[]="SELECT CONCAT('H:',hs.row_id),hs.asc_location_id,hs.appointment_type FROM ({$h['sql']}) hs";$params=array_merge($params,$h['params']);}
+        return ['permission'=>$native['permission'],'from'=>'('.implode(' UNION ALL ',$parts).') summary_cases','count'=>'summary_cases.id','select'=>['summary_cases.*'],'columns'=>[],
+            'baseParams'=>$params,'baseWhere'=>[],'authorize'=>$native['authorize']??fn()=>false];
     }
 
     private static function arpaRequestList(?array $queueAccess=null):array

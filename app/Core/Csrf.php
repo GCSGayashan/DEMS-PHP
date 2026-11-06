@@ -6,7 +6,7 @@ final class Csrf
 {
     public static function token(): string
     {
-        if (empty($_SESSION['_csrf'])) {
+        if (!is_string($_SESSION['_csrf'] ?? null) || $_SESSION['_csrf'] === '') {
             $_SESSION['_csrf'] = bin2hex(random_bytes(32));
         }
         return $_SESSION['_csrf'];
@@ -19,8 +19,9 @@ final class Csrf
 
     public static function validate(): void
     {
-        $token = (string)($_POST['_csrf'] ?? '');
-        if (!hash_equals((string)($_SESSION['_csrf'] ?? ''), $token)) {
+        $expected = $_SESSION['_csrf'] ?? null;
+        $token = $_POST['_csrf'] ?? null;
+        if (!is_string($expected) || $expected === '' || !is_string($token) || $token === '' || !hash_equals($expected, $token)) {
             http_response_code(419);
             exit('Invalid CSRF token.');
         }

@@ -100,6 +100,10 @@ $router->get('/hr/arpa-appointments/timeline/officers', [ArpaAppointmentControll
 $router->get('/hr/arpa-appointments/timeline/officers/{id}', [ArpaAppointmentController::class, 'officerTimelineDetail']);
 $router->get('/hr/arpa-appointments/timeline/{id}', [ArpaAppointmentController::class, 'appointmentTimelineDetail']);
 $router->get('/hr/arpa-appointments/data-issues', [ArpaAppointmentController::class, 'dataIssues']);
+$router->get('/hr/arpa-appointments/legacy-requests/exclusions', [\App\Controllers\ArpaLegacyRequestExclusionController::class, 'audit']);
+$router->get('/hr/arpa-appointments/legacy-requests/{id}/exclusion', [\App\Controllers\ArpaLegacyRequestExclusionController::class, 'audit']);
+$router->get('/hr/arpa-appointments/legacy-requests/{id}/exclude', [\App\Controllers\ArpaLegacyRequestExclusionController::class, 'preview']);
+$router->post('/hr/arpa-appointments/legacy-requests/{id}/exclude', [\App\Controllers\ArpaLegacyRequestExclusionController::class, 'exclude']);
 $router->get('/hr/arpa-appointments/issues', [ArpaAppointmentController::class, 'dataIssues']);
 $router->get('/hr/arpa-appointments/issues/bulk-current', [ArpaAppointmentController::class, 'bulkLegacyCurrentReconciliation']);
 $router->get('/hr/arpa-appointments/issues/bulk-current/active-reservations.csv', [ArpaAppointmentController::class, 'exportBulkActiveReservationDiagnostics']);
@@ -219,3 +223,9 @@ $router->get('/access-management/provisioning-failures', [UserManagementControll
 $router->get('/access-management/security-history', [UserManagementController::class, 'securityHistory']);
 
 $router->get('/module/{module}', [ModuleController::class, 'show']);
+
+// Historical governance only: no registration or appointment-materialization routes.
+$router->get('/hr/arpa-appointments/historical-approvals/{id}', [\App\Controllers\ArpaHistoricalApprovalController::class, 'show']);
+$router->post('/hr/arpa-appointments/historical-approvals/{id}/save', [\App\Controllers\ArpaHistoricalApprovalController::class, 'save']);
+$router->post('/hr/arpa-appointments/historical-approvals/{id}/submit', [\App\Controllers\ArpaHistoricalApprovalController::class, 'submit']);
+$router->post('/hr/arpa-appointments/historical-approvals/{id}/review', [\App\Controllers\ArpaHistoricalApprovalController::class, 'review']);

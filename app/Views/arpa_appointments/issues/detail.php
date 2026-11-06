@@ -5,6 +5,7 @@ require BASE_PATH.'/app/Views/arpa_appointments/tabs.php';
 $dash='Not available';
 $legacyMeta=function(array $row):array{$m=json_decode((string)($row['origin_metadata_json']??'[]'),true);return is_array($m)?$m:[];};
 ?>
+<?php if($historical_request&&\App\Services\ArpaLegacyRequestExclusionService::allowed()): ?><div class="alert alert-secondary">Administrator: <a href="<?= e(url('hr/arpa-appointments/legacy-requests/'.$historical_request['id'].'/exclude')) ?>">Preview exclusion of an unnecessary legacy request</a>. This is not a KEEP decision. <a href="<?= e(url('hr/arpa-appointments/legacy-requests/exclusions')) ?>">Exclusion audit</a></div><?php endif; ?>
 <div class="page-heading">
   <div><div class="breadcrumb-lite">ARPA Officer Assignments / Data Issues / Review</div><h1><?= e($presentation['title']) ?></h1><p><?= e($presentation['explanation']) ?></p></div>
   <div><?= DataTableFormat::badge(ArpaAppointmentIssuePresentation::severity((string)$issue['severity'])) ?></div>

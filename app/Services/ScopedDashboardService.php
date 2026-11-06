@@ -55,6 +55,7 @@ final class ScopedDashboardService
         ) x{$join}";
         $params=$restricted?ScopeService::visibleLocationParams($userId):[];$stmt=$this->pdo->prepare($sql);$stmt->execute($params);$row=array_map('intval',$stmt->fetch()?:[]);
         $row['pending']=(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount($userId);
+        $row['historicalPending']=(new ArpaHistoricalApprovalReadService($this->pdo))->count($userId);
         $vacancySql=$with.' SELECT COUNT(DISTINCT v.id) FROM '.ArpaAppointmentReadService::vacantDivisionSource().' v '.($restricted?'JOIN visible_locations vl ON vl.id=v.asc_location_id':'');$stmt=$this->pdo->prepare($vacancySql);$stmt->execute($params);$row['vacantDivisions']=(int)$stmt->fetchColumn();
         $issueJoin=$restricted?'JOIN visible_locations vl ON vl.id=q.asc_location_id ':'';$issueSql=$with.' SELECT COUNT(DISTINCT q.row_key) FROM '.ArpaAppointmentReadService::issueSource().' q '.$issueJoin.'WHERE '.ArpaAppointmentReadService::currentActionIssuePredicate('q');$stmt=$this->pdo->prepare($issueSql);$stmt->execute($params);$row['issues']=(int)$stmt->fetchColumn();
         $row['appointmentMix']=['Permanent'=>$row['openPermanent']??0,'Acting'=>$row['openActing']??0,'Duty Covering'=>$row['openDutyCovering']??0,'Attend to the Duty'=>$row['openAttendToDuty']??0];
