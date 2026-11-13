@@ -277,6 +277,9 @@ final class ArpaAppointmentService
             if (!$request) {
                 throw new DomainException('Workflow request was not found.');
             }
+            if ($entity === 'division' && ($request['record_origin'] ?? 'NATIVE') === 'LEGACY_IMPORT') {
+                throw new DomainException('Imported historical appointment. Use the Historical Approval workflow for authorization.');
+            }
             $normalizedAction=strtoupper($action);
             if($entity==='division'
                 &&(string)$request['request_type']==='APPOINTMENT'

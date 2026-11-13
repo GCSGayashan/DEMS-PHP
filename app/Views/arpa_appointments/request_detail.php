@@ -3,6 +3,7 @@ use App\Core\{Auth,Csrf,DataTableFormat};
 use App\Services\ArpaAppointmentRules;
 use App\Services\ArpaWorkflowQueuePolicy;
 $status=$request['workflow_status'];
+$importedDivision=$entity==='division'&&($request['record_origin']??'NATIVE')==='LEGACY_IMPORT';
 $hasCanonical=$entity==='division'&&!empty($request['canonical_appointment_id']);
 $hasEndClosure=$entity==='division'&&!empty($request['materialized_end_closure']);
 $operationalStatus=$hasCanonical
@@ -29,6 +30,7 @@ $reviewStage=ArpaAppointmentRules::isReviewStatus($status)?ArpaAppointmentRules:
 $stageRolePermission=match($status){'SUBMITTED'=>'arpa.appointment.asc-verify','ASC_VERIFIED'=>'arpa.appointment.asc-approve','ASC_APPROVED'=>'arpa.appointment.district-verify','DISTRICT_VERIFIED'=>'arpa.appointment.district-approve','DISTRICT_APPROVED'=>'arpa.appointment.national-verify','NATIONAL_VERIFIED'=>'arpa.appointment.national-approve',default=>null};
 $canReturn=$stageRolePermission!==null&&Auth::can('arpa.appointment.return')&&Auth::can($stageRolePermission);
 $canReject=$stageRolePermission!==null&&Auth::can('arpa.appointment.reject')&&Auth::can($stageRolePermission);
+if($importedDivision){$canPrimary=false;$canReturn=false;$canReject=false;}
 $canonicalDivisionAppointment=$entity==='division'&&($request['request_type']??null)==='APPOINTMENT'&&$hasCanonical;
 if($canonicalDivisionAppointment){$canReturn=false;$canReject=false;}
 $expandedDivisionReviewPage=$entity==='division'&&in_array($status,['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'],true);
@@ -37,6 +39,7 @@ $editPermission=$entity==='subject'?'arpa.subject.create':'arpa.appointment.edit
 if($administrativelyDeleted){$canPrimary=false;$canReturn=false;$canReject=false;$canCorrectReturned=false;$canEditSubmitted=false;}
 $lastReturn=null;for($i=count($workflowHistory)-1;$i>=0;$i--){if(in_array($workflowHistory[$i]['action'],['RETURN_FOR_CORRECTION','REJECT'],true)){$lastReturn=$workflowHistory[$i];break;}}
 ?>
+<?php if($importedDivision): ?><div class="alert alert-info">Imported historical appointment. Use the Historical Approval workflow for authorization.</div><?php endif; ?>
 <div class="page-heading"><div><div class="breadcrumb-lite">ARPA Officer Assignments / Review</div><h1><?= e(ucwords($entity).' '.ucwords(strtolower(str_replace('_',' ',$request['request_type'])))) ?> Request</h1><p>Check the officer, location, dates, and other assignment information.</p></div><div class="text-end"><div><span class="small text-muted">Operational Status</span> <?= DataTableFormat::badge($operationalStatus) ?></div><div class="mt-1"><span class="small text-muted">Approval Status</span> <?= DataTableFormat::badge($status) ?></div><div class="small text-muted mt-1"><?= e($originLabel) ?></div></div></div>
 <?php if($administrativelyDeleted): ?><div class="alert alert-secondary"><strong>ADMINISTRATIVELY DELETED</strong><br>This request is retained for audit visibility and is no longer actionable. Reason: <?= e($request['delete_reason']?:'Not recorded') ?></div><?php endif; ?>
 <?php if($status==='RETURNED'&&$lastReturn): ?><div class="alert alert-warning"><div class="d-flex flex-wrap justify-content-between gap-2"><strong>RETURNED FOR CORRECTION</strong><span><?= $lastReturn['action_at']?e(substr((string)$lastReturn['action_at'],0,16)):'Unavailable from legacy source' ?></span></div><div class="mt-2"><strong>Returned by:</strong> <?= e($lastReturn['performed_by']) ?> &middot; <strong>Level:</strong> <?= e($lastReturn['stage']) ?></div><div class="mt-1"><strong>Reason:</strong> <?= nl2br(e($lastReturn['comments'])) ?></div></div><?php endif; ?>
