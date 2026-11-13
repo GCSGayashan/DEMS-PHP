@@ -24,6 +24,76 @@ appointment, source request or correction. There is no web registration route.
 - Protect the manifest: it includes officer names/identifiers and source evidence,
   but no NIC, passwords or connection credentials. Do not commit manifests.
 
+## Optional trusted schema-verification connection
+
+MySQL hides trigger definitions from accounts without `TRIGGER`. An application
+account with only SELECT/INSERT/UPDATE/DELETE therefore cannot prove that the
+append-only triggers exist. **Do not grant TRIGGER to the application account.**
+Do not substitute a migration-history row, cached assertion, or skip-check flag.
+
+For the trusted CLI only, an OS/database administrator can supply a separate
+metadata connection using `--schema-verifier-config=<private-json-file>` on both
+dry-run and apply. All business reads, locks, inserts and commits still use the
+normal application PDO. The verifier issues metadata SELECTs in a read-only
+session; it never supplies a replacement application PDO.
+
+Store a data-only JSON file outside the repository, web root **and deployment
+parent directory**. Its required keys are `host`, `port`, `database`, `username`
+and `password`. Populate these privately; do not put credentials in shell
+arguments, shell history, environment variables, `.env`, manifests, Git, or logs.
+Use an existing authorized DBA/verification identity with visibility of the two
+tables and their trigger definitions. Keep that identity's privileges narrowly
+scoped; TRIGGER visibility also confers DDL capability, not a read-only grant.
+
+Run under a trusted CLI OS identity distinct from the web-service identity.
+On POSIX, use a private parent directory (0700) and an owner-only file (0600 or
+0400), owned by the effective CLI user. On Windows, disable inherited file ACLs
+and allow access only to the CLI user, SYSTEM and Administrators; the loader
+checks the actual owner/ACL using Windows PowerShell/.NET, not `chmod` emulation.
+It fails closed if permissions cannot be verified. Symlink files and files in
+the deployment tree are rejected. Never expose this file through an HTTP alias.
+
+Prefer a local connection. Remote hosts require the additional `ssl_ca` key
+pointing to a valid CA file; server certificate verification cannot be disabled.
+Use the actual certificate-matching server name. The CLI validates live server
+UUID, database and server port against the application connection, regardless
+of configuration labels or host aliases.
+
+Example invocation (only the **file path**, never credential values, is an argument):
+
+```text
+php bin/register-arpa-historical-approvals.php --operator=<admin-id> --role-assignment=<system-role-assignment-id> --schema-verifier-config=/etc/dems-private/historical-schema.json
+```
+
+Existing target options and explicit apply confirmations are unchanged. Keep
+the verifier-file option on apply. If no verifier file is supplied, the same
+strict checks use the application connection and fail closed when metadata is
+invisible. Connection/configuration failures return controlled messages without
+credential details. No administrative configuration is loaded by HTTP routes.
+
+Verification checks both InnoDB tables and the exact name/table/timing/operation/
+row orientation and unconditional SIGNAL body of both migration-067 triggers.
+Only insignificant SQL keyword spacing/case and a trailing delimiter are
+normalized. Definer, creation time, SQL mode and related metadata contribute to
+the schema fingerprint. The fingerprint is bound into the reviewed manifest;
+**obtain a fresh dry-run after this code release or any schema change**.
+
+Dry-run holds a read-only application transaction while collecting evidence.
+Apply obtains write-compatible transaction-duration metadata locks on both
+tables using zero-row locking SELECTs before inspecting definitions, checks
+the reviewed fingerprint before writes, and verifies again before commit.
+This avoids a read-to-write metadata-lock upgrade behind concurrent DDL.
+No LOCK TABLES, implicit commits, or application data writes are used to obtain
+these locks. Metadata lock waits on the separate verifier are bounded; failures
+roll back registration. Schedule schema administration separately from applies.
+
+Automatic registration during direct/bulk/amendment corrections is deliberately
+unchanged: it receives no privileged connection or credentials and remains
+fail-closed when its normal application connection cannot verify the triggers.
+This optional CLI mechanism does not resolve that separate operational limitation.
+No migrations, permission grants to the application account, or trigger changes
+are performed by the command.
+
 ## Default read-only command
 
 ```text
@@ -145,6 +215,17 @@ not bypasses or data edits to force registration. Migration 067 is unchanged; no
 additional schema or permission grants are introduced.
 
 ## Acceptance
+
+Run `ArpaHistoricalApprovalSchemaVerifierIsolatedTest` using process-only local
+test settings (`DB_DATABASE` must begin `dems_test_`, with no working `.env`).
+Its provisioning identity must be able to create/drop disposable databases and
+test users. It creates separate DML-only and narrowly scoped metadata identities,
+private temporary configuration, and removes them in `finally`. Supply
+`DEMS_SCHEMA_TEST_OTHER_PORT` for a second disposable local MySQL instance whose
+data-directory name includes `dems_schema_verify_mysql80_`; it must not be the
+working or production server. This is required for real wrong-server UUID/port
+coverage, not silently skipped. The test also observes live metadata locks,
+concurrent DDL and transaction rollback; no production fixtures are used.
 
 Use only disposable schemas for `ArpaHistoricalApprovalRegistrationIsolatedTest`,
 `ArpaHistoricalAutomaticRegistrationIsolatedTest`, then rerun the existing Phase 1

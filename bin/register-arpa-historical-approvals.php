@@ -4,7 +4,7 @@ if(PHP_SAPI!=='cli'){http_response_code(404);exit;}
 
 // OS/DB administrators invoke this trusted CLI; no web session or reviewer is impersonated.
 $flags=['help','dry-run','apply'];
-$values=['operator','role-assignment','scope-assignment','manifest-hash','confirm','reason','evidence-reference','database','server-uuid','request-id','appointment-id'];
+$values=['operator','role-assignment','scope-assignment','manifest-hash','confirm','reason','evidence-reference','database','server-uuid','request-id','appointment-id','schema-verifier-config'];
 $options=[];
 try{
     foreach(array_slice($argv,1) as $argument){
@@ -17,6 +17,7 @@ try{
     if(isset($options['help'])){
         echo "Dry-run (default; SELECT only):\n  php bin/register-arpa-historical-approvals.php --operator=<canonical-admin-id> --role-assignment=<active-system-role-assignment-id>\n\n";
         echo "Exact target (optional; keep both options on dry-run and apply):\n  Add --request-id=<full-request-uuid> --appointment-id=<full-canonical-appointment-uuid>\n  Includes eligible pre-2025 ASC_APPROVED imported Permanent appointments with a recorded canonical closure; default backlog is unchanged.\n\n";
+        echo "Optional privileged metadata inspection:\n  --schema-verifier-config=<private-json-file-outside-deployment/web-roots>\n  Credentials belong only in that protected file, never in command arguments or the application environment.\n\n";
         echo "Apply the reviewed manifest (DRAFT only):\n  Add --apply --database=<verified-db> --server-uuid=<verified-server-uuid> --manifest-hash=<dry-run-hash> --confirm=\"<exact dry-run confirmation>\" --reason=\"<reason>\" --evidence-reference=\"<evidence>\"\n";
         exit(0);
     }
@@ -30,7 +31,9 @@ try{
     \App\Core\Auth::forgetRequestCache();
     (new \App\Services\UserContextService($pdo))->select($actor,$options['role-assignment'],$options['scope-assignment']??null);
     \App\Core\Auth::forgetRequestCache();
-    $service=new \App\Services\ArpaHistoricalApprovalRegistrationService($pdo);
+    \App\Services\ArpaHistoricalAppointmentApprovalService::assertCliRegistrationOperator($actor);
+    $verifier=isset($options['schema-verifier-config'])?\App\Services\ArpaHistoricalApprovalSchemaVerifier::fromProtectedConfig($options['schema-verifier-config']):null;
+    $service=new \App\Services\ArpaHistoricalApprovalRegistrationService($pdo,$verifier);
     $requestId=$options['request-id']??null;$appointmentId=$options['appointment-id']??null;
     $manifest=$service->manifest($actor,false,$requestId,$appointmentId);
     if(isset($options['apply'])){

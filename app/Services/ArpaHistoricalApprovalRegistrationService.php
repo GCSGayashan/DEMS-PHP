@@ -9,20 +9,25 @@ use Throwable;
 /** CLI discovery/registration only. Eligibility here is for a DRAFT, never for approval. */
 final class ArpaHistoricalApprovalRegistrationService
 {
-    public function __construct(private readonly PDO $pdo){}
+    public function __construct(private readonly PDO $pdo,private readonly ?ArpaHistoricalApprovalSchemaVerifier $schemaVerifier=null){}
 
     public function manifest(string $actorId,bool $lock=false,?string $requestId=null,?string $appointmentId=null):array
     {
         ArpaHistoricalAppointmentApprovalService::assertCliRegistrationOperator($actorId);
-        $target=$this->target($requestId,$appointmentId);
         if($lock&&!$this->pdo->inTransaction())throw new DomainException('Registration locks require a transaction.',409);
+        $owns=!$this->pdo->inTransaction();
+        if($owns){$this->pdo->exec('SET TRANSACTION READ ONLY');$this->pdo->beginTransaction();}
+        try{return $this->readManifest($actorId,$lock,$requestId,$appointmentId);}
+        finally{if($owns&&$this->pdo->inTransaction())$this->pdo->rollBack();}
+    }
+
+    private function readManifest(string $actorId,bool $lock,?string $requestId,?string $appointmentId):array
+    {
+        $target=$this->target($requestId,$appointmentId);
         if(!(new ArpaHistoricalApprovalReadService($this->pdo))->available()||!ArpaAppointmentCorrectionDecision::lineageAvailable($this->pdo)){
             throw new DomainException('Complete correction-lineage and migration 067 schemas must be verified before registration. No migration is run by this command.',503);
         }
-        $tables=$this->pdo->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN('arpa_appointment_historical_approval_case','arpa_appointment_historical_approval_event') AND engine='InnoDB'")->fetchColumn();
-        $triggers=$this->pdo->query("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND event_object_table='arpa_appointment_historical_approval_event' AND trigger_name IN('trg_hist_approval_event_no_update','trg_hist_approval_event_no_delete') AND action_timing='BEFORE' AND event_manipulation IN('UPDATE','DELETE')")->fetchColumn();
-        if((int)$tables!==2||(int)$triggers!==2)throw new DomainException('Transactional historical case/event tables and append-only triggers are required.',503);
-        $identity=$this->pdo->query('SELECT DATABASE() database_name,@@server_uuid server_uuid,@@port server_port,@@version mysql_version')->fetch(PDO::FETCH_ASSOC);
+        $verified=($this->schemaVerifier??new ArpaHistoricalApprovalSchemaVerifier())->verify($this->pdo,$lock);$identity=$verified['identity'];
         // Exact targeting is opt-in; never widen the default CREATED backlog.
         $where=$target===null
             ? "a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=0 AND a.legacy_exception=1 AND a.approved_at IS NULL AND (r.workflow_status='CREATED' OR r.id IS NULL)"
@@ -44,7 +49,7 @@ final class ArpaHistoricalApprovalRegistrationService
             $type=$row['appointment_type'];$summary['by_type'][$type]=($summary['by_type'][$type]??0)+1;
         }
         ksort($summary['by_type']);
-        $report=['database'=>$identity,'operator_id'=>$actorId,'operator_context'=>ArpaAdministrativePolicy::auditContext(\App\Core\Auth::activeContext(false)),'summary'=>$summary,'candidates'=>$rows];
+        $report=['database'=>$identity,'schema_fingerprint'=>$verified['fingerprint'],'operator_id'=>$actorId,'operator_context'=>ArpaAdministrativePolicy::auditContext(\App\Core\Auth::activeContext(false)),'summary'=>$summary,'candidates'=>$rows];
         if($target!==null)$report['target']=$target; // Confirmation cannot be reused for another target or the backlog.
         $report['manifest_hash']=hash('sha256',$this->json($report));
         $report['confirmation']='REGISTER HISTORICAL DRAFTS '.$identity['database_name'].' '.$report['manifest_hash'];
@@ -74,6 +79,8 @@ final class ArpaHistoricalApprovalRegistrationService
                 if($case['case']['workflow_status']!=='DRAFT'||count($case['events'])!==1||$case['events'][0]['action']!=='REGISTER')throw new DomainException('Registration did not produce a new Draft-only case.',409);
                 $registered[]=['appointment_id'=>$row['appointment_id'],'case_id'=>$case['case']['id'],'workflow_status'=>'DRAFT'];
             }
+            $verified=($this->schemaVerifier??new ArpaHistoricalApprovalSchemaVerifier())->verify($this->pdo,true);
+            if(!hash_equals($report['schema_fingerprint'],$verified['fingerprint']))throw new DomainException('Historical approval schema changed during registration. Nothing was registered.',409);
             $this->pdo->commit();return ['mode'=>'APPLY','reviewed_manifest_hash'=>$expectedHash,'summary'=>$report['summary'],'registered_count'=>count($registered),'registered'=>$registered];
         }catch(Throwable $e){if($this->pdo->inTransaction())$this->pdo->rollBack();throw $e;}
     }
