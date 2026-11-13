@@ -277,8 +277,11 @@ final class ArpaAppointmentService
             if (!$request) {
                 throw new DomainException('Workflow request was not found.');
             }
-            if ($entity === 'division' && ($request['record_origin'] ?? 'NATIVE') === 'LEGACY_IMPORT') {
-                throw new DomainException('Imported historical appointment. Use the Historical Approval workflow for authorization.');
+            $imported=$entity==='division'&&($request['record_origin']??'NATIVE')==='LEGACY_IMPORT';$importedPeriod=null;
+            if($imported){
+                $policy=new ArpaImportedAppointmentWorkflowPolicy($this->pdo);
+                $policy->assertReviewer($request,$actorId,strtoupper($action),strtoupper($stage));
+                $importedPeriod=$policy->period($request,true);
             }
             $normalizedAction=strtoupper($action);
             if($entity==='division'
@@ -293,7 +296,7 @@ final class ArpaAppointmentService
             $transition = $entity==='division'
                 ? ArpaAppointmentRules::divisionRequestTransition((string)$request['request_type'],(string)$request['workflow_status'],$action,$stage)
                 : ArpaAppointmentRules::transition((string)$request['workflow_status'],$action,$stage);
-            if($entity==='division'
+            if(!$imported&&$entity==='division'
                 &&in_array((string)$request['request_type'],['APPOINTMENT','TRANSFER'],true)
                 &&in_array(strtoupper($action),['SUBMIT','VERIFY','APPROVE'],true)){
                 $continuity=new ArpaDivisionContinuityService($this->pdo);
@@ -338,23 +341,38 @@ final class ArpaAppointmentService
             $ascOperational=$entity==='division'
                 &&$transition['status']==='ASC_APPROVED'
                 &&in_array((string)$request['request_type'],['APPOINTMENT','END'],true);
-            if($ascOperational){
+            if(!$imported&&$ascOperational){
                 $this->materializeDivisionOperational($request,$actorId,$this->databaseTimestamp());
-            }elseif($transition['status']==='NATIONAL_APPROVED'){
+            }elseif(!$imported&&$transition['status']==='NATIONAL_APPROVED'){
                 if($entity==='division'&&(string)$request['request_type']==='TRANSFER')$this->finalizeDivision($request,$actorId);
                 elseif($entity==='subject')$this->finalizeSubject($request,$actorId);
             }
             $final = $transition['status'] === 'NATIONAL_APPROVED';
             $this->pdo->prepare("UPDATE {$table} SET workflow_status=?,updated_by=?,updated_at=NOW(),finalized_by=" . ($final ? '?' : 'finalized_by') . ',finalized_at=' . ($final ? 'NOW()' : 'finalized_at') . ',version=version+1 WHERE id=?')
                 ->execute($final ? [$transition['status'], $actorId, $actorId, $requestId] : [$transition['status'], $actorId, $requestId]);
-            $this->pdo->prepare("INSERT INTO {$history}(request_id,action,stage,user_id,comments,previous_status,new_status) VALUES(?,?,?,?,?,?,?)")
+            $this->pdo->prepare("INSERT INTO {$history}(request_id,action,stage,user_id,comments,previous_status,new_status".($imported?',action_at,record_origin,timestamp_provenance':'').") VALUES(?,?,?,?,?,?,?".($imported?",NOW(),'NATIVE','NATIVE_RECORDED'":'').")")
                 ->execute([$requestId, strtoupper($action), strtoupper($stage), $actorId, $this->nullText($comments), $request['workflow_status'], $transition['status']]);
             $auditDetails=['previous'=>$request['workflow_status'],'new'=>$transition['status'],'stage'=>strtoupper($stage)];
+            if($imported)$auditDetails['preserved_imported_period']=$importedPeriod;
             if(in_array(strtoupper($action),['RETURN_FOR_CORRECTION','REJECT'],true))$auditDetails['reason']=$this->nullText($comments);
             $this->audit($actorId,"arpa.{$entity}-workflow.".strtolower($action),strtoupper("ARPA_{$entity}_REQUEST"),$requestId,$auditDetails);
             $this->notifyWorkflowTransition($entity,$request,$requestId,$transition['status'],strtoupper($action),strtoupper($stage),$comments,$actorId);
             return $transition['status'];
         });
+    }
+
+    public function importedWorkflowInfo(array $request,string $actor):array
+    {
+        $result=['allowed'=>false,'period'=>null,'blocker'=>null];
+        try{
+            $policy=new ArpaImportedAppointmentWorkflowPolicy($this->pdo);$result['period']=$policy->period($request);
+            $step=ArpaWorkflowQueuePolicy::reviewStep($request['workflow_status']);
+            if($step===null)return $result;
+            $policy->assertReviewer($request,$actor,$step['action'],$step['stage']);
+            if($step['action']==='APPROVE')$this->assertMakerChecker('arpa_appointment_workflow_action',$request['id'],(string)($request['created_by']??''),$step['stage'],$actor);
+            $result['allowed']=true;
+        }catch(DomainException $e){$result['blocker']=$e->getMessage();}
+        return $result;
     }
 
     private function notifyWorkflowTransition(string $entity,array $request,string $requestId,string $newStatus,string $action,string $stage,?string $comments,string $actorId):void

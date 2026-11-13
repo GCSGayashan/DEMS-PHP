@@ -120,13 +120,13 @@ final class ArpaHistoricalApprovalUiIsolatedTest
         $service=new ArpaHistoricalAppointmentApprovalService($this->pdo);$this->context(1);
         $source=$this->embeddedSources[0];$page='/hr/arpa-appointments/requests/division/'.$source['request'];
         [$status,$html]=$this->route('GET',$page);$this->same(200,$status,'unregistered imported request remains viewable');
-        $this->same(true,str_contains($html,'Authorized administrative registration'),'registration remains privileged, not a web bypass');
+        $this->same(true,str_contains($html,'original request workflow'),'unregistered imported record uses original workflow guidance');
         $this->same(false,str_contains($html,'/attest'),'unregistered case cannot be acted on');
         $c=$service->register($source['correction'],['reason'=>'Reviewed complete imported period','evidence_reference'=>'Actual administrative registration fixture'],self::actor(1));
         $id=$c['case']['id'];$url='/hr/arpa-appointments/historical-approvals/'.$id.'/attest';$hash=$c['case']['baseline_hash'];
         $post=['expected_version'=>'0','baseline_hash'=>$hash,'confirm_records'=>'1','action'=>'SUBMIT'];
         [$status,$html]=$this->route('GET',$page);$this->same(200,$status,'imported division detail integrates historical case');
-        foreach(['Historical Appointment Approval','Imported Historical Appointment','2020-01-01','2024-12-31','Original Workflow Status','Historical Approval Status','ASC review','DISTRICT review','NATIONAL review','name="confirm_records"'] as $text)$this->same(true,str_contains($html,$text),'embedded detail shows '.$text);
+        foreach(['Imported Historical Appointment','2020-01-01','2024-12-31','Original Workflow Status','Separate Historical Case (Audit Only)'] as $text)$this->same(true,str_contains($html,$text),'embedded detail shows '.$text);
         foreach(['/workflow/division/','Native Appointment','type="file"','name="evidence_reference"'] as $text)$this->same(false,str_contains($html,$text),'embedded historical path omits '.$text);
         foreach([2,10,11] as $actor){[$status]=$this->route('POST',$url,$post,$actor);$this->same(403,$status,'attestation respects geographic scope/role '.$actor);}
         foreach(['invalid','missing-both'] as $csrf){[$status]=$this->route('POST',$url,$post,1,null,$csrf);$this->same(419,$status,'attestation retains CSRF protection');}
@@ -139,7 +139,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
         $version=1;
         foreach([[4,'VERIFY','ASC_SUBJECT_OFFICER'],[5,'APPROVE',null],[6,'VERIFY',null],[7,'APPROVE',null],[8,'VERIFY',null],[9,'APPROVE',null]] as [$actor,$action,$role]){
             [$status,$html]=$this->route('GET',$page,[],$actor,$role);$this->same(200,$status,'authorized stage reviewer sees original page');
-            $this->same(true,str_contains($html,'value="'.$action.'"'),'embedded page exposes only authorized primary action');
+            $this->same(false,str_contains($html,'value="'.$action.'"'),'separate case stage does not authorize an original request action');
             $input=['expected_version'=>(string)$version,'baseline_hash'=>$hash,'confirm_records'=>'1','action'=>$action,'reason'=>'Reviewed existing appointment and closure'];
             if($actor===9){[$status]=$this->route('POST',$url,$input,$actor);$this->same(422,$status,'National final confirmation retained');$input['confirm_final']='1';}
             [$status]=$this->route('POST',$url,$input,$actor,$role);$this->same(302,$status,'existing-record attestation action '.$action.' actor '.$actor);$version++;
@@ -186,7 +186,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $historicalPanel=['detail'=>$read->requestCase($source['appointment'],$source['request'],(string)Auth::user()['id']),'message'=>'Historical approval is unavailable in your current Working Context.'];
             ob_start();try{require BASE_PATH.'/app/Views/arpa_appointments/historical_request_panel.php';return (string)ob_get_contents();}finally{ob_end_clean();}
         };
-        $panel=static function(string $html):string{if(!preg_match('~<section class="form-section"><h2 class="h5">Historical Appointment Approval</h2>.*?</section>~s',$html,$m))throw new RuntimeException('Missing historical panel');return $m[0];};
+        $panel=static function(string $html):string{if(!preg_match('~<section class="form-section"><h2 class="h5">.*?</section>~s',$html,$m))throw new RuntimeException('Missing imported panel');return $m[0];};
         $clone=function(string $request,string $correction,string $status)use($original):string{
             $row=$original['case'];unset($row['active_appointment_id']);$row['id']=(string)$this->pdo->query('SELECT UUID()')->fetchColumn();$row['request_id']=$request;$row['source_correction_id']=$correction;$row['workflow_status']=$status;$row['reason']='Sensitive fixture case '.$row['id'];$row['baseline_hash']=hash('sha256',$row['id']);
             $this->pdo->prepare('INSERT INTO arpa_appointment_historical_approval_case ('.implode(',',array_keys($row)).') VALUES ('.implode(',',array_fill(0,count($row),'?')).')')->execute(array_values($row));return $row['id'];

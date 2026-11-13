@@ -60,7 +60,7 @@ final class ArpaHistoricalSystemAdministratorReadOnlyIsolatedTest
         foreach(['/hr/arpa-appointments/requests/division/'.$source['request'],$base] as $url){
             [$status,$html]=$this->route('GET',$url);$this->same(200,$status,'canonical administrator can open '.$url);
             foreach(['DRAFT','2020-01-01','2024-12-31','REGISTER'] as $text)$this->same(true,str_contains($html,$text),'read-only page displays '.$text);
-            if(str_contains($url,'/requests/division/'))foreach(['Next Workflow Action','Submit Historical Appointment','Assigned ASC Subject Officer','Not authorized to perform this action'] as $text)$this->same(true,str_contains($html,$text),'administrator sees read-only next-action information: '.$text);
+            if(str_contains($url,'/requests/division/'))foreach(['Next Action','original request workflow','audit only'] as $text)$this->same(true,str_contains($html,$text),'administrator sees read-only original-workflow information: '.$text);
             foreach([$base.'/attest','name="expected_version"','value="VERIFY"','value="APPROVE"','value="REJECT"','value="RETURN_FOR_CORRECTION"',$base.'/save',$base.'/submit'] as $write)$this->same(false,str_contains($html,$write),'no historical write control '.$write);
         }
         foreach(['save'=>['expected_source_hash'=>$case['baseline_hash'],'reason'=>'Attempt','evidence_reference'=>'Attempt'],

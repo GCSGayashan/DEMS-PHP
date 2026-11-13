@@ -147,7 +147,9 @@ final class ArpaHistoricalAppointmentApprovalService
             $actions['final']=$actions['primary']==='APPROVE'&&$case['workflow_status']==='NATIONAL_VERIFIED';
         }catch(DomainException){}
         if($editable&&$r['source_stale']&&$this->canRetireStaleDraft($case,$actorId))$actions['reject']=true;
-        $r['actions']=$actions;$r['next_action']=$this->nextAction($case['workflow_status'],$actions);$a=($r['current_baseline']??$r['baseline'])['appointment'];
+        $auditOnly=$this->originalWorkflowAuditOnly($case);
+        if($auditOnly)$actions=['edit'=>false,'submit'=>false,'primary'=>null,'return'=>false,'reject'=>false,'final'=>false];
+        $r['actions']=$actions;$r['next_action']=$auditOnly?['action'=>null,'stage'=>null,'role'=>null,'label'=>'Audit only. Use the original appointment workflow.','authorized'=>false]:$this->nextAction($case['workflow_status'],$actions);$a=($r['current_baseline']??$r['baseline'])['appointment'];
         $d=$this->one("SELECT CONCAT(COALESCE(o.dad_number,''),' - ',COALESCE(o.name_with_initials,'')) officer,al.name_en asc_name,arpa.name_en division_name FROM officer o JOIN location al ON al.id=? JOIN location arpa ON arpa.id=? WHERE o.id=?",[$case['asc_location_id'],$a['arpa_division_location_id'],$case['officer_id']]);
         $to=($r['current_baseline']??$r['baseline'])['closures'][0]['effective_to']??null;
         $actors=array_values(array_unique(array_column($r['events'],'user_id')));$names=[];
@@ -155,6 +157,14 @@ final class ArpaHistoricalAppointmentApprovalService
         $r['display']=['officer'=>$d['officer'],'asc'=>$d['asc_name'],'division'=>$d['division_name'],'actors'=>$names,'operational_status'=>$to!==null&&$to<date('Y-m-d')?'Ended':($a['effective_from']>date('Y-m-d')?'Scheduled':'Current / Open')];return $r;
     }
 
+    private function originalWorkflowAuditOnly(array $case):bool
+    {
+        return ArpaImportedAppointmentWorkflowPolicy::usesOriginalReview($this->one('SELECT record_origin,workflow_status FROM arpa_division_appointment_request WHERE id=?',[$case['request_id']]));
+    }
+    private function assertHistoricalCaseWritable(array $case):void
+    {
+        if($this->originalWorkflowAuditOnly($case))throw new DomainException('This separate historical case is audit-only. Use the original appointment workflow.',409);
+    }
     private function nextAction(string $status,array $actions):array
     {
         $next=['action'=>null,'stage'=>null,'role'=>null,'label'=>'No next workflow action is available.','authorized'=>false];
@@ -179,7 +189,7 @@ final class ArpaHistoricalAppointmentApprovalService
     {
         $this->actor($actorId);$this->input($input);
         return $this->transaction(function()use($id,$input,$expectedVersion,$expectedSourceHash,$actorId):array{
-            $case=$this->caseRow($id,true);$this->owner($actorId,$case['asc_location_id']);$this->version($case,$expectedVersion);
+            $case=$this->caseRow($id,true);$this->assertHistoricalCaseWritable($case);$this->owner($actorId,$case['asc_location_id']);$this->version($case,$expectedVersion);
             if(!in_array($case['workflow_status'],['DRAFT','RETURNED'],true))throw new DomainException('Only Draft or Returned historical cases may be edited.',409);
             $bundle=$this->bundle($case['source_correction_id'],true);$this->identity($case,$bundle);
             $json=$this->json($bundle);$hash=hash('sha256',$json);
@@ -205,7 +215,7 @@ final class ArpaHistoricalAppointmentApprovalService
     {
         $this->actor($actorId);
         return $this->transaction(function()use($id,$expectedVersion,$actorId,$attestation):array{
-            $case=$this->caseRow($id,true);$this->owner($actorId,$case['asc_location_id']);$this->version($case,$expectedVersion);
+            $case=$this->caseRow($id,true);$this->assertHistoricalCaseWritable($case);$this->owner($actorId,$case['asc_location_id']);$this->version($case,$expectedVersion);
             if(!in_array($case['workflow_status'],['DRAFT','RETURNED'],true))throw new DomainException('Only Draft or Returned historical cases may be submitted.',409);
             $bundle=$this->current($case);$this->validate($bundle,false);
             $this->assertAttestedBaseline($case,$attestation);
@@ -232,7 +242,7 @@ final class ArpaHistoricalAppointmentApprovalService
         $this->actor($actorId);$action=strtoupper($action);$reason=$this->text($reason,'Review reason');$evidenceReference=$this->text($evidenceReference,'Evidence reference');
         if(!in_array($action,['VERIFY','APPROVE','RETURN_FOR_CORRECTION','REJECT'],true))throw new DomainException('Unsupported historical approval action.',422);
         return $this->transaction(function()use($id,$action,$expectedVersion,$actorId,$reason,$evidenceReference,$attestation):array{
-            $case=$this->caseRow($id,true);$this->version($case,$expectedVersion);
+            $case=$this->caseRow($id,true);$this->assertHistoricalCaseWritable($case);$this->version($case,$expectedVersion);
             if($attestation!==null){$this->current($case);$this->assertAttestedBaseline($case,$attestation);}
             // Retire an obsolete draft only through an independent, scoped ASC approver.
             // This lets an effective successor decision receive its own case without silently rebinding audit history.
@@ -317,6 +327,7 @@ final class ArpaHistoricalAppointmentApprovalService
 
     private function assertStaleDraftRetirement(array $case,string $actorId,bool $lock):void
     {
+        $this->assertHistoricalCaseWritable($case);
         if(!in_array($case['workflow_status'],['DRAFT','RETURNED'],true))throw new DomainException('Only a stale Draft or Returned case can be retired.',409);
         $this->permission($actorId,'arpa.appointment.asc-approve','ASC',$case['asc_location_id']);
         $this->permission($actorId,'arpa.appointment.reject','ASC',$case['asc_location_id']);$this->makerChecker($case,'ASC',$actorId);

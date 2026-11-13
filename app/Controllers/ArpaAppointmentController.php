@@ -832,8 +832,9 @@ final class ArpaAppointmentController extends Controller
         $s=Database::pdo()->prepare("SELECT w.*,COALESCE(NULLIF(u.display_name,''),u.username) performed_by,u.username FROM {$history} w JOIN system_user u ON u.id=w.user_id WHERE w.request_id=? ORDER BY w.id");$s->execute([$id]);$workflowHistory=$s->fetchAll();
         $s=Database::pdo()->prepare('SELECT sr.*,u.username updated_by_name FROM arpa_appointment_stage_review sr JOIN system_user u ON u.id=sr.updated_by WHERE sr.entity_type=? AND sr.request_id=? ORDER BY FIELD(sr.review_stage,\'DISTRICT\',\'NATIONAL\')');$s->execute([strtoupper($entity),$id]);$stageReviews=$s->fetchAll();
         $impact=json_decode((string)($request['impact_snapshot_json']??'[]'),true);if(!is_array($impact))$impact=[];
-        $historicalPanel=null;
+        $historicalPanel=null;$importedWorkflow=null;
         if($division&&($request['record_origin']??'NATIVE')==='LEGACY_IMPORT'){
+            $importedWorkflow=(new ArpaAppointmentService(Database::pdo()))->importedWorkflowInfo($request,(string)Auth::user()['id']);
             $historicalPanel=['detail'=>null,'message'=>'Historical approval is not registered or is unavailable in your current Working Context. Authorized administrative registration or review is required.'];
             if(!empty($request['canonical_appointment_id']))try{
                 $historicalPanel['detail']=(new \App\Services\ArpaHistoricalApprovalReadService(Database::pdo()))
@@ -842,7 +843,7 @@ final class ArpaAppointmentController extends Controller
                 if(!$e instanceof \DomainException)error_log('Historical request panel unavailable: '.get_class($e));
             }
         }
-        $this->render('arpa_appointments/request_detail',compact('entity','request','workflowHistory','stageReviews','impact','historicalPanel'));
+        $this->render('arpa_appointments/request_detail',compact('entity','request','workflowHistory','stageReviews','impact','historicalPanel','importedWorkflow'));
     }
 
     public function updateRequest(string $entity,string $id):void

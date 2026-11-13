@@ -69,7 +69,7 @@ namespace {
         global $assertions;$assertions++;
         if($expected!==$actual)throw new RuntimeException($message.' expected='.var_export($expected,true).' actual='.var_export($actual,true));
     }
-    $message='Imported historical appointment. Use the Historical Approval workflow for authorization.';
+    $message=App\Services\ArpaImportedAppointmentWorkflowPolicy::BLOCKED;
     $base=['id'=>'request','request_type'=>'APPOINTMENT','workflow_status'=>'SUBMITTED','record_origin'=>'LEGACY_IMPORT',
         'created_by'=>'reviewer','asc_location_id'=>'asc','requested_effective_from'=>'2020-01-01',
         'requested_effective_to'=>null,'source_appointment_id'=>null,'officer_id'=>'officer','legacy_history_only'=>0];
@@ -114,7 +114,7 @@ namespace {
             $workflowHistory=[];$stageReviews=[];$impact=[];
             ob_start();require BASE_PATH.'/app/Views/arpa_appointments/request_detail.php';$html=(string)ob_get_clean();
             sameWorkflow($expectedButtons,str_contains($html,'/hr/arpa-appointments/workflow/'),'Original workflow button visibility '.$entity.'/'.$origin.'/'.$status);
-            sameWorkflow(!$expectedButtons,str_contains($html,$message),'Historical Approval notice visibility');
+            sameWorkflow(!$expectedButtons,str_contains($html,'Imported historical appointment.')||str_contains($html,'Imported appointment authorization follows the original request workflow.'),'Imported protection notice visibility');
         }
     }
     echo 'ArpaImportedOriginalWorkflowProtectionTest: '.$assertions." assertions passed; no database connection.\n";

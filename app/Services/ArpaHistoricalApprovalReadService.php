@@ -61,7 +61,9 @@ final class ArpaHistoricalApprovalReadService
         }
         $retirementIds=$mode==='completed'?[]:(new ArpaHistoricalAppointmentApprovalService($this->pdo))->staleDraftRetirementIds($actor);
         if($retirementIds!==[]){$where[]="(hc.workflow_status IN('DRAFT','RETURNED') AND hc.id IN(".implode(',',array_fill(0,count($retirementIds),'?')).'))';array_push($params,...$retirementIds);}
-        return ['with'=>$with,'params'=>$params,'where'=>$where===[]?'1=0':'('.implode(' OR ',$where).')','retirement_ids'=>$retirementIds];
+        $predicate=$where===[]?'1=0':'('.implode(' OR ',$where).')';
+        if($mode==='pending')$predicate.=" AND NOT EXISTS(SELECT 1 FROM arpa_division_appointment_request original_request WHERE original_request.id=hc.request_id AND original_request.record_origin='LEGACY_IMPORT' AND original_request.workflow_status IN('".implode("','",ArpaImportedAppointmentWorkflowPolicy::ORIGINAL_REVIEW_STATUSES)."'))";
+        return ['with'=>$with,'params'=>$params,'where'=>$predicate,'retirement_ids'=>$retirementIds];
     }
     public function query(string $actor,bool $completed=false,array $context=[]):array
     {
