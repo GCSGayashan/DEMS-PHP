@@ -12,6 +12,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
     private string $db;
     private object $fixture;
     private array $cases=[];
+    private array $embeddedSources=[];
     private int $assertions=0;
     private const ASC='10000000-0000-4000-8000-000000000001';
     public function run():void
@@ -28,10 +29,13 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $this->pdo->exec("INSERT INTO designation VALUES('historical-test-arpa','ARPA_OFFICER');CREATE TABLE IF NOT EXISTS arpa_appointment_workflow_action(id BIGINT AUTO_INCREMENT PRIMARY KEY,request_id CHAR(36),action VARCHAR(50),stage VARCHAR(50),user_id CHAR(36),action_at DATETIME NULL,record_origin VARCHAR(40),previous_status VARCHAR(50),new_status VARCHAR(50),comments TEXT,timestamp_provenance VARCHAR(80)) ENGINE=InnoDB");
             $this->fixture=new ArpaHistoricalAppointmentApprovalIsolatedTest();(new ReflectionProperty($this->fixture,'pdo'))->setValue($this->fixture,$this->pdo);
             for($i=0;$i<9;$i++)$this->cases[$i]=$this->call($this->fixture,'source');
-            $this->schema();$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
+            for($i=0;$i<3;$i++)$this->embeddedSources[$i]=$this->call($this->fixture,'source','PERMANENT',null,'2020-01-01','2024-12-31');
+            $this->schema();$this->requestSchema();$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
             foreach($this->cases as $i=>&$s){$this->context(1);$s['case']=$service->register($s['correction'],['reason'=>'Synthetic UI baseline','evidence_reference'=>'Synthetic letter <script>alert(1)</script>'],self::actor(1));if($i===0||$i===8)continue;$s['case']=$service->submit($s['case']['case']['id'],0,self::actor(1));foreach([[4,'VERIFY'],[5,'APPROVE'],[6,'VERIFY'],[7,'APPROVE'],[8,'VERIFY']] as $n=>[$actor,$action]){if($n>=$i-1)break;$this->context($actor);$s['case']=$service->review($s['case']['case']['id'],$action,(int)$s['case']['case']['version'],self::actor($actor),'Synthetic stage review','Synthetic evidence');}}
             unset($s);$this->context(1);$sourceState=$this->call($this->fixture,'operational');
             $this->queues();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->missingSchema();
+            $this->embeddedRequest();
+            $this->requestCaseSelection();$this->stageHistoryDisplay();
             $this->same($sourceState,$this->call($this->fixture,'operational'),'all routed UI actions leave appointments, requests, closures, original workflows, provenance and corrections unchanged');
             $out=$this->securityHeaders();$this->same(true,str_contains($out,'assertions passed'),'SecurityHeadersTest passes using this isolated schema');echo trim($out)."\n";
             echo 'ArpaHistoricalApprovalUiIsolatedTest: '.$this->assertions." assertions passed; disposable database removed.\n";
@@ -53,6 +57,133 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             CREATE TABLE arpa_subject_assignment_request(id CHAR(36) PRIMARY KEY,officer_id CHAR(36),asc_location_id CHAR(36),workflow_status VARCHAR(50),legacy_history_only TINYINT DEFAULT 0);
             CREATE TABLE system_notification(id CHAR(36) PRIMARY KEY,entity_type VARCHAR(80),entity_id CHAR(36),recipient_user_id CHAR(36),notification_type VARCHAR(50),action_status VARCHAR(30),read_at DATETIME NULL,priority VARCHAR(20),created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
             INSERT IGNORE INTO application_role_permission SELECT id,'13000000-0000-4000-8000-000000000011' FROM application_role;");
+    }
+    private function requestSchema():void
+    {
+        $this->pdo->exec("ALTER TABLE officer ADD class_id CHAR(36),ADD officer_status_id CHAR(36),ADD operational_status VARCHAR(30) DEFAULT 'ACTIVE';
+            ALTER TABLE designation ADD name_en VARCHAR(255);
+            ALTER TABLE location ADD official_code VARCHAR(100);
+            CREATE TABLE officer_class(id CHAR(36) PRIMARY KEY,name_en VARCHAR(255)) ENGINE=InnoDB;
+            CREATE TABLE officer_status(id CHAR(36) PRIMARY KEY,name_en VARCHAR(255)) ENGINE=InnoDB;
+            CREATE TABLE arpa_appointment_stage_review(id CHAR(36),entity_type VARCHAR(30),request_id CHAR(36),review_stage VARCHAR(30),updated_by CHAR(36)) ENGINE=InnoDB;");
+    }
+    private function embeddedRequest():void
+    {
+        $service=new ArpaHistoricalAppointmentApprovalService($this->pdo);$this->context(1);
+        $source=$this->embeddedSources[0];$page='/hr/arpa-appointments/requests/division/'.$source['request'];
+        [$status,$html]=$this->route('GET',$page);$this->same(200,$status,'unregistered imported request remains viewable');
+        $this->same(true,str_contains($html,'Authorized administrative registration'),'registration remains privileged, not a web bypass');
+        $this->same(false,str_contains($html,'/attest'),'unregistered case cannot be acted on');
+        $c=$service->register($source['correction'],['reason'=>'Reviewed complete imported period','evidence_reference'=>'Actual administrative registration fixture'],self::actor(1));
+        $id=$c['case']['id'];$url='/hr/arpa-appointments/historical-approvals/'.$id.'/attest';$hash=$c['case']['baseline_hash'];
+        $post=['expected_version'=>'0','baseline_hash'=>$hash,'confirm_records'=>'1','action'=>'SUBMIT'];
+        [$status,$html]=$this->route('GET',$page);$this->same(200,$status,'imported division detail integrates historical case');
+        foreach(['Historical Appointment Approval','Imported Historical Appointment','2020-01-01','2024-12-31','Original Workflow Status','Historical Approval Status','ASC review','DISTRICT review','NATIONAL review','name="confirm_records"'] as $text)$this->same(true,str_contains($html,$text),'embedded detail shows '.$text);
+        foreach(['/workflow/division/','Native Appointment','type="file"','name="evidence_reference"'] as $text)$this->same(false,str_contains($html,$text),'embedded historical path omits '.$text);
+        foreach([2,10,11] as $actor){[$status]=$this->route('POST',$url,$post,$actor);$this->same(403,$status,'attestation respects geographic scope/role '.$actor);}
+        foreach(['invalid','missing-both'] as $csrf){[$status]=$this->route('POST',$url,$post,1,null,$csrf);$this->same(419,$status,'attestation retains CSRF protection');}
+        [$status]=$this->route('GET',$url);$this->same(404,$status,'no GET attestation mutation route');
+        $missing=$post;unset($missing['confirm_records']);[$status]=$this->route('POST',$url,$missing);$this->same(422,$status,'explicit record confirmation mandatory');
+        [$status]=$this->route('POST',$url,array_replace($post,['baseline_hash'=>str_repeat('0',64)]));$this->same(409,$status,'review must match displayed baseline');
+        [$status]=$this->route('POST',$url,$post+['evidence_reference'=>'fabricated']);$this->same(422,$status,'attestation cannot silently accept evidence/identity fields');
+        [$status]=$this->route('POST',$url,$post);$this->same(302,$status,'owner submits from embedded page');
+        [$status]=$this->route('POST',$url,$post);$this->same(409,$status,'optimistic locking prevents repeated submission');
+        $version=1;
+        foreach([[4,'VERIFY','ASC_SUBJECT_OFFICER'],[5,'APPROVE',null],[6,'VERIFY',null],[7,'APPROVE',null],[8,'VERIFY',null],[9,'APPROVE',null]] as [$actor,$action,$role]){
+            [$status,$html]=$this->route('GET',$page,[],$actor,$role);$this->same(200,$status,'authorized stage reviewer sees original page');
+            $this->same(true,str_contains($html,'value="'.$action.'"'),'embedded page exposes only authorized primary action');
+            $input=['expected_version'=>(string)$version,'baseline_hash'=>$hash,'confirm_records'=>'1','action'=>$action,'reason'=>'Reviewed existing appointment and closure'];
+            if($actor===9){[$status]=$this->route('POST',$url,$input,$actor);$this->same(422,$status,'National final confirmation retained');$input['confirm_final']='1';}
+            [$status]=$this->route('POST',$url,$input,$actor,$role);$this->same(302,$status,'existing-record attestation action '.$action.' actor '.$actor);$version++;
+            if($actor===4){[$status,$html]=$this->route('GET',$page,[],4,'ASC_ADMIN');$this->same(false,str_contains($html,'value="APPROVE"'),'maker-checker hides own approval');
+                [$status]=$this->route('POST',$url,array_replace($input,['expected_version'=>'2','action'=>'APPROVE']),4,'ASC_ADMIN');$this->same(403,$status,'maker-checker enforced on direct POST');}
+        }
+        $this->context(1);$done=$service->get($id,self::actor(1));$this->same('NATIONAL_APPROVED',$done['case']['workflow_status'],'complete existing sequence reaches National approval');
+        $this->same('2024-12-31',$done['baseline']['closures'][0]['effective_to'],'one case covers actual closure');
+        $this->same(1,(int)$this->pdo->query("SELECT COUNT(*) FROM arpa_appointment_historical_approval_case WHERE appointment_id='".$source['appointment']."'")->fetchColumn(),'no separate closure approval case');
+        foreach(array_slice($done['events'],1) as $event){$audit=json_decode($event['after_json'],true);$this->same('EXISTING_RECORD_ATTESTATION',$audit['existing_record_attestation']['mode'],'audit explicitly distinguishes attestation from documentary evidence');$this->same($hash,$audit['existing_record_attestation']['baseline_hash'],'audit identifies reviewed complete baseline');$this->same(true,$event['user_id']!==''&&$event['action_at']!=='','audit records reviewer and system timestamp');}
+        $this->same('CREATED',$this->pdo->query("SELECT workflow_status FROM arpa_division_appointment_request WHERE id='".$source['request']."'")->fetchColumn(),'original imported workflow status unchanged');
+        [$status,$html]=$this->route('GET',$page,[],9);$this->same(200,$status,'terminal historical case stays viewable');$this->same(false,str_contains($html,'/attest'),'terminal case shows no action form');
+
+        // Closure changes invalidate the same whole-period baseline; no date is silently refreshed.
+        $stale=$this->embeddedSources[1];$this->context(1);$c=$service->register($stale['correction'],['reason'=>'Closure baseline','evidence_reference'=>'Administrative evidence'],self::actor(1));
+        $this->pdo->beginTransaction();
+        try{$this->pdo->prepare("UPDATE arpa_division_appointment_closure SET effective_to='2024-11-30' WHERE appointment_id=?")->execute([$stale['appointment']]);
+            try{$service->submitExistingRecordAttestation($c['case']['id'],0,self::actor(1),true,$c['case']['baseline_hash']);throw new RuntimeException('Changed closure accepted');}catch(DomainException $e){$this->same(409,$e->getCode(),'actual closure is protected by source-baseline lock');}
+        }finally{$this->pdo->rollBack();}
+        // The original evidence route still requires real non-empty evidence.
+        $c=$service->submitExistingRecordAttestation($c['case']['id'],0,self::actor(1),true,$c['case']['baseline_hash']);$this->context(4);
+        try{$service->review($c['case']['id'],'VERIFY',1,self::actor(4),'Review','');throw new RuntimeException('Missing evidence accepted');}catch(DomainException $e){$this->same(422,$e->getCode(),'existing evidence-validation safeguard unchanged');}
+        // Return and rejection use the same governed transition implementation, not original workflows.
+        $this->context(1);$s=$this->embeddedSources[2];$c=$service->register($s['correction'],['reason'=>'Whole period review','evidence_reference'=>'Administrative registration evidence'],self::actor(1));
+        $id=$c['case']['id'];$hash=$c['case']['baseline_hash'];$url='/hr/arpa-appointments/historical-approvals/'.$id.'/attest';
+        foreach([[1,'SUBMIT'],[4,'VERIFY'],[5,'RETURN_FOR_CORRECTION'],[1,'SUBMIT'],[4,'VERIFY'],[5,'REJECT']] as $version=>[$actor,$action]){
+            $input=['expected_version'=>(string)$version,'baseline_hash'=>$hash,'confirm_records'=>'1','action'=>$action,'reason'=>'Explicit review decision'];
+            if($action==='VERIFY'){
+                $missing=$input;unset($missing['confirm_records']);[$status]=$this->route('POST',$url,$missing,$actor);$this->same(422,$status,'review confirmation cannot be omitted');
+                [$status]=$this->route('POST',$url,array_replace($input,['reason'=>'']),$actor);$this->same(422,$status,'review decision reason remains mandatory');
+            }
+            [$status]=$this->route('POST',$url,$input,$actor);$this->same(302,$status,'attestation supports governed '.$action);
+        }
+        $this->context(1);$this->same('REJECTED',$service->get($id,self::actor(1))['case']['workflow_status'],'attested rejection remains terminal');
+        $this->context(1);
+    }
+    private function requestCaseSelection():void
+    {
+        $this->context(1);$source=$this->embeddedSources[0];$other=$this->embeddedSources[1];$read=new ArpaHistoricalApprovalReadService($this->pdo);
+        $original=$read->requestCase($source['appointment'],$source['request'],self::actor(1));$id=$original['case']['id'];
+        $this->same(null,$read->requestCase($other['appointment'],$source['request'],self::actor(1)),'appointment and request must both match');
+        $render=function()use($source,$read):string{
+            $request=(new App\Services\ArpaAppointmentReadService($this->pdo))->workflowRequestDetail('division',$source['request']);$status=$request['workflow_status'];$administrativelyDeleted=false;
+            $historicalPanel=['detail'=>$read->requestCase($source['appointment'],$source['request'],(string)Auth::user()['id']),'message'=>'Historical approval is unavailable in your current Working Context.'];
+            ob_start();try{require BASE_PATH.'/app/Views/arpa_appointments/historical_request_panel.php';return (string)ob_get_contents();}finally{ob_end_clean();}
+        };
+        $panel=static function(string $html):string{if(!preg_match('~<section class="form-section"><h2 class="h5">Historical Appointment Approval</h2>.*?</section>~s',$html,$m))throw new RuntimeException('Missing historical panel');return $m[0];};
+        $clone=function(string $request,string $correction,string $status)use($original):string{
+            $row=$original['case'];unset($row['active_appointment_id']);$row['id']=(string)$this->pdo->query('SELECT UUID()')->fetchColumn();$row['request_id']=$request;$row['source_correction_id']=$correction;$row['workflow_status']=$status;$row['reason']='Sensitive fixture case '.$row['id'];$row['baseline_hash']=hash('sha256',$row['id']);
+            $this->pdo->prepare('INSERT INTO arpa_appointment_historical_approval_case ('.implode(',',array_keys($row)).') VALUES ('.implode(',',array_fill(0,count($row),'?')).')')->execute(array_values($row));return $row['id'];
+        };
+        $this->pdo->beginTransaction();
+        try{
+            $foreign=$clone($other['request'],$other['correction'],'DRAFT');
+            $this->same($id,$read->requestCase($source['appointment'],$source['request'],self::actor(1))['case']['id'],'active case for another request cannot displace exact terminal match');
+            $_SERVER['REQUEST_URI']='/hr/arpa-appointments/requests/division/'.$source['request'];
+            ob_start();try{(new App\Controllers\ArpaAppointmentController())->requestDetail('division',$source['request']);$html=$panel((string)ob_get_contents());}finally{ob_end_clean();}
+            $this->same(true,str_contains($html,$original['case']['baseline_hash']),'controller shows exact matching case baseline');$this->same(false,str_contains($html,$foreign),'controller never exposes mismatched case');
+            $this->pdo->prepare("UPDATE arpa_appointment_historical_approval_case SET workflow_status='REJECTED' WHERE id=?")->execute([$foreign]);
+            $active=$clone($source['request'],$this->embeddedSources[2]['correction'],'DRAFT');
+            $this->same($active,$read->requestCase($source['appointment'],$source['request'],self::actor(1))['case']['id'],'unique exact active case selected over terminal history');
+            $this->same(true,str_contains($panel($render()),hash('sha256',$active)),'panel renders selected exact active case baseline');
+            $this->context(11);$this->same(null,$read->requestCase($source['appointment'],$source['request'],self::actor(11)),'case details unavailable to viewer');
+            $html=$panel($render());foreach([$active,$id,hash('sha256',$active),$original['case']['baseline_hash'],'Sensitive fixture case','ASC review:','NATIONAL_APPROVED'] as $private)$this->same(false,str_contains($html,$private),'inaccessible panel does not expose '.$private);
+            $this->context(9);$this->same(null,$read->requestCase($source['appointment'],$source['request'],self::actor(9)),'inaccessible active case does not fall back to readable terminal history');
+            $this->context(1);$this->pdo->prepare("UPDATE arpa_appointment_historical_approval_case SET workflow_status='REJECTED' WHERE id=?")->execute([$active]);
+            $this->same(null,$read->requestCase($source['appointment'],$source['request'],self::actor(1)),'multiple exact terminal cases require explicit administrative review');
+            $html=$panel($render());$this->same(true,str_contains($html,'unavailable in your current Working Context'),'ambiguous selection handled safely');
+            foreach([$active,$id,'Sensitive fixture case'] as $private)$this->same(false,str_contains($html,$private),'ambiguous selection reveals no case detail');
+        }finally{$this->pdo->rollBack();$this->context(1);}
+        [$status]=$this->route('GET','/hr/arpa-appointments/requests/division/'.$source['request'],[],10);$this->same(403,$status,'wrong District cannot open original request');
+    }
+    private function stageHistoryDisplay():void
+    {
+        $render=static function(array $events,bool $accessible=true):string{
+            $request=['officer_number'=>'UAT','officer_name'=>'Synthetic Officer'];$status='CREATED';$administrativelyDeleted=false;
+            $historicalPanel=['detail'=>$accessible?['case'=>['id'=>'case','workflow_status'=>'NATIONAL_APPROVED','baseline_hash'=>str_repeat('a',64)],'baseline'=>[],'actions'=>[],'events'=>$events,'source_stale'=>false,'display'=>['actors'=>['reviewer'=>'Reviewer']]]:null];
+            ob_start();try{require BASE_PATH.'/app/Views/arpa_appointments/historical_request_panel.php';return (string)ob_get_contents();}finally{ob_end_clean();}
+        };
+        $event=static fn(string $stage,string $action,string $next,string $case='case'):array=>['approval_case_id'=>$case,'stage'=>$stage,'action'=>$action,'new_status'=>$next,'user_id'=>'reviewer','action_at'=>'2026-01-01 12:00:00','reason'=>'Synthetic review','after_json'=>'{}'];
+        $stage=static function(string $html,string $name):string{preg_match('~<li[^>]*data-historical-stage="'.$name.'"[^>]*>(.*?)</li>~s',$html,$m);return strip_tags($m[1]??'');};
+        $events=[];foreach(['ASC','DISTRICT','NATIONAL'] as $level){$events[]=$event($level,'VERIFY',$level.'_VERIFIED');$events[]=$event($level,'APPROVE',$level.'_APPROVED');}
+        $html=$render($events);foreach(['ASC','DISTRICT','NATIONAL'] as $level){$text=$stage($html,$level);$this->same(true,str_contains($text,'Verification: Verified - Reviewer'),'actual verification shown for '.$level);$this->same(true,str_contains($text,'Approval: Approved - Reviewer'),'actual approval shown separately for '.$level);}
+        $html=$render([$event('ASC','VERIFY','ASC_VERIFIED'),$event('DISTRICT','VERIFY','DISTRICT_VERIFIED'),$event('ASC','EDIT_DRAFT','ASC_APPROVED'),$event('ASC','APPROVE','ASC_APPROVED','different-case'),$event('NATIONAL','APPROVE','DISTRICT_APPROVED')]);
+        foreach(['ASC','DISTRICT','NATIONAL'] as $level)$this->same(true,str_contains($stage($html,$level),'Approval: Not recorded'),'unrelated events/statuses do not infer '.$level.' approval');
+        $this->same(true,str_contains($stage($html,'ASC'),'Verification: Verified'),'unrelated last event does not replace actual verification');
+        $events[]=$event('DISTRICT','RETURN_FOR_CORRECTION','RETURNED');$html=$render($events);
+        foreach(['ASC','DISTRICT','NATIONAL'] as $level)$this->same(false,str_contains($stage($html,$level),'Approved - Reviewer'),'return invalidates earlier-cycle approval display');
+        $events[]=$event('CREATOR','SUBMIT','SUBMITTED');$events[]=$event('ASC','VERIFY','ASC_VERIFIED');$html=$render($events);
+        $this->same(true,str_contains($stage($html,'ASC'),'Verification: Verified'),'new-cycle verification is shown');$this->same(true,str_contains($stage($html,'ASC'),'Approval: Not recorded'),'previous-cycle ASC approval not reused');
+        $this->same(true,str_contains($stage($html,'DISTRICT'),'Verification: Not recorded'),'resubmission resets downstream verification');
+        $this->same(false,str_contains($render($events,false),'Approved - Reviewer'),'inaccessible detail never infers progress from case status');
     }
     private function queues():void
     {
@@ -182,6 +313,11 @@ $dash='—';$canAdminDateCorrect=false;eval('use App\\Core\\DataTableFormat; '.s
         $id=$this->cases[0]['case']['case']['id'];$this->pdo->exec('RENAME TABLE arpa_appointment_historical_approval_event TO fixture_hidden_event,arpa_appointment_historical_approval_case TO fixture_hidden_case');
         try{[$status,$body]=$this->route('GET','/hr/arpa-appointments/historical-approvals/'.$id);$this->same(503,$status,'direct route without migration fails closed');$this->same(false,str_contains($body,'SQLSTATE')||str_contains($body,'Stack trace'),'no SQL or stack trace exposed');[$status]=$this->route('POST','/hr/arpa-appointments/historical-approvals/'.$id.'/submit',['expected_version'=>'8']);$this->same(503,$status,'valid-CSRF POST without schema cannot write');$this->context(1);$this->same(0,(new ArpaHistoricalApprovalReadService($this->pdo))->count(self::actor(1)),'schema-absent dashboard remains compatible');$this->same(0,count($this->call(new App\Services\OfficerProfileService($this->pdo),'operationalAppointments',$this->cases[0]['officer'],[self::ASC])[0][0]['historical_approvals']),'schema-absent profile remains compatible');[$status,$body]=$this->route('GET','/hr/arpa-appointments/submitted',[],8);$this->same(200,$status,'existing queue page works without migration 067');$this->same(false,str_contains($body,'arpa-historical-approvals-pending'),'schema-absent page does not render an unusable historical table');}
         finally{$this->pdo->exec('RENAME TABLE fixture_hidden_event TO arpa_appointment_historical_approval_event,fixture_hidden_case TO arpa_appointment_historical_approval_case');}
+        $this->pdo->exec('RENAME TABLE arpa_appointment_historical_approval_event TO fixture_hidden_event');
+        try{[$status,$body]=$this->route('GET','/hr/arpa-appointments/requests/division/'.$this->cases[0]['request']);
+            $this->same(200,$status,'original request remains viewable when historical schema is unavailable');
+            foreach([$id,'SQLSTATE','Stack trace','/attest'] as $private)$this->same(false,str_contains($body,$private),'unavailable historical panel does not expose '.$private);
+        }finally{$this->pdo->exec('RENAME TABLE fixture_hidden_event TO arpa_appointment_historical_approval_event');}
     }
     private function table(string $key,array $context=[],array $input=[]):array{$d=DataTableRegistry::definition($key,$context);$this->same(true,!isset($d['authorize'])||($d['authorize'])(),'table authorizes selected role');return(new DataTableQuery($this->pdo,$d,new DataTableRequest($input)))->response();}
     private function callRegistrySummary():array{return (new ReflectionMethod(DataTableRegistry::class,'arpaAppointmentSummarySource'))->invoke(null,'submitted');}
@@ -201,7 +337,7 @@ $dash='—';$canAdminDateCorrect=false;eval('use App\\Core\\DataTableFormat; '.s
     private function context(int $n,?string $role=null):void{$this->call($this->fixture,'context',self::actor($n),$role);}
     private static function actor(int $n):string{return '00000000-0000-4000-8000-'.str_pad((string)$n,12,'0',STR_PAD_LEFT);}
     private function call(object $object,string $method,mixed ...$args):mixed{return(new ReflectionMethod($object,$method))->invoke($object,...$args);}
-    private static function connect(string $db):PDO{if(!preg_match('/^dems_test_hist_ui_[a-f0-9]{10}$/D',$db))throw new RuntimeException('Unsafe UI fixture database.');$c=config('database');return new PDO(sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',$c['host'],$c['port'],$db),$c['username'],$c['password'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC,PDO::ATTR_EMULATE_PREPARES=>false,PDO::MYSQL_ATTR_MULTI_STATEMENTS=>true]);}
+    private static function connect(string $db):PDO{if(!preg_match('/^dems_test_hist_ui_[a-f0-9]{10}$/D',$db))throw new RuntimeException('Unsafe UI fixture database.');$c=config('database');return new PDO(sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',$c['host'],$c['port'],$db),$c['username'],$c['password'],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC,PDO::ATTR_EMULATE_PREPARES=>false,PDO::MYSQL_ATTR_MULTI_STATEMENTS=>true,PDO::MYSQL_ATTR_INIT_COMMAND=>'SET SESSION default_storage_engine=InnoDB']);}
     private function same(mixed $e,mixed $a,string $m):void{$this->assertions++;if($e!==$a)throw new RuntimeException($m.'; expected '.var_export($e,true).', got '.var_export($a,true));}
 }
 if(!defined('ARPA_HISTORICAL_UI_FIXTURE_ONLY'))try{if(isset($argv[2]))ArpaHistoricalApprovalUiIsolatedTest::childMain($argv);else(new ArpaHistoricalApprovalUiIsolatedTest())->run();}catch(Throwable $e){fwrite(STDERR,$e->getMessage()."\n".$e->getTraceAsString()."\n");exit(1);}

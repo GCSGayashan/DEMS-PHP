@@ -25,6 +25,27 @@ final class ArpaHistoricalApprovalController extends Controller
     public function save(string $id):void{$this->mutate($id,'save');}
     public function submit(string $id):void{$this->mutate($id,'submit');}
     public function review(string $id):void{$this->mutate($id,'review');}
+    public function attest(string $id):void
+    {
+        try{
+            if(($_SERVER['REQUEST_METHOD']??'')!=='POST'){http_response_code(405);return;}
+            $actor=$this->actor();
+            if(!is_string($_SESSION['_csrf']??null)||$_SESSION['_csrf']===''||!is_string($_POST['_csrf']??null)||$_POST['_csrf']==='')throw new DomainException('Invalid CSRF token.',419);
+            Csrf::validate();
+            if(array_diff(array_keys($_POST),['_csrf','expected_version','baseline_hash','confirm_records','action','reason','confirm_final'])!==[])throw new DomainException('Protected or unsupported historical approval input.',422);
+            $raw=$_POST['expected_version']??'';
+            if(!is_string($raw)||!preg_match('/^(0|[1-9][0-9]{0,17})$/D',$raw))throw new DomainException('A valid expected version is required.',422);
+            $action=$_POST['action']??'';$hash=$_POST['baseline_hash']??'';$reason=$_POST['reason']??'';
+            if(!is_string($action)||!is_string($hash)||!is_string($reason))throw new DomainException('Valid action, baseline and reason are required.',422);
+            $s=new ArpaHistoricalAppointmentApprovalService(Database::pdo());$detail=$s->interfaceGet($id,$actor);
+            if(strtoupper($action)==='APPROVE'&&$detail['case']['workflow_status']==='NATIONAL_VERIFIED'&&($_POST['confirm_final']??'')!=='1')throw new DomainException('Explicitly confirm final National approval of the existing appointment.',422);
+            $confirmed=($_POST['confirm_records']??'')==='1';
+            if($action==='SUBMIT')$s->submitExistingRecordAttestation($id,(int)$raw,$actor,$confirmed,$hash);
+            else $s->reviewExistingRecordAttestation($id,$action,(int)$raw,$actor,$reason,$confirmed,$hash);
+            $this->flash('success','Historical Appointment decision recorded with existing-record attestation. Original appointment records were not changed.');
+            redirect('/hr/arpa-appointments/requests/division/'.$detail['case']['request_id']);
+        }catch(Throwable $e){$this->failure($e);}
+    }
     private function mutate(string $id,string $operation):void
     {
         try{

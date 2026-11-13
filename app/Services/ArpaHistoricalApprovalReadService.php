@@ -89,6 +89,23 @@ final class ArpaHistoricalApprovalReadService
         if(!$this->available()||!$this->canUse($actor))return 0;
         $q=$this->query($actor,$completed,$context);$s=$this->pdo->prepare('SELECT COUNT(*) FROM ('.$q['sql'].') hist_count');$s->execute($q['params']);return (int)$s->fetchColumn();
     }
+    /** Resolve only this request's appointment; ambiguous or inaccessible cases expose no details. */
+    public function requestCase(string $appointmentId,string $requestId,string $actor):?array
+    {
+        if(!$this->available()||!$this->canUse($actor))return null;
+        $access=$this->access($actor,'read');
+        $s=$this->pdo->prepare($access['with']." SELECT hc.id,hc.active_appointment_id,({$access['where']}) can_read_case
+            FROM arpa_appointment_historical_approval_case hc
+            JOIN arpa_appointment_data_correction dc ON dc.id=hc.source_correction_id
+            WHERE hc.appointment_id=? AND hc.request_id=?");
+        $s->execute(array_merge($access['params'],[$appointmentId,$requestId]));$cases=$s->fetchAll(PDO::FETCH_ASSOC);
+        $active=array_filter($cases,static fn(array $case):bool=>$case['active_appointment_id']!==null);
+        $matches=$active!==[]?$active:$cases;
+        if(count($matches)!==1)return null;
+        $match=reset($matches);if((int)$match['can_read_case']!==1)return null;
+        $detail=(new ArpaHistoricalAppointmentApprovalService($this->pdo))->interfaceGet($match['id'],$actor);
+        return $detail['case']['appointment_id']===$appointmentId&&$detail['case']['request_id']===$requestId?$detail:null;
+    }
     /** Status enrichment is set-based over the already-authorized appointment collection. */
     public function profileRows(array $appointmentIds,string $actor):array
     {

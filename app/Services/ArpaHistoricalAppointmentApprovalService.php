@@ -174,24 +174,47 @@ final class ArpaHistoricalAppointmentApprovalService
 
     public function submit(string $id,int $expectedVersion,string $actorId):array
     {
+        return $this->submitDecision($id,$expectedVersion,$actorId);
+    }
+
+    public function submitExistingRecordAttestation(string $id,int $expectedVersion,string $actorId,bool $confirmed,string $baselineHash):array
+    {
+        return $this->submitDecision($id,$expectedVersion,$actorId,$this->attestation($confirmed,$baselineHash));
+    }
+
+    private function submitDecision(string $id,int $expectedVersion,string $actorId,?array $attestation=null):array
+    {
         $this->actor($actorId);
-        return $this->transaction(function()use($id,$expectedVersion,$actorId):array{
+        return $this->transaction(function()use($id,$expectedVersion,$actorId,$attestation):array{
             $case=$this->caseRow($id,true);$this->owner($actorId,$case['asc_location_id']);$this->version($case,$expectedVersion);
             if(!in_array($case['workflow_status'],['DRAFT','RETURNED'],true))throw new DomainException('Only Draft or Returned historical cases may be submitted.',409);
             $bundle=$this->current($case);$this->validate($bundle,false);
+            $this->assertAttestedBaseline($case,$attestation);
             $next=ArpaAppointmentRules::transition($case['workflow_status']==='DRAFT'?'CREATED':$case['workflow_status'],'SUBMIT','CREATOR')['status'];
             $this->pdo->prepare('UPDATE '.self::CASE_TABLE.' SET workflow_status=?,submitted_by=?,submitted_at=NOW(),updated_by=?,updated_at=NOW(),version=version+1 WHERE id=? AND version=?')
                 ->execute([$next,$actorId,$actorId,$id,$expectedVersion]);
-            $after=$this->caseRow($id,true);$this->event($after,'SUBMIT','CREATOR',$actorId,$case,$case['reason'],$case['evidence_reference']);return $this->present($after);
+            $after=$this->caseRow($id,true);$this->event($after,'SUBMIT','CREATOR',$actorId,$case,$case['reason'],$attestation['statement']??$case['evidence_reference'],$attestation);return $this->present($after);
         });
     }
 
     public function review(string $id,string $action,int $expectedVersion,string $actorId,string $reason,string $evidenceReference):array
     {
+        return $this->reviewDecision($id,$action,$expectedVersion,$actorId,$reason,$evidenceReference);
+    }
+
+    public function reviewExistingRecordAttestation(string $id,string $action,int $expectedVersion,string $actorId,string $reason,bool $confirmed,string $baselineHash):array
+    {
+        $attestation=$this->attestation($confirmed,$baselineHash);
+        return $this->reviewDecision($id,$action,$expectedVersion,$actorId,$reason,$attestation['statement'],$attestation);
+    }
+
+    private function reviewDecision(string $id,string $action,int $expectedVersion,string $actorId,string $reason,string $evidenceReference,?array $attestation=null):array
+    {
         $this->actor($actorId);$action=strtoupper($action);$reason=$this->text($reason,'Review reason');$evidenceReference=$this->text($evidenceReference,'Evidence reference');
         if(!in_array($action,['VERIFY','APPROVE','RETURN_FOR_CORRECTION','REJECT'],true))throw new DomainException('Unsupported historical approval action.',422);
-        return $this->transaction(function()use($id,$action,$expectedVersion,$actorId,$reason,$evidenceReference):array{
+        return $this->transaction(function()use($id,$action,$expectedVersion,$actorId,$reason,$evidenceReference,$attestation):array{
             $case=$this->caseRow($id,true);$this->version($case,$expectedVersion);
+            if($attestation!==null){$this->current($case);$this->assertAttestedBaseline($case,$attestation);}
             // Retire an obsolete draft only through an independent, scoped ASC approver.
             // This lets an effective successor decision receive its own case without silently rebinding audit history.
             $staleDraft=$action==='REJECT'&&in_array($case['workflow_status'],['DRAFT','RETURNED'],true);
@@ -210,7 +233,7 @@ final class ArpaHistoricalAppointmentApprovalService
             $sql='UPDATE '.self::CASE_TABLE.' SET workflow_status=?,updated_by=?,updated_at=NOW(),version=version+1'.($terminal?',finalized_by=?,finalized_at=NOW()':'').' WHERE id=? AND version=?';
             $args=[$next,$actorId];if($terminal)$args[]=$actorId;$args[]=$id;$args[]=$expectedVersion;
             $this->pdo->prepare($sql)->execute($args);
-            $after=$this->caseRow($id,true);$this->event($after,$action,$stage,$actorId,$case,$reason,$evidenceReference);return $this->present($after);
+            $after=$this->caseRow($id,true);$this->event($after,$action,$stage,$actorId,$case,$reason,$evidenceReference,$attestation);return $this->present($after);
         });
     }
 
@@ -370,10 +393,22 @@ final class ArpaHistoricalAppointmentApprovalService
         $case=$this->one('SELECT * FROM '.self::CASE_TABLE.' WHERE id=?'.($lock?' FOR UPDATE':''),[$id]);
         if($lock&&$case['officer_id']!==$hint['officer_id'])throw new DomainException('The case identity changed.',409);return $case;
     }
-    private function event(array $after,string $action,string $stage,string $actor,?array $before,string $reason,string $evidence):void
+    private function attestation(bool $confirmed,string $baselineHash):array
     {
+        if(!$confirmed||!preg_match('/^[0-9a-f]{64}$/D',$baselineHash))throw new DomainException('Confirm review of the existing imported records, appointment dates and closure against the displayed baseline.',422);
+        return ['mode'=>'EXISTING_RECORD_ATTESTATION','baseline_hash'=>$baselineHash,'statement'=>'I have checked the existing imported records, appointment dates and closure.'];
+    }
+    private function assertAttestedBaseline(array $case,?array $attestation):void
+    {
+        if($attestation!==null&&!hash_equals($case['baseline_hash'],$attestation['baseline_hash']))throw new DomainException('The reviewed historical baseline changed. Reload before confirming.',409);
+    }
+    private function event(array $after,string $action,string $stage,string $actor,?array $before,string $reason,string $evidence,?array $attestation=null):void
+    {
+        $audit=['case'=>$after,'active_context'=>ArpaAdministrativePolicy::auditContext(Auth::activeContext(false))];
+        // The evidence column records the explicit attestation, not a fabricated document reference.
+        if($attestation!==null)$audit['existing_record_attestation']=$attestation;
         $this->pdo->prepare('INSERT INTO '.self::EVENT_TABLE.'(approval_case_id,action,stage,user_id,previous_status,new_status,reason,evidence_reference,before_json,after_json) VALUES(?,?,?,?,?,?,?,?,?,?)')
-            ->execute([$after['id'],$action,$stage,$actor,$before['workflow_status']??null,$after['workflow_status'],$reason,$evidence,$before===null?null:$this->json($before),$this->json(['case'=>$after,'active_context'=>ArpaAdministrativePolicy::auditContext(Auth::activeContext(false))])]);
+            ->execute([$after['id'],$action,$stage,$actor,$before['workflow_status']??null,$after['workflow_status'],$reason,$evidence,$before===null?null:$this->json($before),$this->json($audit)]);
     }
     private function present(array $case):array{return ['case'=>$case,'baseline'=>json_decode($case['baseline_json'],true,512,JSON_THROW_ON_ERROR),'events'=>$this->rows('SELECT * FROM '.self::EVENT_TABLE.' WHERE approval_case_id=? ORDER BY id',[$case['id']])];}
     private function rows(string $sql,array $params=[]):array{$s=$this->pdo->prepare($sql);$s->execute($params);return $s->fetchAll(PDO::FETCH_ASSOC);}

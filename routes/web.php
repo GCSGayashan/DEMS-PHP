@@ -229,3 +229,4 @@ $router->get('/hr/arpa-appointments/historical-approvals/{id}', [\App\Controller
 $router->post('/hr/arpa-appointments/historical-approvals/{id}/save', [\App\Controllers\ArpaHistoricalApprovalController::class, 'save']);
 $router->post('/hr/arpa-appointments/historical-approvals/{id}/submit', [\App\Controllers\ArpaHistoricalApprovalController::class, 'submit']);
 $router->post('/hr/arpa-appointments/historical-approvals/{id}/review', [\App\Controllers\ArpaHistoricalApprovalController::class, 'review']);
+$router->post('/hr/arpa-appointments/historical-approvals/{id}/attest', [\App\Controllers\ArpaHistoricalApprovalController::class, 'attest']);
