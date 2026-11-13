@@ -36,7 +36,7 @@ final class ArpaHistoricalAppointmentApprovalIsolatedTest
             $this->pdo->exec("INSERT INTO designation VALUES('historical-test-arpa','ARPA_OFFICER');ALTER TABLE arpa_division_appointment ADD UNIQUE KEY uq_test_request(request_id);
                 CREATE TABLE IF NOT EXISTS arpa_appointment_workflow_action(id BIGINT AUTO_INCREMENT PRIMARY KEY,request_id CHAR(36),action VARCHAR(50),stage VARCHAR(50),user_id CHAR(36),action_at DATETIME NULL,record_origin VARCHAR(40),previous_status VARCHAR(50),new_status VARCHAR(50)) ENGINE=InnoDB");
             $this->service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
-            $this->lifecycle();$this->security();$this->returnedAndStale();$this->lineage();$this->dependencies();$this->rollbackAndSchema();$this->concurrency();
+            $this->lifecycle();$this->security();$this->returnedAndStale();$this->lineage();$this->dependencies();$this->rollbackAndSchema();$this->concurrency();$this->currentReviewerHistoricalDates();
             echo 'ArpaHistoricalAppointmentApprovalIsolatedTest: '.$this->assertions.' assertions passed; MySQL '.$server->getAttribute(PDO::ATTR_SERVER_VERSION)."; disposable schema removed.\n";
         }finally{$property->setValue(null,$old);$_SESSION=$session;Auth::forgetRequestCache();if($created)$server->exec('DROP DATABASE `'.$this->name.'`');}
     }
@@ -177,6 +177,49 @@ final class ArpaHistoricalAppointmentApprovalIsolatedTest
     {
         $pdo=self::connect($argv[2]);(new ReflectionProperty(Database::class,'pdo'))->setValue(null,$pdo);$test=new self();$test->pdo=$pdo;$test->context($argv[6]);$s=new ArpaHistoricalAppointmentApprovalService($pdo);
         try{if($argv[3]==='register')echo $s->register($argv[4],$test->input(),$argv[6])['case']['id'];elseif($argv[3]==='submit')echo $s->submit($argv[4],(int)$argv[5],$argv[6])['case']['workflow_status'];else echo $s->review($argv[4],'APPROVE',(int)$argv[5],$argv[6],'Synthetic concurrent review','Synthetic evidence')['case']['workflow_status'];}catch(DomainException){echo 'BLOCKED';}
+    }
+    private function currentReviewerHistoricalDates():void
+    {
+        // This is fixture-only: model a reviewer whose own placement and authority
+        // started long after the target appointment. Neither is historical authority.
+        $this->pdo->exec('ALTER TABLE system_user ADD officer_id CHAR(36) NULL');
+        $reviewer=$this->uuid();$today=date('Y-m-d');
+        $this->pdo->prepare("INSERT INTO officer(id,dad_number,name_with_initials,arpa_service_permanency,primary_designation_id) VALUES(?,'UAT-REVIEWER','Current reviewer','PERMANENT_IN_SERVICE','historical-test-arpa')")->execute([$reviewer]);
+        $this->pdo->prepare("INSERT INTO officer_office_assignment VALUES(?,?,'1b000000-0000-4000-8000-000000000001',1,'APPROVED',?,NULL)")->execute([$this->uuid(),$reviewer,$today]);
+        $this->pdo->prepare('UPDATE system_user SET officer_id=? WHERE id=?')->execute([$reviewer,self::actor(5)]);
+        foreach(['user_account_role','user_account_scope'] as $table)$this->pdo->prepare('UPDATE '.$table.' SET effective_from=? WHERE user_id=?')->execute([$today,self::actor(5)]);
+        $this->same(true,$today>'2025-01-01','reviewer placement does not cover the historical or boundary date');
+
+        foreach(['2020-01-01','2025-01-01'] as $from){
+            $s=$this->source('PERMANENT',null,$from);$this->context();$before=$this->operational();
+            $case=$this->service->register($s['correction'],$this->input(),self::OWNER);
+            $case=$this->service->submit($case['case']['id'],0,self::OWNER);$case=$this->advance($case,4,'VERIFY');
+            $this->context(self::actor(2));
+            $this->fails(fn()=>$this->service->review($case['case']['id'],'APPROVE',(int)$case['case']['version'],self::actor(2),'Review','Evidence'),'historical date never authorizes an unrelated ASC',403);
+            $this->context(self::actor(5));
+            $this->same(true,\App\Core\ScopeService::canAccessArpaStage(self::actor(5),'ASC',self::ASC,$from),'compatibility authorization uses current context, not the business date');
+            $case=$this->service->review($case['case']['id'],'APPROVE',(int)$case['case']['version'],self::actor(5),'Current authorized reviewer confirms historical evidence','Synthetic source letter');
+            $this->same('ASC_APPROVED',$case['case']['workflow_status'],'current reviewer can approve Permanent history starting '.$from);
+            foreach([[6,'VERIFY'],[7,'APPROVE'],[8,'VERIFY'],[9,'APPROVE']] as [$actor,$action])$case=$this->advance($case,$actor,$action);
+            $this->same('NATIONAL_APPROVED',$case['case']['workflow_status'],'current-date authorization preserves the entire historical approval lifecycle');
+            $this->same($before,$this->operational(),'historical review cannot rewrite canonical data or legacy evidence');
+            $events=array_values(array_filter($case['events'],fn(array $e):bool=>$e['stage']==='ASC'&&$e['action']==='APPROVE'));
+            $this->same(self::actor(5),$events[0]['user_id'],'existing audit identifies the actual current approver');
+            $this->same($today,substr($events[0]['action_at'],0,10),'historical review records the actual action date');
+        }
+
+        // Do not manufacture a PERMANENT exception to the native data baseline.
+        $this->fails(fn()=>\App\Services\ArpaAppointmentRules::assertNativeEffectiveDate('2020-01-01'),'native pre-2025 minimum remains enforced');
+        \App\Services\ArpaAppointmentRules::assertNativeEffectiveDate('2025-01-01');
+        $this->same('2025-01-01',\App\Services\ArpaAppointmentRules::NATIVE_HISTORY_BASELINE_DATE,'native boundary remains unchanged');
+        foreach(['ACTING','DUTY_COVERING','ATTEND_TO_DUTY'] as $type){
+            $s=$this->source($type);$this->context();$case=$this->service->register($s['correction'],$this->input(),self::OWNER);
+            $this->fails(fn()=>$this->service->submit($case['case']['id'],0,self::OWNER),'historical '.$type.' still requires its Permanent foundation');
+        }
+        $s=$this->source();$this->source('PERMANENT',null,'2021-01-01',null,$s['division']);$this->context();
+        $case=$this->service->register($s['correction'],$this->input(),self::OWNER);
+        $this->fails(fn()=>$this->service->submit($case['case']['id'],0,self::OWNER),'current reviewer authorization does not bypass a genuine canonical overlap');
+        $this->same('DRAFT',$this->row(self::CASES,$case['case']['id'])['workflow_status'],'blocked overlap advances no workflow stage');
     }
     private function source(string $type='PERMANENT',?string $officer=null,string $from='2020-01-01',?string $to=null,?string $division=null):array
     {
