@@ -9,17 +9,17 @@ use Throwable;
 
 final class ArpaHistoricalApprovalController extends Controller
 {
-    private function actor():string
+    private function actor(bool $readOnly=false):string
     {
         Auth::requireLogin(false);$actor=(string)Auth::user()['id'];
         $read=new ArpaHistoricalApprovalReadService(Database::pdo());
-        if(!$read->canUse($actor))throw new DomainException('Historical approval is outside your current Working Context.',403);
+        if(!($readOnly?$read->canRead($actor):$read->canUse($actor)))throw new DomainException('Historical approval is outside your current Working Context.',403);
         if(!$read->available())throw new DomainException('Historical approval is unavailable until its schema is installed.',503);
         return $actor;
     }
     public function show(string $id):void
     {
-        try{$actor=$this->actor();$detail=(new ArpaHistoricalAppointmentApprovalService(Database::pdo()))->interfaceGet($id,$actor);$this->render('arpa_appointments/historical_approval_detail',compact('detail'));}
+        try{$actor=$this->actor(true);$detail=(new ArpaHistoricalAppointmentApprovalService(Database::pdo()))->interfaceGet($id,$actor);$this->render('arpa_appointments/historical_approval_detail',compact('detail'));}
         catch(Throwable $e){$this->failure($e);}
     }
     public function save(string $id):void{$this->mutate($id,'save');}

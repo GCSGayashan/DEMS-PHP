@@ -20,6 +20,10 @@ final class ArpaHistoricalApprovalReadService
         return Auth::isCurrentUser($actor)&&Auth::activeContext(false)!==null&&Auth::can('arpa.appointment.view')
             &&($this->ownerContext()||(new ArpaWorkflowQueuePolicy($this->pdo))->profiles($actor)!==[]);
     }
+    public function canRead(string $actor):bool
+    {
+        return Auth::isCurrentUser($actor)&&(ArpaAdministrativePolicy::isCanonicalSystemAdministrator()||$this->canUse($actor));
+    }
     private function ownerContext():bool
     {
         $c=Auth::activeContext(false);
@@ -29,7 +33,8 @@ final class ArpaHistoricalApprovalReadService
     /** SQL uses the same Working Context scope CTE as the established native queue. */
     public function access(string $actor,string $mode):array
     {
-        if(!in_array($mode,['pending','completed','read'],true)||!$this->canUse($actor))throw new DomainException('Historical approval access is not authorized.',403);
+        if(!in_array($mode,['pending','completed','read'],true)||!($mode==='read'?$this->canRead($actor):$this->canUse($actor)))throw new DomainException('Historical approval access is not authorized.',403);
+        if($mode==='read'&&ArpaAdministrativePolicy::isCanonicalSystemAdministrator())return ['with'=>'','params'=>[],'where'=>'1=1','retirement_ids'=>[]];
         $profiles=(new ArpaWorkflowQueuePolicy($this->pdo))->profiles($actor);$system=ScopeService::scopeProfile($actor)['level']==='SYSTEM';
         $needsScope=!$system&&array_filter($profiles,static fn($p)=>$p['stage']!=='NATIONAL')!==[];
         $with=$needsScope?ScopeService::arpaWorkflowScopeCte($actor):'';$params=$needsScope?ScopeService::arpaWorkflowScopeParams($actor):[];$where=[];
@@ -92,7 +97,7 @@ final class ArpaHistoricalApprovalReadService
     /** Resolve only this request's appointment; ambiguous or inaccessible cases expose no details. */
     public function requestCase(string $appointmentId,string $requestId,string $actor):?array
     {
-        if(!$this->available()||!$this->canUse($actor))return null;
+        if(!$this->available()||!$this->canRead($actor))return null;
         $access=$this->access($actor,'read');
         $s=$this->pdo->prepare($access['with']." SELECT hc.id,hc.active_appointment_id,({$access['where']}) can_read_case
             FROM arpa_appointment_historical_approval_case hc
@@ -110,7 +115,7 @@ final class ArpaHistoricalApprovalReadService
     public function profileRows(array $appointmentIds,string $actor):array
     {
         if($appointmentIds===[]||!Auth::isCurrentUser($actor)||!$this->available())return [];
-        $access=$this->canUse($actor)?$this->access($actor,'read'):['with'=>'','params'=>[],'where'=>'1=0'];
+        $access=$this->canRead($actor)?$this->access($actor,'read'):['with'=>'','params'=>[],'where'=>'1=0'];
         $marks=implode(',',array_fill(0,count($appointmentIds),'?'));
         $sql=$access['with']." SELECT hc.id,hc.appointment_id,hc.workflow_status,hc.created_at,dc.correction_action,dc.correction_reason,dc.evidence_reference,({$access['where']}) can_read_case
             FROM arpa_appointment_historical_approval_case hc JOIN arpa_appointment_data_correction dc ON dc.id=hc.source_correction_id

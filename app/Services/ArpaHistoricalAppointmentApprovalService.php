@@ -342,7 +342,7 @@ final class ArpaHistoricalAppointmentApprovalService
     }
     private function permission(string $actor,string $permission,string $stage,string $asc):void
     {
-        $this->actor($actor);if(!Auth::can($permission)||!ScopeService::canAccessCurrentArpaStage($actor,$stage,$asc))throw new DomainException('Historical approval is outside your current permission or geographic scope.',403);
+        $this->actor($actor);if(ArpaAdministrativePolicy::isCanonicalSystemAdministrator()||!Auth::can($permission)||!ScopeService::canAccessCurrentArpaStage($actor,$stage,$asc))throw new DomainException('Historical approval is outside your current permission or geographic scope.',403);
     }
     private function owner(string $actor,string $asc):void
     {
@@ -358,6 +358,7 @@ final class ArpaHistoricalAppointmentApprovalService
     }
     private function reader(array $case,string $actor):void
     {
+        if(ArpaAdministrativePolicy::isCanonicalSystemAdministrator())return;
         try{$this->owner($actor,$case['asc_location_id']);return;}catch(DomainException){}
         try{$this->reviewProfile($case,$actor);return;}catch(DomainException){}
         foreach((new ArpaWorkflowQueuePolicy($this->pdo))->profiles($actor) as $profile){
