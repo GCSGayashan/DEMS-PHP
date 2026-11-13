@@ -6,6 +6,7 @@ $case=$detail['case']??null;
 $baseline=$detail['baseline']??null;
 $historicalStatus=$case['workflow_status']??'Unavailable';
 $actions=$detail['actions']??[];
+$nextAction=$detail['next_action']??null;
 $events=$detail['events']??[];
 $emptyProgress=array_fill_keys(['ASC','DISTRICT','NATIONAL'],['VERIFY'=>null,'APPROVE'=>null]);
 $progress=$emptyProgress;
@@ -30,6 +31,15 @@ foreach($events as $event){
 <p class="text-muted"><?= e($historicalPanel['message']??'Historical approval details are unavailable in your current Working Context.') ?></p>
 <?php else: ?>
 <p class="small text-muted">This case covers the existing appointment and its recorded closure together.</p>
+<?php if($nextAction!==null): ?>
+<div class="border-top border-bottom py-3 mb-3" data-historical-next-action><h3 class="h6">Next Workflow Action</h3>
+<dl class="row mb-0"><dt class="col-sm-5">Current Historical Status</dt><dd class="col-sm-7"><?= e($historicalStatus) ?></dd>
+<dt class="col-sm-5">Next Action</dt><dd class="col-sm-7"><?= e($nextAction['label']) ?></dd>
+<dt class="col-sm-5">Responsible Stage</dt><dd class="col-sm-7"><?= e($nextAction['stage']??'None') ?></dd>
+<dt class="col-sm-5">Responsible Role</dt><dd class="col-sm-7"><?= e($nextAction['role']??'None') ?></dd>
+<dt class="col-sm-5">Current User</dt><dd class="col-sm-7"><?= $nextAction['action']===null?'No further workflow action is available.':(!$administrativelyDeleted&&!$detail['source_stale']&&$nextAction['authorized']?'Authorized to perform this action.':'Not authorized to perform this action in the current case / Working Context.') ?></dd>
+</dl></div>
+<?php endif; ?>
 <p class="small text-muted">Current review cycle</p><ul class="list-unstyled">
 <?php foreach($progress as $stage=>$decisions): ?>
 <li class="mb-2" data-historical-stage="<?= e($stage) ?>"><strong><?= e($stage) ?> review:</strong>
@@ -48,8 +58,8 @@ foreach($events as $event){
 <div class="form-check mb-3"><input class="form-check-input" id="historical-confirm-records" type="checkbox" name="confirm_records" value="1" required><label class="form-check-label" for="historical-confirm-records">I have checked the existing imported records, appointment dates and closure.</label></div>
 <?php if(!empty($actions['final'])): ?><div class="form-check mb-3"><input class="form-check-input" id="historical-confirm-final" type="checkbox" name="confirm_final" value="1" required><label class="form-check-label" for="historical-confirm-final">I confirm final National approval of this existing appointment and closure.</label></div><?php endif; ?>
 <div class="d-flex flex-wrap gap-2">
-<?php if(!empty($actions['submit'])): ?><button class="btn btn-primary" name="action" value="SUBMIT">Submit Historical Appointment</button><?php endif; ?>
-<?php if(!empty($actions['primary'])): ?><button class="btn btn-primary" name="action" value="<?= e($actions['primary']) ?>"><?= e(ucfirst(strtolower($actions['primary']))) ?> Historical Appointment</button><?php endif; ?>
+<?php if(!empty($actions['submit'])): ?><button class="btn btn-primary" name="action" value="SUBMIT"><?= e($nextAction['label']??'Submit Historical Appointment') ?></button><?php endif; ?>
+<?php if(!empty($actions['primary'])): ?><button class="btn btn-primary" name="action" value="<?= e($actions['primary']) ?>"><?= e($nextAction['label']??ucfirst(strtolower($actions['primary'])).' Historical Appointment') ?></button><?php endif; ?>
 <?php if(!empty($actions['return'])): ?><button class="btn btn-outline-warning" name="action" value="RETURN_FOR_CORRECTION">Return for Correction</button><?php endif; ?>
 <?php if(!empty($actions['reject'])): ?><button class="btn btn-outline-danger" name="action" value="REJECT">Reject Historical Appointment</button><?php endif; ?>
 </div></form>

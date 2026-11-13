@@ -20,6 +20,13 @@ final class ArpaWorkflowQueuePolicy
 
     public function __construct(private readonly PDO $pdo) {}
 
+    /** Presentation metadata only; permission and scope checks still use profiles(). */
+    public static function reviewStep(string $status):?array
+    {
+        foreach(self::PROFILES as $permission=>$profile)if($profile['status']===$status)return $profile+['permission'=>$permission];
+        return null;
+    }
+
     /** @return array<int,array<string,string>> */
     public function profiles(string $userId): array
     {

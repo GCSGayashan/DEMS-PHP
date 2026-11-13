@@ -147,12 +147,31 @@ final class ArpaHistoricalAppointmentApprovalService
             $actions['final']=$actions['primary']==='APPROVE'&&$case['workflow_status']==='NATIONAL_VERIFIED';
         }catch(DomainException){}
         if($editable&&$r['source_stale']&&$this->canRetireStaleDraft($case,$actorId))$actions['reject']=true;
-        $r['actions']=$actions;$a=($r['current_baseline']??$r['baseline'])['appointment'];
+        $r['actions']=$actions;$r['next_action']=$this->nextAction($case['workflow_status'],$actions);$a=($r['current_baseline']??$r['baseline'])['appointment'];
         $d=$this->one("SELECT CONCAT(COALESCE(o.dad_number,''),' - ',COALESCE(o.name_with_initials,'')) officer,al.name_en asc_name,arpa.name_en division_name FROM officer o JOIN location al ON al.id=? JOIN location arpa ON arpa.id=? WHERE o.id=?",[$case['asc_location_id'],$a['arpa_division_location_id'],$case['officer_id']]);
         $to=($r['current_baseline']??$r['baseline'])['closures'][0]['effective_to']??null;
         $actors=array_values(array_unique(array_column($r['events'],'user_id')));$names=[];
         if($actors!==[])foreach($this->rows('SELECT id,COALESCE(NULLIF(display_name,\'\'),username) name FROM system_user WHERE id IN('.implode(',',array_fill(0,count($actors),'?')).')',$actors) as $actor)$names[$actor['id']]=$actor['name'];
         $r['display']=['officer'=>$d['officer'],'asc'=>$d['asc_name'],'division'=>$d['division_name'],'actors'=>$names,'operational_status'=>$to!==null&&$to<date('Y-m-d')?'Ended':($a['effective_from']>date('Y-m-d')?'Scheduled':'Current / Open')];return $r;
+    }
+
+    private function nextAction(string $status,array $actions):array
+    {
+        $next=['action'=>null,'stage'=>null,'role'=>null,'label'=>'No next workflow action is available.','authorized'=>false];
+        if(in_array($status,['DRAFT','RETURNED'],true)){
+            ArpaAppointmentRules::transition($status==='DRAFT'?'CREATED':$status,'SUBMIT','CREATOR');
+            return ['action'=>'SUBMIT','stage'=>'ASC','role'=>'Assigned ASC Subject Officer','label'=>($status==='RETURNED'?'Resubmit':'Submit').' Historical Appointment','authorized'=>$actions['submit']];
+        }
+        $step=ArpaWorkflowQueuePolicy::reviewStep($status);
+        if($step!==null){
+            ArpaAppointmentRules::transition($status,$step['action'],$step['stage']);
+            $stage=$step['stage']==='ASC'?'ASC':ucfirst(strtolower($step['stage']));
+            return ['action'=>$step['action'],'stage'=>$step['stage'],'role'=>$stage.($step['action']==='VERIFY'?' Subject Officer':' Administrator'),
+                'label'=>$stage.' '.ucfirst(strtolower($step['action'])).' Historical Appointment','authorized'=>$actions['primary']===$step['action']];
+        }
+        if($status==='NATIONAL_APPROVED')$next['label']='Historical Approval Completed';
+        elseif($status==='REJECTED')$next['label']='Historical Approval Rejected. No further workflow action.';
+        return $next;
     }
 
     /** Explicit hash acknowledgement permits a fresh baseline only in DRAFT/RETURNED; no approval is carried forward. */

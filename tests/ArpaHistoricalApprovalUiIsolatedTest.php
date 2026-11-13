@@ -33,7 +33,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $this->schema();$this->requestSchema();$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
             foreach($this->cases as $i=>&$s){$this->context(1);$s['case']=$service->register($s['correction'],['reason'=>'Synthetic UI baseline','evidence_reference'=>'Synthetic letter <script>alert(1)</script>'],self::actor(1));if($i===0||$i===8)continue;$s['case']=$service->submit($s['case']['case']['id'],0,self::actor(1));foreach([[4,'VERIFY'],[5,'APPROVE'],[6,'VERIFY'],[7,'APPROVE'],[8,'VERIFY']] as $n=>[$actor,$action]){if($n>=$i-1)break;$this->context($actor);$s['case']=$service->review($s['case']['case']['id'],$action,(int)$s['case']['case']['version'],self::actor($actor),'Synthetic stage review','Synthetic evidence');}}
             unset($s);$this->context(1);$sourceState=$this->call($this->fixture,'operational');
-            $this->queues();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->missingSchema();
+            $this->nextActionDisplay();$this->queues();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->missingSchema();
             $this->embeddedRequest();
             $this->requestCaseSelection();$this->stageHistoryDisplay();
             $this->same($sourceState,$this->call($this->fixture,'operational'),'all routed UI actions leave appointments, requests, closures, original workflows, provenance and corrections unchanged');
@@ -66,6 +66,54 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             CREATE TABLE officer_class(id CHAR(36) PRIMARY KEY,name_en VARCHAR(255)) ENGINE=InnoDB;
             CREATE TABLE officer_status(id CHAR(36) PRIMARY KEY,name_en VARCHAR(255)) ENGINE=InnoDB;
             CREATE TABLE arpa_appointment_stage_review(id CHAR(36),entity_type VARCHAR(30),request_id CHAR(36),review_stage VARCHAR(30),updated_by CHAR(36)) ENGINE=InnoDB;");
+    }
+    private function nextActionDisplay():void
+    {
+        $service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
+        $render=static function(array $detail):string{
+            $request=['officer_number'=>'UAT','officer_name'=>'Synthetic Officer'];$status='ASC_APPROVED';$administrativelyDeleted=false;$historicalPanel=['detail'=>$detail];
+            ob_start();try{require BASE_PATH.'/app/Views/arpa_appointments/historical_request_panel.php';return (string)ob_get_contents();}finally{ob_end_clean();}
+        };
+        $steps=[
+            [0,1,'SUBMIT','ASC','Submit Historical Appointment','Assigned ASC Subject Officer'],
+            [1,4,'VERIFY','ASC','ASC Verify Historical Appointment','ASC Subject Officer'],
+            [2,5,'APPROVE','ASC','ASC Approve Historical Appointment','ASC Administrator'],
+            [3,6,'VERIFY','DISTRICT','District Verify Historical Appointment','District Subject Officer'],
+            [4,7,'APPROVE','DISTRICT','District Approve Historical Appointment','District Administrator'],
+            [5,8,'VERIFY','NATIONAL','National Verify Historical Appointment','National Subject Officer'],
+            [6,9,'APPROVE','NATIONAL','National Approve Historical Appointment','National Administrator'],
+        ];
+        foreach($steps as [$index,$actor,$action,$stage,$label,$role]){
+            $this->context($actor);$detail=$service->interfaceGet($this->cases[$index]['case']['case']['id'],self::actor($actor));$next=$detail['next_action'];
+            foreach(['action'=>$action,'stage'=>$stage,'label'=>$label,'role'=>$role,'authorized'=>true] as $key=>$expected)$this->same($expected,$next[$key],'next '.$key.' for '.$detail['case']['workflow_status']);
+            $html=$render($detail);foreach(['Next Workflow Action',$detail['case']['workflow_status'],$label,$role,'Authorized to perform this action.','value="'.$action.'">'.$label.'</button>'] as $text)$this->same(true,str_contains($html,$text),'authorized panel renders '.$text);
+        }
+        // The original imported status is deliberately ASC_APPROVED, even when the historical case is Draft.
+        $this->context(1);$id=$this->cases[0]['case']['case']['id'];$draft=$service->interfaceGet($id,self::actor(1));
+        $this->same('SUBMIT',$draft['next_action']['action'],'original imported approval cannot override historical Draft next action');
+        $this->context(4,'ASC_ADMIN');$detail=$service->interfaceGet($this->cases[2]['case']['case']['id'],self::actor(4));
+        $this->same('ASC Approve Historical Appointment',$detail['next_action']['label'],'maker-checker does not conceal the responsible next stage');
+        $this->same(false,$detail['next_action']['authorized'],'same verifier cannot approve');$html=$render($detail);
+        $this->same(true,str_contains($html,'Not authorized to perform this action'),'restricted current user is identified');$this->same(false,str_contains($html,'value="APPROVE"'),'no unauthorized approval button');
+        [$status,$html]=$this->route('GET','/hr/arpa-appointments/requests/division/'.$this->cases[1]['request'],[],11);
+        $this->same(200,$status,'viewer retains original request visibility');$this->same(false,str_contains($html,'data-historical-next-action'),'inaccessible historical case exposes no next-action information');
+        $this->context(1);$this->pdo->beginTransaction();
+        try{
+            $this->pdo->prepare('UPDATE arpa_division_appointment_request SET version=version+1 WHERE id=?')->execute([$this->cases[0]['request']]);
+            $stale=$service->interfaceGet($id,self::actor(1));$this->same(false,$stale['next_action']['authorized'],'stale baseline blocks next action');
+            $this->same(false,str_contains($render($stale),'value="SUBMIT"'),'stale case has no submit button');
+        }finally{$this->pdo->rollBack();}
+        $this->pdo->beginTransaction();
+        try{
+            foreach(['RETURNED'=>['Resubmit Historical Appointment','SUBMIT',true],'NATIONAL_APPROVED'=>['Historical Approval Completed',null,false],'REJECTED'=>['Historical Approval Rejected. No further workflow action.',null,false]] as $status=>[$label,$action,$authorized]){
+                $this->pdo->prepare('UPDATE arpa_appointment_historical_approval_case SET workflow_status=? WHERE id=?')->execute([$status,$id]);
+                $detail=$service->interfaceGet($id,self::actor(1));$next=$detail['next_action'];
+                $this->same($label,$next['label'],'correct existing state label for '.$status);$this->same($action,$next['action'],'no invented transition for '.$status);$this->same($authorized,$next['authorized'],'authorization for '.$status);
+                $html=$render($detail);$this->same(true,str_contains($html,$label),'state label displayed for '.$status);
+                $this->same($authorized,str_contains($html,'value="SUBMIT"'),'submit control follows existing rules for '.$status);
+                if($action===null)$this->same(false,str_contains($html,'/attest'),'terminal state has no action form');
+            }
+        }finally{$this->pdo->rollBack();$this->context(1);}
     }
     private function embeddedRequest():void
     {

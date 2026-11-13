@@ -60,6 +60,7 @@ final class ArpaHistoricalSystemAdministratorReadOnlyIsolatedTest
         foreach(['/hr/arpa-appointments/requests/division/'.$source['request'],$base] as $url){
             [$status,$html]=$this->route('GET',$url);$this->same(200,$status,'canonical administrator can open '.$url);
             foreach(['DRAFT','2020-01-01','2024-12-31','REGISTER'] as $text)$this->same(true,str_contains($html,$text),'read-only page displays '.$text);
+            if(str_contains($url,'/requests/division/'))foreach(['Next Workflow Action','Submit Historical Appointment','Assigned ASC Subject Officer','Not authorized to perform this action'] as $text)$this->same(true,str_contains($html,$text),'administrator sees read-only next-action information: '.$text);
             foreach([$base.'/attest','name="expected_version"','value="VERIFY"','value="APPROVE"','value="REJECT"','value="RETURN_FOR_CORRECTION"',$base.'/save',$base.'/submit'] as $write)$this->same(false,str_contains($html,$write),'no historical write control '.$write);
         }
         foreach(['save'=>['expected_source_hash'=>$case['baseline_hash'],'reason'=>'Attempt','evidence_reference'=>'Attempt'],
@@ -81,7 +82,9 @@ final class ArpaHistoricalSystemAdministratorReadOnlyIsolatedTest
             $this->pdo->exec("INSERT IGNORE INTO application_role_permission SELECT 'release-system-role',id FROM application_permission WHERE permission_key LIKE 'arpa.appointment.%'");Auth::forgetRequestCache();
             foreach(['DRAFT','SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED','NATIONAL_APPROVED','RETURNED','REJECTED'] as $status){
                 $this->pdo->prepare('UPDATE arpa_appointment_historical_approval_case SET workflow_status=? WHERE id=?')->execute([$status,$id]);
-                $this->same(['edit'=>false,'submit'=>false,'primary'=>null,'return'=>false,'reject'=>false,'final'=>false],$service->interfaceGet($id,self::ADMIN)['actions'],'all controls remain read-only at '.$status);
+                $detail=$service->interfaceGet($id,self::ADMIN);
+                $this->same(['edit'=>false,'submit'=>false,'primary'=>null,'return'=>false,'reject'=>false,'final'=>false],$detail['actions'],'all controls remain read-only at '.$status);
+                $this->same(false,$detail['next_action']['authorized'],'next action never grants administrator write authority at '.$status);
                 foreach(['VERIFY','APPROVE','RETURN_FOR_CORRECTION','REJECT'] as $action){
                     $this->denied(fn()=>$service->review($id,$action,0,self::ADMIN,'Attempt','Attempt'),$status.' '.$action);
                     $this->denied(fn()=>$service->reviewExistingRecordAttestation($id,$action,0,self::ADMIN,'Attempt',true,$hash),$status.' attested '.$action);
