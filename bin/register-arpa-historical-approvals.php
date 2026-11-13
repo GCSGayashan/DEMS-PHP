@@ -4,7 +4,7 @@ if(PHP_SAPI!=='cli'){http_response_code(404);exit;}
 
 // OS/DB administrators invoke this trusted CLI; no web session or reviewer is impersonated.
 $flags=['help','dry-run','apply'];
-$values=['operator','role-assignment','scope-assignment','manifest-hash','confirm','reason','evidence-reference','database','server-uuid'];
+$values=['operator','role-assignment','scope-assignment','manifest-hash','confirm','reason','evidence-reference','database','server-uuid','request-id','appointment-id'];
 $options=[];
 try{
     foreach(array_slice($argv,1) as $argument){
@@ -16,10 +16,12 @@ try{
     }
     if(isset($options['help'])){
         echo "Dry-run (default; SELECT only):\n  php bin/register-arpa-historical-approvals.php --operator=<canonical-admin-id> --role-assignment=<active-system-role-assignment-id>\n\n";
+        echo "Exact target (optional; keep both options on dry-run and apply):\n  Add --request-id=<full-request-uuid> --appointment-id=<full-canonical-appointment-uuid>\n  Includes eligible pre-2025 ASC_APPROVED imported Permanent appointments with a recorded canonical closure; default backlog is unchanged.\n\n";
         echo "Apply the reviewed manifest (DRAFT only):\n  Add --apply --database=<verified-db> --server-uuid=<verified-server-uuid> --manifest-hash=<dry-run-hash> --confirm=\"<exact dry-run confirmation>\" --reason=\"<reason>\" --evidence-reference=\"<evidence>\"\n";
         exit(0);
     }
     if(isset($options['apply'],$options['dry-run']))throw new DomainException('--apply and --dry-run are mutually exclusive.');
+    if(isset($options['request-id'])!==isset($options['appointment-id']))throw new DomainException('Supply both --request-id and --appointment-id for targeted registration.');
     foreach(['operator','role-assignment'] as $required)if(!isset($options[$required]))throw new DomainException('Supply --operator and --role-assignment from the authorized canonical administrator.');
     if(isset($options['apply']))foreach(['database','server-uuid','manifest-hash','confirm','reason','evidence-reference'] as $required)if(!isset($options[$required]))throw new DomainException('Apply requires target identity, reviewed manifest, explicit confirmation, reason and evidence reference.');
     require dirname(__DIR__).'/bootstrap.php';
@@ -29,10 +31,11 @@ try{
     (new \App\Services\UserContextService($pdo))->select($actor,$options['role-assignment'],$options['scope-assignment']??null);
     \App\Core\Auth::forgetRequestCache();
     $service=new \App\Services\ArpaHistoricalApprovalRegistrationService($pdo);
-    $manifest=$service->manifest($actor);
+    $requestId=$options['request-id']??null;$appointmentId=$options['appointment-id']??null;
+    $manifest=$service->manifest($actor,false,$requestId,$appointmentId);
     if(isset($options['apply'])){
         if(!hash_equals($manifest['database']['database_name'],$options['database'])||!hash_equals($manifest['database']['server_uuid'],$options['server-uuid']))throw new DomainException('Connected database/server differs from the explicitly confirmed target. No writes were attempted.');
-        $result=$service->apply($actor,$options['manifest-hash'],$options['confirm'],['reason'=>$options['reason'],'evidence_reference'=>$options['evidence-reference']]);
+        $result=$service->apply($actor,$options['manifest-hash'],$options['confirm'],['reason'=>$options['reason'],'evidence_reference'=>$options['evidence-reference']],$requestId,$appointmentId);
     }else $result=['mode'=>'DRY_RUN']+$manifest;
     echo json_encode($result,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)."\n";
 }catch(Throwable $e){

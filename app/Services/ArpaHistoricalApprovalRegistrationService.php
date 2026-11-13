@@ -11,9 +11,10 @@ final class ArpaHistoricalApprovalRegistrationService
 {
     public function __construct(private readonly PDO $pdo){}
 
-    public function manifest(string $actorId,bool $lock=false):array
+    public function manifest(string $actorId,bool $lock=false,?string $requestId=null,?string $appointmentId=null):array
     {
         ArpaHistoricalAppointmentApprovalService::assertCliRegistrationOperator($actorId);
+        $target=$this->target($requestId,$appointmentId);
         if($lock&&!$this->pdo->inTransaction())throw new DomainException('Registration locks require a transaction.',409);
         if(!(new ArpaHistoricalApprovalReadService($this->pdo))->available()||!ArpaAppointmentCorrectionDecision::lineageAvailable($this->pdo)){
             throw new DomainException('Complete correction-lineage and migration 067 schemas must be verified before registration. No migration is run by this command.',503);
@@ -22,6 +23,10 @@ final class ArpaHistoricalApprovalRegistrationService
         $triggers=$this->pdo->query("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND event_object_table='arpa_appointment_historical_approval_event' AND trigger_name IN('trg_hist_approval_event_no_update','trg_hist_approval_event_no_delete') AND action_timing='BEFORE' AND event_manipulation IN('UPDATE','DELETE')")->fetchColumn();
         if((int)$tables!==2||(int)$triggers!==2)throw new DomainException('Transactional historical case/event tables and append-only triggers are required.',503);
         $identity=$this->pdo->query('SELECT DATABASE() database_name,@@server_uuid server_uuid,@@port server_port,@@version mysql_version')->fetch(PDO::FETCH_ASSOC);
+        // Exact targeting is opt-in; never widen the default CREATED backlog.
+        $where=$target===null
+            ? "a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=0 AND a.legacy_exception=1 AND a.approved_at IS NULL AND (r.workflow_status='CREATED' OR r.id IS NULL)"
+            : 'a.request_id=? AND a.id=?';
         $sql="SELECT a.id appointment_id,a.request_id,a.officer_id,a.asc_location_id,a.arpa_division_location_id,
             a.appointment_type,a.effective_from,r.workflow_status original_workflow_status,
             o.dad_number officer_number,o.name_with_initials officer_name,al.dad_number asc_number,al.name_en asc_name,
@@ -29,25 +34,28 @@ final class ArpaHistoricalApprovalRegistrationService
             FROM arpa_division_appointment a LEFT JOIN arpa_division_appointment_request r ON r.id=a.request_id
             LEFT JOIN officer o ON o.id=a.officer_id LEFT JOIN location al ON al.id=a.asc_location_id
             LEFT JOIN location ar ON ar.id=a.arpa_division_location_id
-            WHERE a.record_origin='LEGACY_IMPORT' AND a.legacy_history_only=0 AND a.legacy_exception=1
-              AND a.approved_at IS NULL AND (r.workflow_status='CREATED' OR r.id IS NULL)
+            WHERE {$where}
             ORDER BY a.officer_id,a.arpa_division_location_id,a.id";
+        $candidates=$this->rows($sql,$target===null?[]:[$target['request_id'],$target['appointment_id']]);
+        if($target!==null&&count($candidates)!==1)throw new DomainException('The exact request/appointment pair was not found. Nothing was registered.',409);
         $rows=[];$summary=['discovered'=>0,'ELIGIBLE'=>0,'ALREADY_REGISTERED'=>0,'MANUAL_REVIEW'=>0,'by_type'=>[]];
-        foreach($this->rows($sql) as $row){
-            $result=$this->assess($row,$actorId,$lock);$rows[]=$result;$summary['discovered']++;$summary[$result['classification']]++;
+        foreach($candidates as $row){
+            $result=$this->assess($row,$actorId,$lock,$target!==null);$rows[]=$result;$summary['discovered']++;$summary[$result['classification']]++;
             $type=$row['appointment_type'];$summary['by_type'][$type]=($summary['by_type'][$type]??0)+1;
         }
         ksort($summary['by_type']);
         $report=['database'=>$identity,'operator_id'=>$actorId,'operator_context'=>ArpaAdministrativePolicy::auditContext(\App\Core\Auth::activeContext(false)),'summary'=>$summary,'candidates'=>$rows];
+        if($target!==null)$report['target']=$target; // Confirmation cannot be reused for another target or the backlog.
         $report['manifest_hash']=hash('sha256',$this->json($report));
         $report['confirmation']='REGISTER HISTORICAL DRAFTS '.$identity['database_name'].' '.$report['manifest_hash'];
         return $report;
     }
 
     /** Entire reviewed batch rolls back on a stale source or any case/event insertion failure. */
-    public function apply(string $actorId,string $expectedHash,string $confirmation,array $input):array
+    public function apply(string $actorId,string $expectedHash,string $confirmation,array $input,?string $requestId=null,?string $appointmentId=null):array
     {
         ArpaHistoricalAppointmentApprovalService::assertCliRegistrationOperator($actorId);
+        $this->target($requestId,$appointmentId);
         if(!preg_match('/^[a-f0-9]{64}$/D',$expectedHash))throw new DomainException('Supply the exact dry-run manifest hash.',422);
         foreach(['reason','evidence_reference'] as $field){
             $v=$input[$field]??null;
@@ -57,7 +65,7 @@ final class ArpaHistoricalApprovalRegistrationService
         if($this->pdo->inTransaction())throw new DomainException('CLI batch registration requires its own transaction.',409);
         $this->pdo->exec('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');$this->pdo->beginTransaction();
         try{
-            $report=$this->manifest($actorId,true);
+            $report=$this->manifest($actorId,true,$requestId,$appointmentId);
             if(!hash_equals($expectedHash,$report['manifest_hash'])||!hash_equals($report['confirmation'],$confirmation))throw new DomainException('Manifest or confirmation changed. Review a fresh dry-run; nothing was registered.',409);
             $registered=[];$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
             foreach($report['candidates'] as $row){
@@ -70,7 +78,7 @@ final class ArpaHistoricalApprovalRegistrationService
         }catch(Throwable $e){if($this->pdo->inTransaction())$this->pdo->rollBack();throw $e;}
     }
 
-    private function assess(array $row,string $actorId,bool $lock):array
+    private function assess(array $row,string $actorId,bool $lock,bool $targeted=false):array
     {
         $row+=['effective_to'=>null,'closure_id'=>null,'correction_id'=>null,'correction_action'=>null,'resolution_status'=>null,
             'correction_reason'=>null,'correction_evidence'=>null,'correction_decisions'=>[],'existing_cases'=>[],
@@ -87,8 +95,10 @@ final class ArpaHistoricalApprovalRegistrationService
             foreach($decisions as $decision){$item=array_intersect_key($decision,array_flip(['id','correction_action','resolution_status','supersedes_correction_id','amendment_request_id']));$item['effective_predicate_match']=(bool)$decision['is_effective'];$row['correction_decisions'][]=$item;}
             $r=$this->one('SELECT * FROM arpa_division_appointment_request WHERE id=?'.$suffix,[$a['request_id']]);
             if($a['request_id']!==$row['request_id']||$a['officer_id']!==$row['officer_id']||$a['asc_location_id']!==$row['asc_location_id']||$a['arpa_division_location_id']!==$row['arpa_division_location_id'])throw new DomainException('Candidate identity changed during discovery.',409);
+            $historicalAsc=$targeted&&$r['workflow_status']==='ASC_APPROVED';
             if($a['record_origin']!=='LEGACY_IMPORT'||$a['approved_at']!==null||(int)$a['legacy_history_only']!==0||(int)$a['legacy_exception']!==1
-                ||$r['record_origin']!=='LEGACY_IMPORT'||$r['request_type']!=='APPOINTMENT'||$r['workflow_status']!=='CREATED'||(int)$r['legacy_history_only']!==0||(int)$r['legacy_exception']!==1)throw new DomainException('Source flags or original workflow do not match the historical registration population.',409);
+                ||$r['record_origin']!=='LEGACY_IMPORT'||$r['request_type']!=='APPOINTMENT'||(!$historicalAsc&&$r['workflow_status']!=='CREATED')||(int)$r['legacy_history_only']!==0||(int)$r['legacy_exception']!==1)throw new DomainException('Source flags or original workflow do not match the historical registration population.',409);
+            if($historicalAsc&&($a['appointment_type']!=='PERMANENT'||$a['effective_from']>=ArpaAppointmentRules::NATIVE_HISTORY_BASELINE_DATE))throw new DomainException('Targeted ASC-approved registration is only for imported Permanent appointments starting before 01 January 2025.',409);
             if($r['deleted_at']!==null)throw new DomainException('Source request is soft-deleted or administratively excluded.',409);
             if($this->rows("SELECT id FROM audit_event WHERE target_id=? AND action_key='arpa.appointment.workflow-request.admin-delete'".$suffix,[$r['id']])!==[])throw new DomainException('Source request has administrative exclusion/deletion history; manual review is required.',409);
             if(count($this->rows('SELECT id FROM arpa_division_appointment WHERE request_id=? ORDER BY id'.$suffix,[$r['id']]))!==1)throw new DomainException('The source request has duplicate canonical appointment representations.',409);
@@ -100,6 +110,7 @@ final class ArpaHistoricalApprovalRegistrationService
                 if($l['system_key']!==$type)throw new DomainException('Invalid canonical location type.',409);
             }
             if(count($closures)>1)throw new DomainException('Multiple canonical closures require manual review.',409);
+            if($historicalAsc&&(count($closures)!==1||$row['effective_to']===null))throw new DomainException('Targeted ASC-approved historical registration requires one recorded canonical closure.',409);
             foreach(array_filter([$a['effective_from'],$row['effective_to']]) as $date){$d=\DateTimeImmutable::createFromFormat('!Y-m-d',$date);if(!$d||$d->format('Y-m-d')!==$date)throw new DomainException('Canonical effective dates are invalid.',409);}
             if($row['effective_to']!==null&&$row['effective_to']<$a['effective_from'])throw new DomainException('Canonical closure precedes the appointment.',409);
             $this->lineage($decisions,$a,$lock);
@@ -135,6 +146,13 @@ final class ArpaHistoricalApprovalRegistrationService
             }
             return $row+['classification'=>'ELIGIBLE','reason'=>'Eligible for DRAFT registration only; submission and approval validations remain independent.'];
         }catch(DomainException $e){if(!in_array($e->getCode(),[404,409,422],true))throw $e;return $row+['classification'=>'MANUAL_REVIEW','reason'=>$e->getMessage()];}
+    }
+    /** Both immutable identities are required; never target by name, NIC or a prefix. */
+    private function target(?string $requestId,?string $appointmentId):?array
+    {
+        if($requestId===null&&$appointmentId===null)return null;
+        foreach([$requestId,$appointmentId] as $id)if($id===null||!preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iD',$id))throw new DomainException('Supply both full request and appointment UUIDs for targeted registration.',422);
+        return ['request_id'=>$requestId,'appointment_id'=>$appointmentId];
     }
 
     /** Structural checks complement (and never replace) the shared effective-decision predicate. */
