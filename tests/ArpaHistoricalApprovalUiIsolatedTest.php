@@ -33,7 +33,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $this->schema();$this->requestSchema();$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
             foreach($this->cases as $i=>&$s){$this->context(1);$s['case']=$service->register($s['correction'],['reason'=>'Synthetic UI baseline','evidence_reference'=>'Synthetic letter <script>alert(1)</script>'],self::actor(1));if($i===0||$i===8)continue;$s['case']=$service->submit($s['case']['case']['id'],0,self::actor(1));foreach([[4,'VERIFY'],[5,'APPROVE'],[6,'VERIFY'],[7,'APPROVE'],[8,'VERIFY']] as $n=>[$actor,$action]){if($n>=$i-1)break;$this->context($actor);$s['case']=$service->review($s['case']['case']['id'],$action,(int)$s['case']['case']['version'],self::actor($actor),'Synthetic stage review','Synthetic evidence');}}
             unset($s);$this->context(1);$sourceState=$this->call($this->fixture,'operational');
-            $this->nextActionDisplay();$this->queues();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->missingSchema();
+            $this->nextActionDisplay();$this->queues();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->profilePeriods();$this->missingSchema();
             $this->embeddedRequest();
             $this->requestCaseSelection();$this->stageHistoryDisplay();
             $this->same($sourceState,$this->call($this->fixture,'operational'),'all routed UI actions leave appointments, requests, closures, original workflows, provenance and corrections unchanged');
@@ -355,6 +355,44 @@ final class ArpaHistoricalApprovalUiIsolatedTest
         $line='';foreach(file(BASE_PATH.'/app/Views/officers/show.php') as $l)if(str_starts_with($l,'<?php $renderOperational='))$line=$l;
 $dash='—';$canAdminDateCorrect=false;eval('use App\\Core\\DataTableFormat; '.substr(trim($line),5,-2));ob_start();$renderOperational('Synthetic Profile',$rows,[]);$html=ob_get_clean();foreach(['Original Workflow Status','Historical Approval Status','Operational Appointment Status','Historical Correction Provenance','View Case','National Approved'] as $text)$this->same(true,str_contains($html,$text),'profile renders '.$text);
         $this->context(11);$rows=$this->call($service,'operationalAppointments',$s['officer'],[self::ASC])[0];$this->same(0,(int)$rows[0]['historical_approvals'][0]['can_read_case'],'Viewer can see profile status but cannot open restricted case evidence');
+    }
+    private function profilePeriods():void
+    {
+        $this->context(1);$source=$this->cases[8];$service=new App\Services\OfficerProfileService($this->pdo);
+        $today=(string)$this->pdo->query('SELECT CURRENT_DATE()')->fetchColumn();$date=new DateTimeImmutable($today);$tomorrow=$date->modify('+1 day')->format('Y-m-d');$yesterday=$date->modify('-1 day')->format('Y-m-d');
+        $before=$this->call($this->fixture,'operational');$this->pdo->beginTransaction();
+        try{
+            $scenarios=[
+                ['imported CREATED open','LEGACY_IMPORT',0,'2024-02-26',null,'CURRENT','Current / Open'],
+                ['imported future','LEGACY_IMPORT',0,$tomorrow,null,'FUTURE','Scheduled'],
+                ['imported closed','LEGACY_IMPORT',0,'2024-02-26',$yesterday,'PREVIOUS','Ended'],
+                ['imported history-only','LEGACY_IMPORT',1,'2024-02-26',null,'PREVIOUS','Historical Exception'],
+                ['imported future history-only','LEGACY_IMPORT',1,$tomorrow,null,'PREVIOUS','Historical Exception'],
+                ['native current','NATIVE',0,'2024-02-26',null,'CURRENT','Current / Open'],
+                ['native future','NATIVE',0,$tomorrow,null,'FUTURE','Scheduled'],
+                ['native closed','NATIVE',0,'2024-02-26',$yesterday,'PREVIOUS','Ended'],
+                ['closure effective today','LEGACY_IMPORT',0,'2024-02-26',$today,'CURRENT','Current'],
+                ['future closure','LEGACY_IMPORT',0,'2024-02-26',$tomorrow,'CURRENT','Current'],
+            ];
+            foreach($scenarios as [$label,$origin,$historyOnly,$from,$to,$expected,$display]){
+                $status=$origin==='LEGACY_IMPORT'?'CREATED':'ASC_APPROVED';
+                $this->pdo->prepare('DELETE FROM arpa_division_appointment_closure WHERE appointment_id=?')->execute([$source['appointment']]);
+                $this->pdo->prepare('UPDATE arpa_division_appointment SET record_origin=?,legacy_history_only=?,effective_from=?,approved_at=NULL WHERE id=?')->execute([$origin,$historyOnly,$from,$source['appointment']]);
+                $this->pdo->prepare('UPDATE arpa_division_appointment_request SET record_origin=?,workflow_status=?,requested_effective_from=? WHERE id=?')->execute([$origin,$status,$from,$source['request']]);
+                if($to!==null)$this->pdo->prepare("INSERT INTO arpa_division_appointment_closure(id,record_origin,appointment_id,request_id,effective_to,end_reason_id,closure_source,data_correction_id,context_snapshot_json,approval_timestamp_provenance) VALUES(UUID(),'LEGACY_IMPORT',?,?,?,'18000000-0000-4000-8000-000000000001','DATA_ISSUE_CORRECTION',?,'{}','UNAVAILABLE_FROM_LEGACY_SOURCE')")->execute([$source['appointment'],$source['request'],$to,$source['correction']]);
+                $state=$this->call($this->fixture,'operational');[$rows]=$this->call($service,'operationalAppointments',$source['officer'],[self::ASC]);
+                $this->same(1,count($rows),$label.' remains one canonical row');$this->same($source['appointment'],$rows[0]['id'],$label.' preserves identity');$this->same($expected,$rows[0]['profile_period'],$label.' uses authority and operational dates');$this->same($display,$rows[0]['display_status'],$label.' has consistent operational wording');$this->same($status,$rows[0]['workflow_status'],$label.' retains original workflow status');
+                foreach(['CURRENT','FUTURE','PREVIOUS'] as $period)$this->same($period===$expected?1:0,count($this->call($service,'period',$rows,$period)),$label.' belongs only to the correct profile section');
+                $this->same($state,$this->call($this->fixture,'operational'),$label.' viewing performs no source or audit writes');
+            }
+            // Restore the open imported scenario before checking scope under real Working Contexts.
+            $this->pdo->prepare('DELETE FROM arpa_division_appointment_closure WHERE appointment_id=?')->execute([$source['appointment']]);$this->pdo->prepare("UPDATE arpa_division_appointment SET effective_from='2024-02-26' WHERE id=?")->execute([$source['appointment']]);
+            $this->same([],$this->call($service,'operationalAppointments',$source['officer'],[])[0],'empty ASC scope cannot expose appointments');
+            $this->context(2);$otherAsc=(string)Auth::activeContext(false)['location_id'];$this->same([],$this->call($service,'operationalAppointments',$source['officer'],[$otherAsc])[0],'unrelated ASC Working Context cannot expose the appointment');
+            foreach([1,5] as $actor){$this->context($actor);$rows=$this->call($service,'operationalAppointments',$source['officer'],[self::ASC])[0];$this->same('CURRENT',$rows[0]['profile_period'],'authorized ASC role '.$actor.' sees authoritative imported appointment');$this->same('CREATED',$rows[0]['workflow_status'],'authorized ASC role '.$actor.' does not imply approval');}
+            $this->same('CURRENT',$this->call($service,'operationalAppointments',$source['officer'],null)[0][0]['profile_period'],'existing unrestricted-scope behavior remains available');
+        }finally{$this->pdo->rollBack();$this->context(1);}
+        $this->same($before,$this->call($this->fixture,'operational'),'isolated period fixtures leave original appointment, correction and workflow data unchanged');
     }
     private function missingSchema():void
     {
