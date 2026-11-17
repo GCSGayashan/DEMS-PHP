@@ -276,9 +276,7 @@ final class ArpaHistoricalAppointmentApprovalService
         $a=$this->one('SELECT * FROM arpa_division_appointment WHERE id=?'.$suffix,[$c['appointment_id']]);
         $r=$this->one('SELECT * FROM arpa_division_appointment_request WHERE id=?'.$suffix,[$a['request_id']]);
         if($a['officer_id']!==$hint['officer_id']||$a['arpa_division_location_id']!==$hint['arpa_division_location_id'])throw new DomainException('The source identity changed. Retry from the current source.',409);
-        if($r['record_origin']!=='LEGACY_IMPORT'||$a['record_origin']!=='LEGACY_IMPORT'||$r['request_type']!=='APPOINTMENT'||$r['deleted_at']!==null||(int)$a['legacy_history_only']!==0||(int)$r['legacy_history_only']!==0)throw new DomainException('An existing non-deleted authoritative imported appointment is required.',409);
-        foreach(['officer_id','asc_location_id'] as $field)if($c[$field]!==$a[$field]||$r[$field]!==$a[$field])throw new DomainException('Source request, appointment and correction identities do not agree.',409);
-        if($r['arpa_division_location_id']!==$a['arpa_division_location_id']||$r['appointment_type']!==$a['appointment_type']||$c['request_id']!==$r['id']||$c['correction_action']!=='RESOLVE_CANONICAL_ASSIGNMENT'||$c['resolution_status']!=='RESOLVED_BY_CORRECTION')throw new DomainException('An effective canonical-resolution correction matching this appointment is required.',409);
+        $this->assertBaselineSource($c,$a,$r);
         $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'c');
         if($this->rows('SELECT c.id FROM arpa_appointment_data_correction c WHERE c.id=? AND '.$effective.$suffix,[$correctionId])===[])throw new DomainException('The source correction has been superseded.',409);
         $closures=$this->rows('SELECT * FROM arpa_division_appointment_closure WHERE appointment_id=? ORDER BY id'.$suffix,[$a['id']]);
@@ -299,12 +297,90 @@ final class ArpaHistoricalAppointmentApprovalService
         return ['correction'=>$c,'appointment'=>$a,'request'=>$r,'closures'=>$closures,'officer'=>$officer,'related_appointments'=>$related,'related_requests'=>$requests,'correction_history'=>$decisions,'relationships'=>$relationships,'original_workflow'=>$workflow,'source_references'=>$references];
     }
 
+    /** Internal read-side attestation, not case-view or workflow authorization.
+     * The caller must scope the appointment first; no source evidence is returned.
+     */
+    public function hasCurrentApprovedBaseline(string $caseId):bool
+    {
+        $case=$this->caseRow($caseId,false);
+        if($case['workflow_status']!=='NATIONAL_APPROVED')return false;
+        try{$this->current($case,false);return true;}catch(DomainException){return false;}
+    }
+
+    /** @internal Bounded, SELECT-only attestation for already-scoped case IDs.
+     * Caller owns a consistent snapshot. No source evidence or authorization is returned.
+     * Collection queries deliberately reproduce bundle()'s complete ordered evidence;
+     * locked workflow reads/writes still use bundle(), not this read-side adapter.
+     * @return array<string,bool>
+     */
+    public function hasCurrentApprovedBaselines(array $caseIds):array
+    {
+        if(!$this->pdo->inTransaction())throw new DomainException('Batch baseline checks require a consistent caller snapshot.',409);
+        if(count($caseIds)>500)throw new DomainException('Baseline batch exceeds 500 cases.',422);
+        if($caseIds===[])return [];
+        foreach($caseIds as $id)if(!is_string($id)||!preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iD',$id))throw new DomainException('Full case IDs are required.',422);
+        $result=array_fill_keys($caseIds,false);
+        if(!ArpaAppointmentCorrectionDecision::lineageAvailable($this->pdo))return $result;
+        $cases=$this->rows('SELECT * FROM '.self::CASE_TABLE.' WHERE id IN('.implode(',',array_fill(0,count($caseIds),'?')).") AND workflow_status='NATIONAL_APPROVED'",$caseIds);
+        if($cases===[])return $result;
+        $ids=array_values(array_unique(array_column($cases,'source_correction_id')));
+        $effective=ArpaAppointmentCorrectionDecision::effectivePredicate($this->pdo,'c');
+        $seed="WITH baseline_targets AS (
+            SELECT c.id correction_id,a.id appointment_id,a.request_id,a.officer_id,a.asc_location_id,
+                a.arpa_division_location_id,a.appointment_type,a.effective_from,
+                COALESCE((SELECT MAX(cl.effective_to) FROM arpa_division_appointment_closure cl WHERE cl.appointment_id=a.id),'9999-12-31') period_end
+            FROM arpa_appointment_data_correction c JOIN arpa_division_appointment a ON a.id=c.appointment_id
+            JOIN arpa_division_appointment_request r ON r.id=a.request_id
+            WHERE c.id IN(".implode(',',array_fill(0,count($ids),'?')).") AND {$effective}) ";
+        $queries=[
+            'correction'=>"SELECT b.correction_id _baseline_id,c.* FROM baseline_targets b JOIN arpa_appointment_data_correction c ON c.id=b.correction_id ORDER BY b.correction_id",
+            'appointment'=>"SELECT b.correction_id _baseline_id,a.* FROM baseline_targets b JOIN arpa_division_appointment a ON a.id=b.appointment_id ORDER BY b.correction_id",
+            'request'=>"SELECT b.correction_id _baseline_id,r.* FROM baseline_targets b JOIN arpa_division_appointment_request r ON r.id=b.request_id ORDER BY b.correction_id",
+            'closures'=>"SELECT b.correction_id _baseline_id,c.* FROM baseline_targets b JOIN arpa_division_appointment_closure c ON c.appointment_id=b.appointment_id ORDER BY b.correction_id,c.id",
+            'officer'=>"SELECT b.correction_id _baseline_id,o.id,o.arpa_service_permanency FROM baseline_targets b JOIN officer o ON o.id=b.officer_id ORDER BY b.correction_id",
+            'related_appointments'=>"SELECT b.correction_id _baseline_id,a.id,a.request_id,a.officer_id,a.appointment_type,a.asc_location_id,a.arpa_division_location_id,a.effective_from,a.legacy_history_only,a.legacy_exception,c.id closure_id,c.effective_to
+                FROM baseline_targets b JOIN arpa_division_appointment a ON ((a.officer_id=b.officer_id AND a.appointment_type IN(b.appointment_type,'PERMANENT')) OR a.arpa_division_location_id=b.arpa_division_location_id)
+                LEFT JOIN arpa_division_appointment_closure c ON c.appointment_id=a.id
+                WHERE a.effective_from<=b.period_end AND COALESCE(c.effective_to,'9999-12-31')>=b.effective_from ORDER BY b.correction_id,a.id",
+            'related_requests'=>"SELECT b.correction_id _baseline_id,r.id,r.officer_id,r.appointment_type,r.asc_location_id,r.arpa_division_location_id,r.request_type,r.requested_effective_from,r.requested_effective_to,r.workflow_status,r.record_origin,r.legacy_history_only,r.deleted_at,r.version
+                FROM baseline_targets b JOIN arpa_division_appointment_request r ON ((r.officer_id=b.officer_id AND r.appointment_type IN(b.appointment_type,'PERMANENT')) OR r.arpa_division_location_id=b.arpa_division_location_id)
+                WHERE r.requested_effective_from<=b.period_end AND COALESCE(CASE WHEN r.request_type='TRANSFER' THEN NULL ELSE r.requested_effective_to END,'9999-12-31')>=b.effective_from ORDER BY b.correction_id,r.id",
+            'correction_history'=>"SELECT b.correction_id _baseline_id,c.* FROM baseline_targets b JOIN arpa_appointment_data_correction c ON c.appointment_id=b.appointment_id ORDER BY b.correction_id,c.id",
+            'relationships'=>"SELECT b.correction_id _baseline_id,l.* FROM baseline_targets b JOIN location_relationship l ON l.child_location_id IN(b.arpa_division_location_id,b.asc_location_id) AND l.relationship_type IN('ASC_ARPA_DIVISION','DISTRICT_ASC') ORDER BY b.correction_id,l.id",
+            'original_workflow'=>"SELECT b.correction_id _baseline_id,w.* FROM baseline_targets b JOIN arpa_appointment_workflow_action w ON w.request_id=b.request_id ORDER BY b.correction_id,w.id",
+            'source_references'=>"SELECT b.correction_id _baseline_id,s.* FROM baseline_targets b JOIN legacy_arpa_appointment_source_reference s ON s.target_appointment_request_id=b.request_id ORDER BY b.correction_id,s.id",
+        ];
+        $bundles=array_fill_keys($ids,array_fill_keys(array_keys($queries),[]));
+        foreach($queries as $key=>$sql)foreach($this->rows($seed.$sql,$ids) as $row){$id=$row['_baseline_id'];unset($row['_baseline_id']);$bundles[$id][$key][]=$row;}
+        foreach($cases as $case){
+            $b=$bundles[$case['source_correction_id']];
+            try{
+                foreach(['correction','appointment','request','officer'] as $key){if(count($b[$key])!==1)throw new DomainException('Incomplete baseline evidence.',409);$b[$key]=$b[$key][0];}
+                $this->assertBaselineSource($b['correction'],$b['appointment'],$b['request']);
+                if(count($b['closures'])>1)throw new DomainException('Ambiguous canonical closure evidence.',409);
+                $this->assertCurrentBaseline($case,$b);$result[$case['id']]=true;
+            }catch(Throwable){/* Missing, malformed, superseded or stale evidence cannot attest approval. */}
+        }
+        return $result;
+    }
+
+    private function assertBaselineSource(array $c,array $a,array $r):void
+    {
+        if($r['record_origin']!=='LEGACY_IMPORT'||$a['record_origin']!=='LEGACY_IMPORT'||$r['request_type']!=='APPOINTMENT'||$r['deleted_at']!==null||(int)$a['legacy_history_only']!==0||(int)$r['legacy_history_only']!==0)throw new DomainException('An existing non-deleted authoritative imported appointment is required.',409);
+        foreach(['officer_id','asc_location_id'] as $field)if($c[$field]!==$a[$field]||$r[$field]!==$a[$field])throw new DomainException('Source request, appointment and correction identities do not agree.',409);
+        if($r['arpa_division_location_id']!==$a['arpa_division_location_id']||$r['appointment_type']!==$a['appointment_type']||$c['request_id']!==$r['id']||$c['correction_action']!=='RESOLVE_CANONICAL_ASSIGNMENT'||$c['resolution_status']!=='RESOLVED_BY_CORRECTION')throw new DomainException('An effective canonical-resolution correction matching this appointment is required.',409);
+    }
+
     private function current(array $case,bool $lock=true):array
     {
-        $bundle=$this->bundle($case['source_correction_id'],$lock);$this->identity($case,$bundle);
+        $bundle=$this->bundle($case['source_correction_id'],$lock);$this->assertCurrentBaseline($case,$bundle);return $bundle;
+    }
+
+    private function assertCurrentBaseline(array $case,array $bundle):void
+    {
+        $this->identity($case,$bundle);
         $stored=$this->json(json_decode($case['baseline_json'],true,512,JSON_THROW_ON_ERROR));$current=$this->json($bundle);
         if(!hash_equals($case['baseline_hash'],hash('sha256',$stored))||!hash_equals($case['baseline_hash'],hash('sha256',$current)))throw new DomainException('The source baseline changed. Historical approval is stale; review a fresh baseline before resubmission.',409);
-        return $bundle;
     }
 
     /** Read-only discovery; use the exact locked POST policy, never a second stale-source rule. */

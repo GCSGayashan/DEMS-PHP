@@ -790,6 +790,16 @@ final class DataTableRegistry
             GROUP BY {$ascColumn}
         ) record_counts";
 
+        $approvalSource=null;
+        if(isset($detail['readAdapter'])){
+            $approvalSource=$detail;$approvalSource['select']=["{$ascColumn} group_id","{$typeColumn} appointment_type"];
+            $approvalSource['columns']=[['sort'=>$detailCount]];$approvalSource['defaultOrder']=[0,'ASC'];$approvalSource['scanTie']=$ascColumn;
+            $approvalSource['baseWhere'][]=$ascIds===[]?'1=0':$ascColumn.' IN('.implode(',',array_fill(0,count($ascIds),'?')).')';
+            array_push($approvalSource['baseParams'],...$ascIds);
+            $detail['approvalQualificationParameter']=count($detail['baseParams']);$detail['baseParams'][]='[]';
+            $recordCounts=\App\Services\ArpaApprovedAssignmentReadAdapter::summarySource('asc_id');
+        }
+
         $divisionCounts="(
             SELECT
                 rel.parent_location_id asc_id,
@@ -837,6 +847,10 @@ final class DataTableRegistry
                 && ($detailAuthorize===null || $detailAuthorize()),
             'export'=>false,
             'filename'=>'arpa-'.$page.'-appointments-summary',
+            'readAdapter'=>$detail['readAdapter']??null,
+            'approvalQualificationParameter'=>$detail['approvalQualificationParameter']??null,
+            'approvalSummarySource'=>$approvalSource,
+            'requiresApprovalQualification'=>!empty($detail['requiresApprovalQualification']),
             'with'=>$detail['with']??'',
             'from'=>"location summary_asc
                      LEFT JOIN {$recordCounts}
@@ -997,6 +1011,16 @@ final class DataTableRegistry
             GROUP BY district_rel.parent_location_id
         ) record_counts";
 
+        $approvalSource=null;
+        if(isset($detail['readAdapter'])){
+            $approvalSource=$detail;$approvalSource['from'].=" JOIN location_relationship district_rel ON district_rel.child_location_id={$ascColumn} JOIN location district_record ON district_record.id=district_rel.parent_location_id JOIN location_type district_type ON district_type.id=district_record.location_type_id AND district_type.system_key='DISTRICT'";
+            $approvalSource['baseWhere']=$recordWhere;
+            $approvalSource['select']=['district_rel.parent_location_id group_id',"{$typeColumn} appointment_type"];
+            $approvalSource['columns']=[['sort'=>$detailCount]];$approvalSource['defaultOrder']=[0,'ASC'];$approvalSource['scanTie']='district_rel.parent_location_id';
+            $detail['approvalQualificationParameter']=count($detail['baseParams']);$detail['baseParams'][]='[]';
+            $recordCounts=\App\Services\ArpaApprovedAssignmentReadAdapter::summarySource('district_id');
+        }
+
         $inventoryCounts="(
             SELECT
                 district_rel.parent_location_id district_id,
@@ -1085,6 +1109,10 @@ final class DataTableRegistry
                 && ($detailAuthorize===null || $detailAuthorize()),
             'export'=>false,
             'filename'=>'arpa-'.$page.'-district-summary',
+            'readAdapter'=>$detail['readAdapter']??null,
+            'approvalQualificationParameter'=>$detail['approvalQualificationParameter']??null,
+            'approvalSummarySource'=>$approvalSource,
+            'requiresApprovalQualification'=>!empty($detail['requiresApprovalQualification']),
             'with'=>$detail['with']??'',
             'from'=>"location summary_district
                      LEFT JOIN {$recordCounts}
@@ -1333,6 +1361,17 @@ final class DataTableRegistry
     private static function arpaOpenAppointments():array
     {
         $definition=self::arpaDivisionAppointments();$definition['filename']='arpa-open-appointments';$definition['baseWhere'][]='c.id IS NULL';$definition['baseWhere'][]='a.legacy_history_only=0';
+        $definition['requiresApprovalQualification']=true;
+        $definition['readAdapter']=static function(\PDO $pdo,array $config,callable $reader):mixed{
+            return \App\Services\ArpaApprovedAssignmentReadAdapter::run($pdo,$config,static function(array $qualified)use($reader):mixed{
+                if($qualified['count']==='a.id'){
+                    $capabilities=['end'=>Auth::can('arpa.appointment.end'),'transfer'=>Auth::can('arpa.appointment.transfer')];
+                    $qualified['columns'][array_key_last($qualified['columns'])]['format']=fn($row)=>self::arpaDivisionActions($row,$capabilities);
+                }
+                return $reader($qualified);
+            });
+        };
+        $definition['columns'][10]['label']='Original Workflow Status';
         return $definition;
     }
 
@@ -2258,13 +2297,13 @@ final class DataTableRegistry
         return $actions;
     }
 
-    private static function arpaDivisionActions(array $row): string
+    private static function arpaDivisionActions(array $row,?array $capabilities=null): string
     {
         $actions='<a class="btn btn-sm btn-outline-dark me-1" href="'.e(url('hr/arpa-appointments/divisions/'.$row['id'])).'">View</a><a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('hr/officers/'.$row['officer_id'])).'">Profile</a>';
-        if ($row['operational_status'] !== 'ENDED' && Auth::can('arpa.appointment.end')) {
+        if ($row['operational_status'] !== 'ENDED' && ($capabilities['end']??Auth::can('arpa.appointment.end'))) {
             $actions.='<a class="btn btn-sm btn-outline-danger me-1" href="'.e(url('hr/arpa-appointments/divisions/'.$row['id'].'/end')).'">End</a>';
         }
-        if ($row['appointment_type']==='PERMANENT' && $row['operational_status']!=='ENDED' && Auth::can('arpa.appointment.transfer')) {
+        if ($row['appointment_type']==='PERMANENT' && $row['operational_status']!=='ENDED' && ($capabilities['transfer']??Auth::can('arpa.appointment.transfer'))) {
             $actions.='<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/divisions/'.$row['id'].'/transfer')).'">Transfer</a>';
         }
         return $actions;

@@ -36,6 +36,10 @@ final class DataTableController
                 DataTableResponse::error('Export is not available for this table.', 404);
             }
             $query = new DataTableQuery(Database::pdo(), $config, DataTableRequest::fromGlobals());
+            $rows=$query->exportRows();
+            // Qualified exports prepare completely before any success headers/body.
+            $preparedEmpty=false;
+            if((isset($config['readAdapter'])||!empty($config['requiresApprovalQualification']))&&$rows instanceof \Generator){$rows->rewind();$preparedEmpty=!$rows->valid();}
             $filename = preg_replace('/[^a-z0-9-]+/i', '-', (string)$config['filename']) . '-' . date('Ymd-His') . '.csv';
 
             header('Content-Type: text/csv; charset=utf-8');
@@ -48,7 +52,7 @@ final class DataTableController
             }
             fwrite($output, "\xEF\xBB\xBF");
             fputcsv($output, $query->exportHeaders(), ',', '"', '');
-            foreach ($query->exportRows() as $row) {
+            foreach ($preparedEmpty?[]:$rows as $row) {
                 fputcsv($output, array_map([$this, 'safeCsvValue'], array_values($row)), ',', '"', '');
             }
             fclose($output);
