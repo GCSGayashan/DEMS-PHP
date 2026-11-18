@@ -184,14 +184,28 @@ final class UserAccountRequestService
                 throw new DomainException('You cannot approve a user request you created.');
             }
 
-            $roles = $this->pdo->prepare("SELECT id FROM user_account_role WHERE user_id=? AND approval_status='SUBMITTED' ORDER BY created_at,id FOR UPDATE");
+            $roles = $this->pdo->prepare('SELECT * FROM user_account_role WHERE user_id=? ORDER BY created_at,id FOR UPDATE');
             $roles->execute([$userId]);
-            $assignmentIds = array_map('strval', $roles->fetchAll(PDO::FETCH_COLUMN));
+            $roleRows = $roles->fetchAll();
+            $assignmentIds = array_map(static fn(array $row): string => (string)$row['id'], array_filter($roleRows, static fn(array $row): bool => $row['approval_status'] === 'SUBMITTED' && $row['deleted_at'] === null));
             $combinedRequest = (string)$user['identity_source'] === self::SOURCE_MANUAL || $assignmentIds !== [];
-            if ($combinedRequest && count($assignmentIds) !== 1) {
-                throw new DomainException('The user request does not have one valid initial role and location.');
+            $reusedAssignmentIds = [];
+            if ($combinedRequest) {
+                if (count($assignmentIds) > 1) {
+                    throw new DomainException('The user request does not have one valid initial role and location.');
+                }
+                if ($assignmentIds === []) {
+                    // Only the fallback requires one unambiguous initial row.
+                    // Deleted/history rows must not be hidden to manufacture it.
+                    if (count($roleRows) !== 1) {
+                        throw new DomainException('The user request does not have one valid initial role and location.');
+                    }
+                    $this->validateApprovedInitialAssignment($actorId, $userId, $roleRows[0], $policy);
+                    $assignmentIds = [(string)$roleRows[0]['id']];
+                    $reusedAssignmentIds = $assignmentIds;
+                }
             }
-            foreach ($assignmentIds as $assignmentId) {
+            foreach (array_diff($assignmentIds, $reusedAssignmentIds) as $assignmentId) {
                 $policy->approveAssignment($actorId, $assignmentId);
             }
 
@@ -202,9 +216,77 @@ final class UserAccountRequestService
             $this->pdo->prepare("UPDATE system_user SET approval_status='APPROVED',account_status='ACTIVE',enabled=1,
                     approved_by=?,approved_at=NOW(),activated_by=?,activated_at=NOW(),updated_at=NOW() WHERE id=?")
                 ->execute([$actorId, $actorId, $userId]);
-            $this->recordAudit($actorId, 'user.approve', $userId, ['role_assignment_ids' => $assignmentIds]);
+            $audit = ['role_assignment_ids' => $assignmentIds];
+            if ($reusedAssignmentIds !== []) {
+                $audit['already_approved_role_assignment_ids'] = $reusedAssignmentIds;
+            }
+            $this->recordAudit($actorId, 'user.approve', $userId, $audit);
             $notice=new WorkflowNotificationService($this->pdo);$notice->completeStage('SYSTEM_USER',$userId,'APPROVAL',$actorId,'User account approved');if(!empty($user['requested_by']))$notice->information((string)$user['requested_by'],'ACCESS_MANAGEMENT','User Account Request Approved','Your user account request has been approved.','SYSTEM_USER',$userId,'/access-management/account-requests',$actorId);
         });
+    }
+
+    /** Validate existing access without approving it again or changing its audit metadata. */
+    private function validateApprovedInitialAssignment(string $actorId, string $userId, array $role, UserAccessManagementService $policy): void
+    {
+        $invalid = 'The user request does not have one valid initial role and location.';
+        $today = date('Y-m-d');
+        if ((string)$role['user_id'] !== $userId || $role['approval_status'] !== 'APPROVED'
+            || (int)$role['active'] !== 1 || $role['deleted_at'] !== null || $role['replaces_assignment_id'] !== null) {
+            throw new DomainException($invalid);
+        }
+        $successors = $this->pdo->prepare('SELECT id FROM user_account_role WHERE replaces_assignment_id=? FOR UPDATE');
+        $successors->execute([$role['id']]);
+        if ($successors->fetchColumn() !== false) {
+            throw new DomainException($invalid);
+        }
+        // Lock every linked scope, including malformed cross-user or deleted rows:
+        // filtering them away could make an ambiguous initial assignment look valid.
+        $scopes = $this->pdo->prepare('SELECT * FROM user_account_scope WHERE role_assignment_id=? FOR UPDATE');
+        $scopes->execute([$role['id']]);
+        $rows = $scopes->fetchAll();
+        if (count($rows) !== 1) {
+            throw new DomainException($invalid);
+        }
+        $scope = $rows[0];
+        if ((string)$scope['user_id'] !== $userId || $scope['approval_status'] !== 'APPROVED'
+            || (int)$scope['active'] !== 1 || $scope['deleted_at'] !== null || $scope['office_id'] !== null) {
+            throw new DomainException($invalid);
+        }
+        foreach ([$role, $scope] as $assignment) {
+            if ((string)$assignment['created_by'] === $actorId || (string)$assignment['submitted_by'] === $actorId) {
+                throw new DomainException('You cannot approve a user request with an initial assignment you created or submitted.');
+            }
+            $from = $this->date((string)$assignment['effective_from']);
+            $to = $assignment['effective_to'] === null ? null : $this->date((string)$assignment['effective_to']);
+            if ($from > $today || ($to !== null && ($to < $from || $to < $today))) {
+                throw new DomainException($invalid);
+            }
+        }
+        if ($scope['effective_from'] < $role['effective_from']
+            || ($role['effective_to'] !== null && ($scope['effective_to'] === null || $scope['effective_to'] > $role['effective_to']))) {
+            throw new DomainException($invalid);
+        }
+        $definition = $this->pdo->prepare('SELECT id FROM application_role WHERE id=? FOR UPDATE');
+        $definition->execute([$role['role_id']]);
+        if ($definition->fetchColumn() === false) {
+            throw new DomainException($invalid);
+        }
+        if ($scope['location_id'] !== null) {
+            $location = $this->pdo->prepare('SELECT id FROM location WHERE id=? FOR UPDATE');
+            $location->execute([$scope['location_id']]);
+            if ($location->fetchColumn() === false) {
+                throw new DomainException($invalid);
+            }
+        }
+        // Reuse current management authority and the established role/location
+        // compatibility policy, checking both the recorded starts and today.
+        foreach (array_unique([$role['effective_from'], $scope['effective_from'], $today]) as $date) {
+            $validated = $policy->validateAccountRequestAssignment($actorId, (string)$role['role_id'], $scope['location_id'], $date);
+            if ($validated['scope_type'] !== $scope['scope_type'] || $validated['scope_mode'] !== $scope['scope_mode']
+                || $validated['location_id'] !== $scope['location_id']) {
+                throw new DomainException($invalid);
+            }
+        }
     }
 
     /** @return array{with:string,where:string,params:array<int,string>} */
