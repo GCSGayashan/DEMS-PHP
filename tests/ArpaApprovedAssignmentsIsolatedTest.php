@@ -272,6 +272,10 @@ final class ArpaApprovedAssignmentsIsolatedTest
     private function midnightRollovers():void
     {
         $template=$this->sources['native_approved'];$zone=$this->pdo->query('SELECT @@session.time_zone')->fetchColumn();
+        // The base fixture starts role/scope assignments on the test-run date.
+        // These clock tests need authorized synthetic contexts on BOTH fixed dates,
+        // including when the suite is run after 17 November 2026.
+        $this->pdo->exec("UPDATE user_account_role SET effective_from='2020-01-01';UPDATE user_account_scope SET effective_from='2020-01-01'");
         try{foreach([['2026-11-17','2026-11-18'],['2026-12-31','2027-01-01']] as [$day,$next]){
             $tag='SYNTHETIC_MIDNIGHT_'.$day;$officer=$this->newId();
             $this->pdo->prepare("INSERT INTO officer(id,dad_number,name_with_initials,arpa_service_permanency) VALUES(?,?,?,'PERMANENT_IN_SERVICE')")->execute([$officer,'UAT-MIDNIGHT-'.$day,'Midnight '.$day]);

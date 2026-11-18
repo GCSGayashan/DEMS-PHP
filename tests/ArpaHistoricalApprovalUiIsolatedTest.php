@@ -13,6 +13,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
     private object $fixture;
     private array $cases=[];
     private array $embeddedSources=[];
+    private array $verifyCases=[];
     private int $assertions=0;
     private const ASC='10000000-0000-4000-8000-000000000001';
     public function run():void
@@ -26,14 +27,22 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $base=new ArpaAppointmentCorrectionAmendmentDraftTest();(new ReflectionProperty($base,'pdo'))->setValue($base,$this->pdo);$this->call($base,'createFixtureSchema');
             $this->pdo->exec(file_get_contents(BASE_PATH.'/database/migrations/062_arpa_appointment_correction_amendment_foundation.sql'));$this->call($base,'insertFixtures');$this->call($base,'exerciseHistoricalPeerDecisions');
             if(!(new \App\Services\ArpaHistoricalApprovalReadService($this->pdo))->available())$this->pdo->exec(file_get_contents(BASE_PATH.'/database/migrations/067_arpa_historical_approval_foundation.sql'));
+            $this->pdo->exec(file_get_contents(BASE_PATH.'/database/migrations/068_arpa_historical_verify_optional_evidence.sql'));
             $this->pdo->exec("INSERT INTO designation VALUES('historical-test-arpa','ARPA_OFFICER');CREATE TABLE IF NOT EXISTS arpa_appointment_workflow_action(id BIGINT AUTO_INCREMENT PRIMARY KEY,request_id CHAR(36),action VARCHAR(50),stage VARCHAR(50),user_id CHAR(36),action_at DATETIME NULL,record_origin VARCHAR(40),previous_status VARCHAR(50),new_status VARCHAR(50),comments TEXT,timestamp_provenance VARCHAR(80)) ENGINE=InnoDB");
             $this->fixture=new ArpaHistoricalAppointmentApprovalIsolatedTest();(new ReflectionProperty($this->fixture,'pdo'))->setValue($this->fixture,$this->pdo);
             for($i=0;$i<9;$i++)$this->cases[$i]=$this->call($this->fixture,'source');
             for($i=0;$i<3;$i++)$this->embeddedSources[$i]=$this->call($this->fixture,'source','PERMANENT',null,'2020-01-01','2024-12-31');
+            foreach([4,6,8] as $reviewer)$this->verifyCases[$reviewer]=$this->call($this->fixture,'source');
             $this->schema();$this->requestSchema();$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);
             foreach($this->cases as $i=>&$s){$this->context(1);$s['case']=$service->register($s['correction'],['reason'=>'Synthetic UI baseline','evidence_reference'=>'Synthetic letter <script>alert(1)</script>'],self::actor(1));if($i===0||$i===8)continue;$s['case']=$service->submit($s['case']['case']['id'],0,self::actor(1));foreach([[4,'VERIFY'],[5,'APPROVE'],[6,'VERIFY'],[7,'APPROVE'],[8,'VERIFY']] as $n=>[$actor,$action]){if($n>=$i-1)break;$this->context($actor);$s['case']=$service->review($s['case']['case']['id'],$action,(int)$s['case']['case']['version'],self::actor($actor),'Synthetic stage review','Synthetic evidence');}}
-            unset($s);$this->context(1);$sourceState=$this->call($this->fixture,'operational');
-            $this->nextActionDisplay();$this->queues();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->profilePeriods();$this->missingSchema();
+            unset($s);
+            foreach([4=>'ASC',6=>'DISTRICT',8=>'NATIONAL'] as $reviewer=>$stage){
+                $source=$this->verifyCases[$reviewer];$this->context(1);$c=$service->register($source['correction'],['reason'=>'Optional verification fixture','evidence_reference'=>'Synthetic original evidence'],self::actor(1));$c=$service->submit($c['case']['id'],0,self::actor(1));
+                foreach([[4,'VERIFY'],[5,'APPROVE'],[6,'VERIFY'],[7,'APPROVE']] as [$actor,$action]){if($actor>=$reviewer)break;$this->context($actor);$c=$service->review($c['case']['id'],$action,(int)$c['case']['version'],self::actor($actor),'Authorized setup review','Synthetic setup evidence');}
+                $this->verifyCases[$reviewer]=[$c,$reviewer,$stage];
+            }
+            $this->context(1);$sourceState=$this->call($this->fixture,'operational');
+            $this->nextActionDisplay();$this->queues();$this->combinedQueues();$this->optionalVerify();$this->routes();$this->staleSource();$this->staleDraftQueues();$this->profile();$this->profilePeriods();$this->missingSchema();
             $this->embeddedRequest();
             $this->requestCaseSelection();$this->stageHistoryDisplay();
             $this->same($sourceState,$this->call($this->fixture,'operational'),'all routed UI actions leave appointments, requests, closures, original workflows, provenance and corrections unchanged');
@@ -60,8 +69,8 @@ final class ArpaHistoricalApprovalUiIsolatedTest
     }
     private function requestSchema():void
     {
-        $this->pdo->exec("ALTER TABLE officer ADD class_id CHAR(36),ADD officer_status_id CHAR(36),ADD operational_status VARCHAR(30) DEFAULT 'ACTIVE';
-            ALTER TABLE designation ADD name_en VARCHAR(255);
+        $this->pdo->exec("ALTER TABLE officer ADD class_id CHAR(36),ADD officer_status_id CHAR(36),ADD operational_status VARCHAR(30) DEFAULT 'ACTIVE',ADD approval_status VARCHAR(30) DEFAULT 'APPROVED';
+            ALTER TABLE designation ADD name_en VARCHAR(255),ADD active TINYINT DEFAULT 1,ADD approval_status VARCHAR(30) DEFAULT 'APPROVED';
             ALTER TABLE location ADD official_code VARCHAR(100);
             CREATE TABLE officer_class(id CHAR(36) PRIMARY KEY,name_en VARCHAR(255)) ENGINE=InnoDB;
             CREATE TABLE officer_status(id CHAR(36) PRIMARY KEY,name_en VARCHAR(255)) ENGINE=InnoDB;
@@ -161,7 +170,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
         }finally{$this->pdo->rollBack();}
         // The original evidence route still requires real non-empty evidence.
         $c=$service->submitExistingRecordAttestation($c['case']['id'],0,self::actor(1),true,$c['case']['baseline_hash']);$this->context(4);
-        try{$service->review($c['case']['id'],'VERIFY',1,self::actor(4),'Review','');throw new RuntimeException('Missing evidence accepted');}catch(DomainException $e){$this->same(422,$e->getCode(),'existing evidence-validation safeguard unchanged');}
+        $verified=$service->review($c['case']['id'],'VERIFY',1,self::actor(4),'Review','');$last=end($verified['events']);$this->same('ASC_VERIFIED',$verified['case']['workflow_status'],'VERIFY accepts an omitted evidence reference');$this->same('',$last['evidence_reference'],'no evidence placeholder is fabricated');$this->same('Review',$last['reason'],'supplied verification reason is preserved');
         // Return and rejection use the same governed transition implementation, not original workflows.
         $this->context(1);$s=$this->embeddedSources[2];$c=$service->register($s['correction'],['reason'=>'Whole period review','evidence_reference'=>'Administrative registration evidence'],self::actor(1));
         $id=$c['case']['id'];$hash=$c['case']['baseline_hash'];$url='/hr/arpa-appointments/historical-approvals/'.$id.'/attest';
@@ -169,7 +178,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $input=['expected_version'=>(string)$version,'baseline_hash'=>$hash,'confirm_records'=>'1','action'=>$action,'reason'=>'Explicit review decision'];
             if($action==='VERIFY'){
                 $missing=$input;unset($missing['confirm_records']);[$status]=$this->route('POST',$url,$missing,$actor);$this->same(422,$status,'review confirmation cannot be omitted');
-                [$status]=$this->route('POST',$url,array_replace($input,['reason'=>'']),$actor);$this->same(422,$status,'review decision reason remains mandatory');
+                [$status]=$this->route('POST',$url,array_replace($input,['reason'=>[]]),$actor);$this->same(422,$status,'verification reason must still be valid text');$input['reason']='';
             }
             [$status]=$this->route('POST',$url,$input,$actor);$this->same(302,$status,'attestation supports governed '.$action);
         }
@@ -236,7 +245,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
     private function queues():void
     {
         $read=new ArpaHistoricalApprovalReadService($this->pdo);
-        foreach([1,4,5,6,7,8,9,10] as $actor){$this->context($actor);$q=$read->query(self::actor($actor));$s=$this->pdo->prepare($q['sql']);$s->execute($q['params']);$rows=$s->fetchAll();$data=$this->table('arpa-historical-approvals-pending');$this->same(count($rows),$data['recordsTotal'],'historical table population equals shared count for role '.$actor);$this->same(count($rows),$read->count(self::actor($actor)),'historical count agrees with records');$this->same(count($rows)+$this->table('arpa-submitted-appointments')['recordsTotal'],(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor($actor)),'dashboard pending total reconciles');
+        foreach([1,4,5,6,7,8,9,10] as $actor){$this->context($actor);$q=$read->query(self::actor($actor));$s=$this->pdo->prepare($q['sql']);$s->execute($q['params']);$rows=$s->fetchAll();$data=$this->table('arpa-historical-approvals-pending');$this->same(count($rows),$data['recordsTotal'],'historical table population equals shared count for role '.$actor);$this->same(count($rows),$read->count(self::actor($actor)),'historical count agrees with records');$this->same($this->table('arpa-submitted-appointments')['recordsTotal'],(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor($actor)),'unified pending total reconciles with dashboard');
             $expected=match($actor){1=>['DRAFT','SUBMITTED'],4=>['DRAFT','SUBMITTED'],5=>['ASC_VERIFIED'],6=>['ASC_APPROVED'],7=>['DISTRICT_VERIFIED'],8=>['DISTRICT_APPROVED'],9=>['NATIONAL_VERIFIED'],default=>[]};
             $statuses=array_values(array_unique(array_column($rows,'historical_status')));sort($statuses);sort($expected);$this->same($expected,$statuses,'only the authorized stage is listed for role '.$actor);
             if($actor===10)$this->same(0,count($rows),'other District has no actionable cases');
@@ -244,10 +253,194 @@ final class ArpaHistoricalApprovalUiIsolatedTest
         $this->context(1);$page=$this->table('arpa-historical-approvals-pending',[],['length'=>10,'search'=>['value'=>'Synthetic']]);$this->same(true,$page['recordsFiltered']>0,'server search works');$this->same(true,count($page['data'])<=10,'pagination retained');
         $this->context(6);$summary=$this->table('arpa-submitted-appointments-summary');$sum=0;foreach($summary['data'] as $r)$sum+=(int)strip_tags($r['total_count']);$this->same((new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor(6)),$sum,'District ASC summary includes native plus historical cases');
         $this->context(8);$summary=$this->table('arpa-submitted-appointments-district-summary');$sum=0;foreach($summary['data'] as $r)$sum+=(int)strip_tags($r['total_count']);$this->same((new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor(8)),$sum,'National District summary reconciles');
-        [$status,$body]=$this->route('GET','/hr/arpa-appointments/submitted',[],8);$this->same(200,$status,'existing National pending interface renders');$this->same(true,str_contains($body,'Historical Appointment'),'historical panel is integrated into original pending page');
+        [$status,$body]=$this->route('GET','/hr/arpa-appointments/submitted',[],8);$this->same(200,$status,'existing National pending interface renders');$this->same(false,str_contains($body,'dems-arpa-historical-approvals-pending-table'),'no second historical table on the pending page');
         [$status]=$this->route('GET','/api/datatables/arpa-historical-approvals-pending?asc_id=10000000-0000-4000-8000-000000000002',[],1);$this->same(403,$status,'forged ASC filter denied by actual JSON endpoint');
         [$status]=$this->route('GET','/api/datatables/arpa-historical-approvals-pending',[],11);$this->same(403,$status,'Viewer cannot query historical queues');
         [$status]=$this->route('GET','/exports/arpa-historical-approvals-pending',[],1);$this->same(404,$status,'no unrequested export surface introduced');
+    }
+    private function combinedQueues():void
+    {
+        $read=new ArpaHistoricalApprovalReadService($this->pdo);$source=$this->cases[0];$nativeIds=[];
+        $before=$this->call($this->fixture,'operational');$this->pdo->beginTransaction();
+        try{
+            $insert=$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'PERMANENT',?,?,'2026-01-01',?,?)");
+            foreach(['SUBMITTED','ASC_VERIFIED','ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'] as $i=>$status){
+                $id='90000000-0000-4000-8000-'.str_pad((string)$i,12,'0',STR_PAD_LEFT);$nativeIds[$status]=$id;
+                $insert->execute([$id,$source['officer'],self::ASC,$source['division'],$status,self::actor(1)]);
+            }
+            for($i=10;$i<45;$i++)$insert->execute(['90000000-0000-4000-8000-'.str_pad((string)$i,12,'0',STR_PAD_LEFT),$source['officer'],self::ASC,$source['division'],'SUBMITTED',self::actor(1)]);
+            foreach([4,5,6,7,8,9] as $actor){
+                $this->context($actor);$all=$this->table('arpa-submitted-appointments',[],['length'=>100]);
+                $n=$this->table('arpa-submitted-appointments',[],['filters'=>['record_kind'=>'Native'],'length'=>100]);
+                $h=$this->table('arpa-submitted-appointments',[],['filters'=>['record_kind'=>'Historical Appointment'],'length'=>100]);
+                $this->same($n['recordsFiltered']+$h['recordsFiltered'],$all['recordsTotal'],'unified count includes both independently authorized populations for actor '.$actor);
+                $this->same($read->count(self::actor($actor)),$h['recordsFiltered'],'historical population is unchanged inside unified list');
+                $this->same($all['recordsTotal'],(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor($actor)),'unified pending equals dashboard count');
+                foreach($h['data'] as $row)$this->same(true,str_contains($row['actions'],'/historical-approvals/'),'historical rows keep case detail links');
+                foreach($n['data'] as $row)$this->same(true,str_contains($row['actions'],'/requests/division/'),'native rows keep original detail links');
+            }
+            $this->context(4);$full=$this->table('arpa-submitted-appointments',[],['length'=>100,'order'=>[['column'=>1,'dir'=>'asc']]]);$pages=[];
+            for($offset=0;$offset<$full['recordsTotal'];$offset+=10){$p=$this->table('arpa-submitted-appointments',[],['length'=>10,'start'=>$offset,'order'=>[['column'=>1,'dir'=>'asc']]]);$this->same($full['recordsTotal'],$p['recordsFiltered'],'total is calculated before SQL pagination');array_push($pages,...$p['data']);}
+            $this->same($full['data'],$pages,'cross-kind SQL sorting and all pages reproduce complete ordered result');
+            $this->same(count($pages),count(array_unique(array_column($pages,'actions'))),'no duplicate request/case rows across pages');
+            $definition=DataTableRegistry::definition('arpa-submitted-appointments');$csv=iterator_to_array((new DataTableQuery($this->pdo,$definition,new DataTableRequest(['length'=>10,'start'=>10,'order'=>[['column'=>1,'dir'=>'asc']]])))->exportRows());
+            $this->same($full['recordsTotal'],count($csv),'existing CSV export uses the complete unified result, not one page');$this->same(array_column($full['data'],'reference'),array_map(static fn($r)=>substr($r['reference'],0,8),$csv),'CSV reference values and sorting match displayed native/case references');$this->same(count($csv),count(array_unique(array_column($csv,'reference'))),'export retains every distinct source identity');
+            $search=$this->table('arpa-submitted-appointments',[],['search'=>['value'=>'90000000'],'filters'=>['appointment_type'=>'PERMANENT','date_from'=>'2026-01-01'],'length'=>10]);
+            $this->same(36,$search['recordsFiltered'],'server search and existing type/date filters work on unified source');$this->same(10,count($search['data']),'search applies before LIMIT');
+            $scoped=$this->table('arpa-submitted-appointments',['asc_id'=>self::ASC]);$this->same($full['recordsTotal'],$scoped['recordsTotal'],'ASC drill-down filters both populations');
+            foreach([2,10] as $actor){$this->context($actor);$this->same(0,$this->table('arpa-submitted-appointments')['recordsTotal'],'other ASC/District cannot see either population');}
+            $event=$this->pdo->prepare("INSERT INTO arpa_appointment_workflow_action(request_id,action,stage,user_id,action_at,record_origin,previous_status,new_status) VALUES(?,'VERIFY','ASC',?,NOW(),?,'SUBMITTED','ASC_VERIFIED')");
+            foreach([[4,'NATIVE'],[5,'NATIVE'],[4,'LEGACY_IMPORT']] as [$actor,$origin])$event->execute([$nativeIds['ASC_VERIFIED'],self::actor($actor),$origin]);
+            $this->context(4);$n=$this->table('arpa-approval-verification',[],['filters'=>['record_kind'=>'Native']]);$this->same(1,$n['recordsFiltered'],'completed union retains exact native acting-user and native-origin filters');
+            $all=$this->table('arpa-approval-verification',[],['length'=>100]);$this->same(1+$read->count(self::actor(4),true),$all['recordsTotal'],'completed union counts own historical actions only');
+            foreach($all['data'] as $row)$this->same(true,str_contains($row['action'],'VERIFY'),'completed rows retain current role/action filters');
+            $this->context(4,'ASC_ADMIN');$this->same(0,$this->table('arpa-approval-verification',[],['filters'=>['record_kind'=>'Native']])['recordsFiltered'],'switching context does not show verifier actions as approval actions');
+            $this->context(4);$this->same(1,$this->table('arpa-approval-verification',[],['filters'=>['record_kind'=>'Native']])['recordsFiltered'],'switching back restores own verification history');
+            $this->parameterizedQueues($source);
+        }finally{$this->pdo->rollBack();$this->context(1);}
+        $this->same($before,$this->call($this->fixture,'operational'),'unified reads and rolled-back fixture inserts preserve original evidence');
+        foreach(['/hr/arpa-appointments/submitted','/hr/arpa-appointments/approval'] as $page)foreach([4,6,8] as $actor){
+            [$status,$html]=$this->route('GET',$page,[],$actor);$this->same(200,$status,'unified queue page renders for ASC/District/National');$this->same(true,str_contains($html,'Record Kind'),'one table presents a record-kind column for every review level');
+            $this->same(false,str_contains($html,'dems-arpa-historical-approvals-'),'no second standalone historical DataTable');
+        }
+        foreach(['/api/datatables/arpa-submitted-appointments','/api/datatables/arpa-approval-verification'] as $url){
+            [$status]=$this->route('GET',$url,[],11);$this->same(403,$status,'viewer cannot query unified queues');
+            [$status]=$this->route('GET',$url.'?asc_id=10000000-0000-4000-8000-000000000002',[],1);$this->same(403,$status,'forged ASC filter fails closed for whole unified endpoint');
+        }
+        $this->hierarchyNavigation();
+    }
+    private function parameterizedQueues(array $source):void
+    {
+        $this->same(true,$this->pdo->inTransaction(),'parameter fixtures are inside the existing rollback-only test transaction');
+        $foreignAsc='10000000-0000-4000-8000-000000000002';$foreignDivision='93000000-0000-4000-8000-000000000001';
+        $this->pdo->prepare("INSERT INTO location(id,location_type_id,dad_number,name_en) SELECT ?,location_type_id,'SYNTHETIC-PARAM-FOREIGN','Synthetic foreign parameter division' FROM location WHERE id=?")->execute([$foreignDivision,$source['division']]);
+        $this->pdo->prepare("INSERT INTO location_relationship(id,parent_location_id,child_location_id,relationship_type,effective_from) VALUES(UUID(),?,?,'ASC_ARPA_DIVISION','2020-01-01')")->execute([$foreignAsc,$foreignDivision]);
+        $insert=$this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,requested_effective_to,workflow_status,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'PERMANENT',?,?,'2026-01-01',?,?,?)");
+        $event=$this->pdo->prepare("INSERT INTO arpa_appointment_workflow_action(request_id,action,stage,user_id,action_at,record_origin,timestamp_provenance,previous_status,new_status) VALUES(?,?,?,?,NOW(),?,'NATIVE_RECORDED',?,?)");
+        $steps=[4=>['ASC','VERIFY','SUBMITTED','ASC_VERIFIED'],5=>['ASC','APPROVE','ASC_VERIFIED','ASC_APPROVED'],6=>['DISTRICT','VERIFY','ASC_APPROVED','DISTRICT_VERIFIED'],7=>['DISTRICT','APPROVE','DISTRICT_VERIFIED','DISTRICT_APPROVED'],8=>['NATIONAL','VERIFY','DISTRICT_APPROVED','NATIONAL_VERIFIED'],9=>['NATIONAL','APPROVE','NATIONAL_VERIFIED','NATIONAL_APPROVED']];
+        foreach($steps as $actor=>[$stage,$action,$previous,$next]){
+            $own=sprintf('91000000-0000-4000-8000-%012d',$actor);$foreign=sprintf('91000000-0000-4000-8000-%012d',100+$actor);
+            foreach([[$own,self::ASC,$source['division']],[$foreign,$foreignAsc,$foreignDivision]] as [$id,$asc,$division]){
+                $insert->execute([$id,$source['officer'],$asc,$division,$actor%2===0?'2026-12-31':null,$next,self::actor(1)]);
+                $event->execute([$id,$action,$stage,self::actor($actor),'NATIVE',$previous,$next]);
+            }
+            if($actor===6){ // Old-cycle actions must not reappear after a return boundary.
+                $event->execute([$own,'RETURN_FOR_CORRECTION',$stage,self::actor(7),'NATIVE',$next,'RETURNED']);
+                $event->execute([$own,$action,$stage,self::actor($actor),'NATIVE',$previous,$next]);
+            }
+            $event->execute([$own,$action,$stage,self::actor($actor===4?5:4),'NATIVE',$previous,$next]);
+            $event->execute([$own,$action,$stage,self::actor($actor),'LEGACY_IMPORT',$previous,$next]);
+        }
+        // Ensure even the National approver has real, nonempty Historical completed history.
+        $this->context(9);$service=new ArpaHistoricalAppointmentApprovalService($this->pdo);$id=$this->cases[6]['case']['case']['id'];$case=$service->get($id,self::actor(9));
+        $service->review($id,'APPROVE',(int)$case['case']['version'],self::actor(9),'Synthetic scoped approval','Synthetic National evidence');
+        // Two genuine Historical VERIFY events for one case must remain two owned actions.
+        $repeat=$this->cases[1]['case']['case']['id'];$this->context(4);$c=$service->get($repeat,self::actor(4));$c=$service->review($repeat,'VERIFY',(int)$c['case']['version'],self::actor(4),'First review cycle','Synthetic evidence');
+        $this->context(5);$c=$service->review($repeat,'RETURN_FOR_CORRECTION',(int)$c['case']['version'],self::actor(5),'Recheck existing evidence','Synthetic return note');
+        $this->context(1);$c=$service->submit($repeat,(int)$c['case']['version'],self::actor(1));$this->context(4);$service->review($repeat,'VERIFY',(int)$c['case']['version'],self::actor(4),'Fresh review cycle','Synthetic evidence');
+        $this->same(2,$this->table('arpa-approval-verification',[],['search'=>['value'=>$repeat],'filters'=>['record_kind'=>'Historical Appointment']])['recordsFiltered'],'completed grain preserves distinct owned events, not one row per case');
+        $read=new ArpaHistoricalApprovalReadService($this->pdo);$district='19000000-0000-4000-8000-000000000001';
+        foreach($steps as $actor=>[$stage,$action]){
+            $this->context($actor);$user=self::actor($actor);$policy=new ArpaWorkflowQueuePolicy($this->pdo);$access=$policy->completedAccess($user);
+            $scope=$stage==='NATIONAL'?[]:App\Core\ScopeService::arpaWorkflowScopeParams($user);
+            $this->same($scope,$access['params'],'completed access parameters belong to the leading scope CTE, actor '.$actor);
+            $this->same(0,substr_count($access['where'],'?'),'completed stage WHERE has no positional values');
+            if($scope!==[]){$this->same(2,count($scope),'ASC/District test exercises role and scope assignment placeholders');$this->same(false,in_array($user,$scope,true),'scope identifiers differ from acting-user identifier');}
+            $native=(new ReflectionMethod(DataTableRegistry::class,'arpaApprovalVerification'))->invoke(null);
+            $this->same([...$scope,$user],$native['baseParams'],'CTE values correctly precede w.user_id despite its first WHERE position');
+            $nativeSql=($native['with']??'').' SELECT COUNT(DISTINCT '.$native['count'].') FROM '.$native['from'].' WHERE '.implode(' AND ',$native['baseWhere']);
+            $this->same(count($native['baseParams']),substr_count($nativeSql,'?'),'native SQL placeholder count matches parameter count');
+            $s=$this->pdo->prepare($nativeSql);$s->execute($native['baseParams']);$this->same(true,(int)$s->fetchColumn()>0,'correct parameter order returns nonempty owned actions');
+            if($scope!==[]){$s->execute([$user,...$scope]);$this->same(0,(int)$s->fetchColumn(),'putting owner before CTE parameters would lose these records');}
+            $historical=$read->query($user,true);$this->same([...$scope,$user],$historical['params'],'Historical completed CTE precedes event ownership');$this->same(true,$read->count($user,true)>0,'Historical completed history is nonempty for every review level');
+            foreach([false,true] as $completed)foreach([[],['asc_id'=>self::ASC],['district_id'=>$district],['asc_id'=>self::ASC,'district_id'=>$district]] as $context){
+                $key=$completed?'arpa-approval-verification':'arpa-submitted-appointments';
+                $n=(new ReflectionMethod(DataTableRegistry::class,$completed?'arpaApprovalVerification':'arpaSubmittedAppointments'))->invoke(null);$h=$read->query($user,$completed,$context);$d=DataTableRegistry::definition($key,$context);
+                $expected=[...$n['baseParams'],...$h['params']];if(isset($context['district_id']))$expected[]=$district;if(isset($context['asc_id']))$expected[]=self::ASC;
+                $this->same($expected,$d['baseParams'],'native + historical + outer District + outer ASC parameter order');
+                $where=$d['baseWhere']===[]?'':' WHERE '.implode(' AND ',$d['baseWhere']);$sql='SELECT COUNT(DISTINCT u.row_key) FROM '.$d['from'].$where;
+                $this->same(count($expected),substr_count($sql,'?'),'all CTE, owner and repeated geographic placeholders accounted for');
+                $np=$n['baseParams'];$nw=$n['baseWhere'];
+                if(isset($context['asc_id'])){$nw[]='r.asc_location_id=?';$np[]=self::ASC;}
+                if(isset($context['district_id'])){$nw[]="EXISTS(SELECT 1 FROM location_relationship dr WHERE dr.child_location_id=r.asc_location_id AND dr.parent_location_id=? AND dr.relationship_type='DISTRICT_ASC' AND dr.active=1 AND dr.approval_status='APPROVED' AND dr.effective_from<=CURRENT_DATE() AND (dr.effective_to IS NULL OR dr.effective_to>=CURRENT_DATE()))";$np[]=$district;}
+                $s=$this->pdo->prepare(($n['with']??'').' SELECT COUNT(DISTINCT '.$n['count'].') FROM '.$n['from'].' WHERE '.implode(' AND ',$nw));$s->execute($np);$count=(int)$s->fetchColumn();
+                $s=$this->pdo->prepare('SELECT COUNT(*) FROM ('.$h['sql'].') source_history');$s->execute($h['params']);$count+=(int)$s->fetchColumn();
+                $all=$this->table($key,$context,['length'=>100,'order'=>[['column'=>1,'dir'=>'asc']]]);$this->same($count,$all['recordsTotal'],'unified total equals separately scoped populations');$this->same($count,$all['recordsFiltered'],'unfiltered total agrees');$this->same($count,count($all['data']),'no duplicate/missing union rows');
+                $s=$this->pdo->prepare('SELECT u.row_key FROM '.$d['from'].$where);$s->execute($expected);$identities=$s->fetchAll(PDO::FETCH_COLUMN);$this->same($count,count(array_unique($identities)),'distinct source event/request keys, not detail URLs, define row identity');
+                if($completed){
+                    $filtered=$this->table($key,$context,['search'=>['value'=>'91000000'],'filters'=>['record_kind'=>'Native'],'length'=>100]);
+                    $this->same($stage==='NATIONAL'&&$context===[]?2:1,$filtered['recordsFiltered'],'ownership, origin, review-cycle and geographic filters exclude wrong actions');
+                    foreach($filtered['data'] as $row)$this->same(true,str_contains($row['actions'],sprintf('91000000-0000-4000-8000-%012d',$actor))||($stage==='NATIONAL'&&str_contains($row['actions'],sprintf('91000000-0000-4000-8000-%012d',100+$actor))),'only actual acting-user request identities are returned');
+                }
+                foreach(['asc','desc'] as $direction){
+                    $s=$this->pdo->prepare('SELECT COALESCE(u.case_id,u.request_id) reference FROM '.$d['from'].$where.' ORDER BY u.effective_to '.strtoupper($direction).',u.row_key ASC');$s->execute($expected);$oracle=$s->fetchAll(PDO::FETCH_COLUMN);
+                    $page=$this->table($key,$context,['length'=>10,'start'=>1,'order'=>[['column'=>9,'dir'=>$direction]]]);
+                    $this->same(array_map(static fn($id)=>substr($id,0,8),array_slice($oracle,1,10)),array_column($page['data'],'reference'),'SQL NULL/date ordering and page boundaries agree with independent oracle');$this->same($count,$page['recordsTotal'],'pagination retains complete scoped count');
+                    $identities=array_map(static function($row){preg_match('~/(?:requests/division|historical-approvals)/([a-f0-9-]{36})~i',$row['actions'],$match);return $match[1]??null;},$page['data']);
+                    $this->same(array_slice($oracle,1,10),$identities,'full request/case identities match the page oracle even when displayed reference prefixes coincide');
+                }
+            }
+            if($stage!=='ASC')foreach([false,true] as $completed){
+                $base=$completed?'arpa-approval-verification':'arpa-submitted-appointments';$summary=$this->table($base.($stage==='NATIONAL'?'-district-summary':'-summary'));
+                $total=array_sum(array_map(static fn($r)=>(int)strip_tags((string)$r['total_count']),$summary['data']));$this->same($this->table($base)['recordsTotal'],$total,'hierarchy counts equal unified counts with nonempty native/historical histories');
+                if($stage==='NATIONAL'){$summary=$this->table($base.'-summary',['district_id'=>$district]);$total=array_sum(array_map(static fn($r)=>(int)strip_tags((string)$r['total_count']),$summary['data']));$this->same($this->table($base,['district_id'=>$district])['recordsTotal'],$total,'selected District ASC summary matches filtered unified total');}
+            }
+        }
+    }
+    private function hierarchyNavigation():void
+    {
+        $district='19000000-0000-4000-8000-000000000001';
+        foreach(['/hr/arpa-appointments/submitted','/hr/arpa-appointments/approval'] as $page){
+            foreach([6,8] as $actor){
+                [$status,$body]=$this->route('GET',$page,[],$actor);$this->same(200,$status,'default page remains unified');$this->same(true,str_contains($body,$page.'?view=hierarchy'),'scoped hierarchy is discoverable from unified list');
+                [$status,$body]=$this->route('GET',$page.'?view=hierarchy',[],$actor);$this->same(200,$status,'existing scoped hierarchy renders');$this->same(true,str_contains($body,$actor===8?'District Summary':'ASC Summary'),'correct National/District hierarchy level');$this->same(false,str_contains($body,'dems-arpa-historical-approvals-'),'hierarchy has no separate historical table');
+            }
+            [$status,$body]=$this->route('GET',$page.'/district/'.$district,[],8);$this->same(200,$status,'National District-to-ASC navigation preserved');$this->same(true,str_contains($body,$page.'?view=hierarchy'),'District back link returns to District hierarchy');
+            [$status,$body]=$this->route('GET',$page.'/district/'.$district.'/asc/'.self::ASC,[],8);$this->same(200,$status,'National ASC drill-down renders unified records');$this->same(true,str_contains($body,'Record Kind'),'ASC drill-down is one combined table');$this->same(true,str_contains($body,'href="'.url(ltrim($page,'/').'/district/'.$district).'"'),'National ASC back link retains selected District');
+            [$status,$body]=$this->route('GET',$page.'/asc/'.self::ASC,[],6);$this->same(200,$status,'District ASC drill-down preserved');$this->same(true,str_contains($body,'Record Kind'),'District ASC records stay unified');$this->same(true,str_contains($body,$page.'?view=hierarchy'),'District ASC back link returns to ASC summary');
+            [$status]=$this->route('GET',$page.'/district/'.$district.'/asc/'.self::ASC,[],6);$this->same(403,$status,'District context cannot use National drill-down route');
+            [$status]=$this->route('GET',$page.'/asc/'.self::ASC,[],10);$this->same(403,$status,'other District cannot browse this ASC');
+            [$status,$body]=$this->route('GET',$page.'?view=hierarchy',[],4);$this->same(200,$status,'ASC context safely retains its own unified list');$this->same(true,str_contains($body,'Record Kind'),'ASC cannot switch to broader hierarchy');$this->same(false,str_contains($body,'Browse Districts / ASCs')||str_contains($body,'Browse ASCs'),'no broader navigation offered to ASC');
+            [$status]=$this->route('GET',$page.'?view=hierarchy',[],11);$this->same(403,$status,'hierarchy does not bypass workflow permission');
+        }
+    }
+    private function optionalVerify():void
+    {
+        $service=new ArpaHistoricalAppointmentApprovalService($this->pdo);$before=$this->call($this->fixture,'operational');
+        foreach($this->verifyCases as [$fixture,$actor,$stage]){
+            $id=$fixture['case']['id'];$url='/hr/arpa-appointments/historical-approvals/'.$id;
+            $this->context($actor);$detail=$service->interfaceGet($id,self::actor($actor));$version=(string)$detail['case']['version'];
+            [$status,$html]=$this->route('GET',$url,[],$actor);$this->same(200,$status,'verification form available for '.$stage);
+            preg_match_all('~<form\b[^>]*>.*?</form>~s',$html,$forms);$verifyForm='';$adverseForm='';foreach($forms[0] as $form){if(str_contains($form,'value="VERIFY"'))$verifyForm=$form;if(str_contains($form,'value="REJECT"')||str_contains($form,'value="RETURN_FOR_CORRECTION"'))$adverseForm=$form;}
+            foreach(['reason','evidence_reference'] as $field){preg_match('~<(?:input|textarea)\b[^>]*name="'.$field.'"[^>]*>~',$verifyForm,$tag);$this->same(true,isset($tag[0]),'verification field exists');$this->same(false,str_contains($tag[0],'required'),'VERIFY '.$field.' is optional in HTML');if($detail['actions']['return']||$detail['actions']['reject']){preg_match('~<(?:input|textarea)\b[^>]*name="'.$field.'"[^>]*>~',$adverseForm,$tag);$this->same(true,isset($tag[0])&&str_contains($tag[0],'required'),'adverse action retains required '.$field);}}
+            $post=['expected_version'=>$version,'action'=>'VERIFY','reason'=>'','evidence_reference'=>''];
+            if($stage==='DISTRICT')$post['reason']=" \t";
+            if($stage==='NATIONAL')unset($post['reason'],$post['evidence_reference']);
+            [$status]=$this->route('POST',$url.'/review',$post,$actor,null,'invalid');$this->same(419,$status,'blank verification still requires CSRF');
+            [$status]=$this->route('POST',$url.'/review',$post,2);$this->same(403,$status,'blank verification cannot bypass scope');
+            [$status]=$this->route('POST',$url.'/review',$post+['officer_id'=>'forged'],$actor);$this->same(422,$status,'protected fields still rejected');
+            foreach(["invalid\x00text",str_repeat('x',1001)] as $invalid){[$status]=$this->route('POST',$url.'/review',array_replace($post,['reason'=>$invalid]),$actor);$this->same(422,$status,'optional VERIFY text still enforces length and control-character validation');}
+            if($stage==='ASC'){
+                // Simulate an installation still on 067: audit failure must roll back the transition.
+                $this->pdo->exec('ALTER TABLE arpa_appointment_historical_approval_event ADD CONSTRAINT fixture_old_verify_check CHECK(CHAR_LENGTH(TRIM(reason))>0 AND CHAR_LENGTH(TRIM(evidence_reference))>0)');
+                try{[$status,$body]=$this->route('POST',$url.'/review',$post,$actor);$this->same(503,$status,'missing optional-evidence capability fails closed');$this->same(false,str_contains($body,'SQLSTATE'),'constraint failure does not expose SQL');$this->same($version,(string)$service->get($id,self::actor($actor))['case']['version'],'audit insertion failure rolls back case version');}
+                finally{$this->pdo->exec('ALTER TABLE arpa_appointment_historical_approval_event DROP CHECK fixture_old_verify_check');}
+            }
+            [$status]=$this->route('POST',$url.'/review',$post,$actor);$this->same(302,$status,'empty VERIFY pair accepted at '.$stage);
+            $this->context($actor);$after=$service->get($id,self::actor($actor));$last=end($after['events']);
+            foreach(['action'=>'VERIFY','stage'=>$stage,'user_id'=>self::actor($actor),'reason'=>'','evidence_reference'=>'','new_status'=>$stage.'_VERIFIED'] as $key=>$value)$this->same($value,$last[$key],'exact verification audit '.$key);
+            $this->same(true,!empty($last['action_at']),'real verification timestamp recorded');$audit=json_decode($last['after_json'],true);$this->same(self::actor($actor),$audit['case']['updated_by'],'actual verifier recorded in structured audit');
+            [$status]=$this->route('POST',$url.'/review',$post,$actor);$this->same(409,$status,'duplicate/stale verification cannot append another event');
+            $approver=$actor+1;$p=['expected_version'=>(string)$after['case']['version'],'action'=>'APPROVE','reason'=>'','evidence_reference'=>''];
+            foreach(['APPROVE','REJECT','RETURN_FOR_CORRECTION'] as $action){$p['action']=$action;[$status]=$this->route('POST',$url.'/review',$p,$approver);$this->same(422,$status,'blank '.$action.' remains rejected');}
+            $this->same(count($after['events']),count($service->get($id,self::actor($actor))['events']),'denied actions leave no audit events');
+            try{$this->pdo->prepare("INSERT INTO arpa_appointment_historical_approval_event(approval_case_id,action,stage,user_id,previous_status,new_status,reason,evidence_reference,after_json) VALUES(?,'APPROVE',?,?,'X','Y','','','{}')")->execute([$id,$stage,self::actor($approver)]);throw new RuntimeException('Database accepted empty approval evidence.');}catch(PDOException){$this->same(true,true,'migration 068 still rejects empty non-VERIFY event evidence');}
+            if($stage==='NATIONAL'){
+                [$status]=$this->route('POST',$url.'/review',['expected_version'=>(string)$after['case']['version'],'action'=>'APPROVE','reason'=>'Final authorized review','evidence_reference'=>'Synthetic final approval evidence','confirm_final'=>'1'],9);$this->same(302,$status,'National approval still requires and accepts explicit evidence/confirmation');
+                $q=(new App\Services\ArpaAppointmentApprovalQualificationPolicy($this->pdo))->qualify($after['case']['appointment_id'],[self::ASC]);$this->same('APPROVED',$q['classification'],'genuine final approval qualifies even when verification text was omitted');
+            }
+        }
+        $this->same($before,$this->call($this->fixture,'operational'),'optional VERIFY changes only case/events, never source records');$this->context(1);
     }
     private function routes():void
     {
@@ -270,8 +463,8 @@ final class ArpaHistoricalApprovalUiIsolatedTest
         [$status]=$this->route('POST',$url.'/review',['expected_version'=>'7','action'=>'APPROVE','reason'=>'National approval','evidence_reference'=>'National proof','confirm_final'=>'1'],9);$this->same(302,$status,'final National approval succeeds');
         [$status,$html]=$this->route('GET',$url,[],9);$this->same(200,$status,'completed reviewer retains authorized detail access');$this->same(true,str_contains($html,'National approval')&&str_contains($html,'NATIONAL_APPROVED'),'complete event history rendered');
         $this->context(9);$this->same(true,$this->table('arpa-historical-approvals-completed')['recordsTotal']>=1,'own historical completed action is listed');
-        [$status,$html]=$this->route('GET','/hr/arpa-appointments/approval',[],9);$this->same(200,$status,'existing completed-action interface renders');$this->same(true,str_contains($html,'arpa-historical-approvals-completed'),'historical completed table is integrated without replacing native table');
-        $native=DataTableRegistry::definition('arpa-approval-verification');$this->same(true,in_array("r.record_origin='NATIVE'",$native['baseWhere'],true)&&in_array("w.record_origin='NATIVE'",$native['baseWhere'],true),'native-only completed filters remain unchanged');
+        [$status,$html]=$this->route('GET','/hr/arpa-appointments/approval',[],9);$this->same(200,$status,'existing completed-action interface renders');$this->same(false,str_contains($html,'dems-arpa-historical-approvals-completed-table'),'completed page has no second historical table');
+        $native=(new ReflectionMethod(DataTableRegistry::class,'arpaApprovalVerification'))->invoke(null);$this->same(true,in_array("r.record_origin='NATIVE'",$native['baseWhere'],true)&&in_array("w.record_origin='NATIVE'",$native['baseWhere'],true),'native-only completed source filters remain unchanged');
         // Exercise a real return/edit/resubmit and a terminal rejection through POST.
         $id=$this->cases[3]['case']['case']['id'];$u='/hr/arpa-appointments/historical-approvals/'.$id;
         [$status]=$this->route('POST',$u.'/review',['expected_version'=>'3','action'=>'RETURN_FOR_CORRECTION','reason'=>'More evidence','evidence_reference'=>'Return note'],6);$this->same(302,$status,'District return succeeds');
@@ -303,7 +496,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $this->same($visible,in_array($id,$ids,true),'pending visibility for actor/context '.$actor.' '.$role);
             $this->same(count($rows),$read->count(self::actor($actor)),'shared pending count matches exact population');
             $table=$this->table('arpa-historical-approvals-pending',[],['length'=>100]);$this->same(count($rows),$table['recordsTotal'],'DataTable total includes the same stale-retirement population');$this->same(count($rows),$table['recordsFiltered'],'unfiltered DataTable count agrees');
-            $total=(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor($actor));$this->same($this->table('arpa-submitted-appointments')['recordsTotal']+count($rows),$total,'dashboard count equals unchanged native queue plus historical cases');
+            $total=(new ArpaWorkflowQueuePolicy($this->pdo))->actionableCount(self::actor($actor));$this->same($this->table('arpa-submitted-appointments')['recordsTotal'],$total,'dashboard count equals unified pending queue');
             // Check the shared summary source without granting ASC users a District/National drill-down route.
             [$summary]=$this->callRegistrySummary();$where=$summary['baseWhere']??[];$sql=($summary['with']??'').' SELECT COUNT(*) FROM '.$summary['from'].($where===[]?'':' WHERE '.implode(' AND ',$where));$sum=$this->pdo->prepare($sql);$sum->execute($summary['baseParams']??[]);$this->same($total,(int)$sum->fetchColumn(),'hierarchy summary source reconciles with pending list and dashboard');
             try{$detail=$service->interfaceGet($id,self::actor($actor));$canRetire=$detail['actions']['reject'];}catch(DomainException $e){$this->same(403,$e->getCode(),'unauthorized direct detail fails closed');$canRetire=false;}
@@ -318,7 +511,7 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $native='80000000-0000-4000-8000-000000000001';$n=$this->cases[0];
             $this->pdo->prepare("INSERT INTO arpa_division_appointment_request(id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,workflow_status,created_by) VALUES(?,'NATIVE','APPOINTMENT',?,'PERMANENT',?,?,?,'ASC_VERIFIED',?)")->execute([$native,$n['officer'],self::ASC,$n['division'],'2020-01-01',self::actor(1)]);
             foreach([[4,'VERIFY','NATIVE'],[4,'VERIFY','LEGACY_IMPORT'],[5,'APPROVE','NATIVE'],[5,'APPROVE','LEGACY_IMPORT']] as [$actor,$action,$origin])$this->pdo->prepare("INSERT INTO arpa_appointment_workflow_action(request_id,action,stage,user_id,action_at,record_origin,previous_status,new_status) VALUES(?,?,'ASC',?,NOW(),?,'SUBMITTED','ASC_VERIFIED')")->execute([$native,$action,self::actor($actor),$origin]);
-            foreach([[4,'ASC_SUBJECT_OFFICER'],[5,'ASC_ADMIN']] as [$actor,$role]){$this->context($actor,$role);$this->same(1,$this->table('arpa-approval-verification')['recordsTotal'],'native completed action retained and imported action excluded for '.$role);}
+            foreach([[4,'ASC_SUBJECT_OFFICER'],[5,'ASC_ADMIN']] as [$actor,$role]){$this->context($actor,$role);$this->same(1,$this->table('arpa-approval-verification',[],['filters'=>['record_kind'=>'Native']])['recordsFiltered'],'native completed action retained and imported action excluded for '.$role);}
             $parity(5,false,false);$parity(1,true,false); // Current DRAFT belongs to ASC preparation, not retirement.
             $this->pdo->prepare('UPDATE arpa_division_appointment_request SET version=version+1 WHERE id=?')->execute([$source['request']]);
             $parity(5,true,true);$parity(4,true,true,'ASC_ADMIN');$parity(4,true,false,'ASC_SUBJECT_OFFICER');
@@ -344,8 +537,8 @@ final class ArpaHistoricalApprovalUiIsolatedTest
             $this->context(5);$c=$service->review($id,'REJECT',(int)$c['case']['version'],self::actor(5),'Retire obsolete returned case','Synthetic evidence');$this->same('REJECTED',$c['case']['workflow_status'],'existing governed rejection retires stale case');$parity(5,false,false);$parity(1,false,false);
             $completed=$this->table('arpa-historical-approvals-completed',[],['length'=>100]);$this->same(false,str_contains(json_encode($completed),'Administrative resolution required'),'completed action labels/selection are not changed by retirement discovery');
             $this->context(5);$q=$read->query(self::actor(5));$s=$this->pdo->prepare($q['sql']);$s->execute($q['params']);$this->same(false,in_array($this->cases[0]['case']['case']['id'],array_column($s->fetchAll(),'case_id'),true),'National-approved terminal case stays out of pending queue');
-            $this->same(1,$this->table('arpa-submitted-appointments')['recordsTotal'],'native pending ASC approval remains unchanged after historical retirement');
-            foreach([[4,'ASC_SUBJECT_OFFICER'],[5,'ASC_ADMIN']] as [$actor,$role]){$this->context($actor,$role);$this->same(1,$this->table('arpa-approval-verification')['recordsTotal'],'native completed filters unchanged after historical retirement for '.$role);}
+            $this->same(1,$this->table('arpa-submitted-appointments',[],['filters'=>['record_kind'=>'Native']])['recordsFiltered'],'native pending ASC approval remains unchanged after historical retirement');
+            foreach([[4,'ASC_SUBJECT_OFFICER'],[5,'ASC_ADMIN']] as [$actor,$role]){$this->context($actor,$role);$this->same(1,$this->table('arpa-approval-verification',[],['filters'=>['record_kind'=>'Native']])['recordsFiltered'],'native completed filters unchanged after historical retirement for '.$role);}
         }finally{$this->pdo->rollBack();$this->context(1);}
         $this->same($operational,$this->call($this->fixture,'operational'),'queue/detail inspection and rolled-back synthetic transitions preserve all operational records');
     }

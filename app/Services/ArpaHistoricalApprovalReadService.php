@@ -79,11 +79,11 @@ final class ArpaHistoricalApprovalReadService
         // IDs come only from the authorized backend assessment, not request filters.
         $entryType=$access['retirement_ids']===[]?"'Historical Appointment'":"CASE WHEN hc.id IN(".implode(',',array_map(fn(string $id):string=>$this->pdo->quote($id),$access['retirement_ids'])).") THEN 'Historical Appointment - Administrative resolution required (stale source)' ELSE 'Historical Appointment' END";
         $sql=$access['with']." SELECT ".($completed?'CAST(he.id AS CHAR)':'hc.id')." row_id,hc.id case_id,hc.appointment_id,hc.request_id,hc.source_correction_id,hc.officer_id,hc.asc_location_id,
-            {$entryType} entry_type,o.dad_number officer_number,o.name_with_initials officer_name,a.appointment_type,al.name_en asc_name,arpa.name_en arpa_name,
+            {$entryType} entry_type,o.dad_number officer_number,o.name_with_initials officer_name,o.nic,a.appointment_type,a.arpa_division_location_id,al.name_en asc_name,arpa.name_en arpa_name,
             a.effective_from,cl.effective_to,r.workflow_status original_workflow_status,hc.workflow_status historical_status,hc.reason,hc.evidence_reference,
             dc.correction_action,dc.correction_reason,dc.evidence_reference correction_evidence,
             CASE WHEN cl.effective_to<CURRENT_DATE() THEN 'Ended' WHEN a.effective_from>CURRENT_DATE() THEN 'Scheduled' ELSE 'Current / Open' END operational_status,".
-            ($completed?'he.action event_action,he.stage event_stage,he.new_status resulting_status,he.action_at':'NULL event_action,NULL event_stage,NULL resulting_status,hc.created_at action_at')."
+            ($completed?'he.action event_action,he.stage event_stage,he.new_status resulting_status,he.action_at,he.user_id event_user_id':'NULL event_action,NULL event_stage,NULL resulting_status,hc.created_at action_at,NULL event_user_id')."
             FROM arpa_appointment_historical_approval_case hc {$eventJoin}
             JOIN arpa_division_appointment_request r ON r.id=hc.request_id JOIN arpa_division_appointment a ON a.id=hc.appointment_id
             JOIN arpa_appointment_data_correction dc ON dc.id=hc.source_correction_id JOIN officer o ON o.id=hc.officer_id

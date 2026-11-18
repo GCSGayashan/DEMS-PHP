@@ -45,8 +45,8 @@ final class DataTableRegistry
             'notifications' => self::notifications($input),
             'arpa-division-appointments' => self::arpaDivisionAppointments(),
             'arpa-new-appointments' => self::applyArpaAscContext(self::arpaNewAppointments(), $input, 'r.asc_location_id'),
-            'arpa-submitted-appointments' => self::applyArpaAscContext(self::arpaSubmittedAppointments(), $input, 'r.asc_location_id'),
-            'arpa-approval-verification' => self::applyArpaAscContext(self::arpaApprovalVerification(), $input, 'r.asc_location_id'),
+            'arpa-submitted-appointments' => self::applyArpaAscContext(self::arpaUnifiedWorkflow(false,$input), $input, 'u.asc_location_id'),
+            'arpa-approval-verification' => self::applyArpaAscContext(self::arpaUnifiedWorkflow(true,$input), $input, 'u.asc_location_id'),
             'arpa-historical-approvals-pending' => self::arpaHistoricalApprovals(false,$input),
             'arpa-historical-approvals-completed' => self::arpaHistoricalApprovals(true,$input),
             'arpa-open-appointments' => self::applyArpaAscContext(self::arpaOpenAppointments(), $input, 'a.asc_location_id'),
@@ -1274,6 +1274,78 @@ final class DataTableRegistry
                 self::actionColumn(fn($r)=>'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/requests/division/'.$r['request_id'])).'">View</a>'),
             ],'defaultOrder'=>[11,'DESC'],
         ];
+    }
+
+    /** One SQL population: authorize each original source BEFORE union/count/page.
+     * Original imported-review rows stay supported; they are not relabelled Native.
+     * Completed grain remains one action owned by the acting user, not one officer.
+     */
+    private static function arpaUnifiedWorkflow(bool $completed,array $input):array
+    {
+        $native=$completed?self::arpaApprovalVerification():self::arpaSubmittedAppointments();
+        $nextAction=static fn(string $status):string=>"CASE {$status} WHEN 'DRAFT' THEN 'SUBMIT' WHEN 'RETURNED' THEN 'CORRECT / RESUBMIT' WHEN 'SUBMITTED' THEN 'VERIFY' WHEN 'ASC_VERIFIED' THEN 'APPROVE' WHEN 'ASC_APPROVED' THEN 'VERIFY' WHEN 'DISTRICT_VERIFIED' THEN 'APPROVE' WHEN 'DISTRICT_APPROVED' THEN 'VERIFY' WHEN 'NATIONAL_VERIFIED' THEN 'APPROVE' ELSE 'COMPLETED' END";
+        $stage=static fn(string $status):string=>"CASE WHEN {$status} IN('DRAFT','RETURNED','SUBMITTED','ASC_VERIFIED') THEN 'ASC' WHEN {$status} IN('ASC_APPROVED','DISTRICT_VERIFIED') THEN 'DISTRICT' WHEN {$status} IN('DISTRICT_APPROVED','NATIONAL_VERIFIED') THEN 'NATIONAL' ELSE '' END";
+        $projection=["CONCAT('N:',".$native['count'].") row_key","CASE WHEN r.record_origin='NATIVE' THEN 'Native' ELSE 'Imported Original Workflow' END record_kind",
+            'r.id request_id','NULL case_id','r.officer_id','o.dad_number officer_number','o.name_with_initials officer_name','o.nic','r.asc_location_id','asc_l.name_en asc_name',
+            'r.arpa_division_location_id','arpa.name_en arpa_name','r.appointment_type','r.requested_effective_from effective_from','r.requested_effective_to effective_to',
+            'r.workflow_status','r.workflow_status original_workflow_status',($completed?'w.action':$nextAction('r.workflow_status')).' action',($completed?'w.stage':$stage('r.workflow_status')).' stage',
+            ($completed?'w.new_status':'NULL').' resulting_status',($completed?'w.action_at':'r.created_at').' action_at',($completed?'w.user_id':'NULL').' action_actor_id','r.created_by'];
+        // Retain the submitted/returned evidence columns from the original pending table.
+        $projection=array_merge($projection,$completed?['NULL submitted_by','NULL submitted_at','NULL responsible_level','NULL returned_by','NULL returned_level','NULL returned_at','NULL return_reason']:
+            ['submitter.username submitted_by',"(SELECT wa.action_at FROM arpa_appointment_workflow_action wa WHERE wa.request_id=r.id AND wa.action='SUBMIT' ORDER BY wa.id DESC LIMIT 1) submitted_at",$stage('r.workflow_status').' responsible_level',"COALESCE(NULLIF(returner.display_name,''),returner.username) returned_by",'returned_event.stage returned_level','returned_event.action_at returned_at','returned_event.comments return_reason']);
+        $sql=($native['with']??'').' SELECT '.implode(',',$projection).' FROM '.$native['from'].' WHERE '.implode(' AND ',$native['baseWhere']);
+        $parts=['SELECT * FROM ('.$sql.') original_rows'];$params=$native['baseParams'];
+        $read=new \App\Services\ArpaHistoricalApprovalReadService(Database::pdo());$actor=(string)(Auth::user()['id']??'');$allowed=true;
+        if($read->available()&&$read->canUse($actor)){
+            try{$h=$read->query($actor,$completed,$input);}catch(\DomainException $e){if($e->getCode()!==403)throw $e;$allowed=false;$h=null;}
+            if($h!==null){
+            $action=$completed?'h.event_action':"CASE WHEN h.entry_type LIKE '%Administrative resolution%' THEN 'ADMINISTRATIVE RESOLUTION (STALE SOURCE)' ELSE ".$nextAction('h.historical_status').' END';
+            $parts[]="SELECT CONCAT('H:',h.row_id),'Historical Appointment',h.request_id,h.case_id,h.officer_id,h.officer_number,h.officer_name,h.nic,h.asc_location_id,h.asc_name,
+                h.arpa_division_location_id,h.arpa_name,h.appointment_type,h.effective_from,h.effective_to,h.historical_status,h.original_workflow_status,
+                {$action},".($completed?'h.event_stage':$stage('h.historical_status')).",h.resulting_status,h.action_at,h.event_user_id,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM ({$h['sql']}) h";
+            array_push($params,...$h['params']);
+            }
+        }
+        $contextWhere=[];$districtId=trim((string)($input['district_id']??''));
+        if($districtId!==''){
+            if(preg_match(self::uuidPattern(),$districtId)!==1||!ScopeService::canAccessLocation($actor,$districtId))$allowed=false;
+            else{$contextWhere[]="EXISTS(SELECT 1 FROM location_relationship dr WHERE dr.child_location_id=u.asc_location_id AND dr.parent_location_id=? AND dr.relationship_type='DISTRICT_ASC' AND dr.active=1 AND dr.approval_status='APPROVED' AND dr.effective_from<=CURRENT_DATE() AND (dr.effective_to IS NULL OR dr.effective_to>=CURRENT_DATE()))";$params[]=$districtId;}
+        }
+        $filters=$native['filters'];
+        foreach($filters as &$filter){
+            if(isset($filter['column']))$filter['column']=str_replace(['r.requested_effective_from','r.'],['u.effective_from','u.'],$filter['column']);
+            if(isset($filter['build'])){$build=$filter['build'];$filter['build']=static function($value)use($build){$result=$build($value);$result[0]=str_replace('r.asc_location_id','u.asc_location_id',$result[0]);return $result;};}
+        }unset($filter);
+        foreach(['status','workflow_status'] as $key)if(isset($filters[$key])){
+            $filters[$key]['allowed']=array_values(array_unique([...$filters[$key]['allowed'],'DRAFT','SUBMITTED','REJECTED']));
+            $filters[$key]['ui']['label']='Workflow Status';$filters[$key]['ui']['options']+=['DRAFT'=>'Draft','SUBMITTED'=>'Submitted','REJECTED'=>'Rejected'];
+        }
+        $filters['record_kind']=['column'=>'u.record_kind','allowed'=>['Native','Historical Appointment','Imported Original Workflow'],'ui'=>['label'=>'Record Kind','options'=>['Native'=>'Native','Historical Appointment'=>'Historical Appointment','Imported Original Workflow'=>'Imported Original Workflow']]];
+        $columns=[
+            self::col('Record Kind','record_kind','u.record_kind',fn($r)=>DataTableFormat::badge($r['record_kind'])),
+            self::col('Reference','reference','COALESCE(u.case_id,u.request_id)',fn($r)=>DataTableFormat::text(substr($r['reference'],0,8))),
+            self::col('Officer Number','officer_number','u.officer_number',fn($r)=>'<a href="'.e(url('hr/officers/'.$r['officer_id'])).'">'.e($r['officer_number']).'</a>'),
+            self::col('Officer','officer_name','u.officer_name',fn($r)=>DataTableFormat::text($r['officer_name'])),
+            self::col('NIC','nic','u.nic',fn($r)=>DataTableFormat::text($r['nic'])),
+            self::col('ASC','asc_name','u.asc_name',fn($r)=>DataTableFormat::text($r['asc_name'])),
+            self::col('ARPA Division','arpa_name','u.arpa_name',fn($r)=>DataTableFormat::text($r['arpa_name'])),
+            self::col('Appointment Type','appointment_type','u.appointment_type',fn($r)=>DataTableFormat::badge($r['appointment_type'])),
+            self::col('Effective From','effective_from','u.effective_from',fn($r)=>DataTableFormat::date($r['effective_from'])),
+            self::col('Effective To','effective_to','u.effective_to',fn($r)=>DataTableFormat::date($r['effective_to'],'Open')),
+            self::col('Workflow Status','workflow_status','u.workflow_status',fn($r)=>DataTableFormat::badge($r['workflow_status'])),
+            self::col('Original Workflow Status','original_workflow_status','u.original_workflow_status',fn($r)=>DataTableFormat::badge($r['original_workflow_status'])),
+            self::col('Action','action','u.action',fn($r)=>DataTableFormat::text(trim($r['stage'].' '.$r['action']))),
+            self::col('Action Officer','action_officer','actor.username',fn($r)=>DataTableFormat::text($r['action_officer'])),
+            self::col($completed?'Action At':'Recorded At','action_at','u.action_at',fn($r)=>$r['action_at']?DataTableFormat::dateTime($r['action_at']):'<span class="text-muted">Unavailable from legacy source</span>'),
+        ];
+        if($completed)$columns[]=self::col('Result','resulting_status','u.resulting_status',fn($r)=>DataTableFormat::badge($r['resulting_status']));
+        else foreach(['submitted_by'=>'Submitted By','submitted_at'=>'Submitted At','responsible_level'=>'Responsible Level','returned_by'=>'Returned By','returned_level'=>'Returned Level','returned_at'=>'Returned At','return_reason'=>'Correction Reason'] as $key=>$label)$columns[]=self::col($label,$key,'u.'.$key,fn($r)=>DataTableFormat::text($r[$key]));
+        $columns[]=self::actionColumn(fn($r)=>$r['case_id']?'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/historical-approvals/'.$r['case_id'])).'">View Case</a>':($completed?'<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/requests/division/'.$r['request_id'])).'">View</a>':self::arpaWorkflowActions($r+['id'=>$r['request_id'],'entity'=>'division'])));
+        return ['permission'=>$native['permission'],'authorize'=>fn():bool=>$allowed&&($native['authorize'])(),'export'=>$native['export'],'filename'=>$native['filename'],
+            'from'=>'('.implode(' UNION ALL ',$parts).') u LEFT JOIN system_user actor ON actor.id=u.action_actor_id',
+            'select'=>['u.*','COALESCE(u.case_id,u.request_id) reference',"COALESCE(NULLIF(actor.display_name,''),actor.username) action_officer"],'count'=>'u.row_key','baseWhere'=>$contextWhere,'baseParams'=>$params,
+            'searchable'=>['u.request_id','u.case_id','u.record_kind','u.officer_number','u.officer_name','u.nic','u.asc_name','u.arpa_name','u.appointment_type','u.workflow_status','u.action','u.stage','u.resulting_status','u.original_workflow_status'],
+            'filters'=>$filters,'columns'=>$columns,'defaultOrder'=>[$completed?14:10,$completed?'DESC':'ASC']];
     }
 
     private static function arpaHistoricalApprovals(bool $completed,array $input):array

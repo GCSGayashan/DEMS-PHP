@@ -239,7 +239,7 @@ final class ArpaHistoricalAppointmentApprovalService
 
     private function reviewDecision(string $id,string $action,int $expectedVersion,string $actorId,string $reason,string $evidenceReference,?array $attestation=null):array
     {
-        $this->actor($actorId);$action=strtoupper($action);$reason=$this->text($reason,'Review reason');$evidenceReference=$this->text($evidenceReference,'Evidence reference');
+        $this->actor($actorId);$action=strtoupper($action);$reason=$this->text($reason,'Review reason',1000,$action==='VERIFY');$evidenceReference=$this->text($evidenceReference,'Evidence reference',1000,$action==='VERIFY');
         if(!in_array($action,['VERIFY','APPROVE','RETURN_FOR_CORRECTION','REJECT'],true))throw new DomainException('Unsupported historical approval action.',422);
         return $this->transaction(function()use($id,$action,$expectedVersion,$actorId,$reason,$evidenceReference,$attestation):array{
             $case=$this->caseRow($id,true);$this->assertHistoricalCaseWritable($case);$this->version($case,$expectedVersion);
@@ -490,9 +490,9 @@ final class ArpaHistoricalAppointmentApprovalService
         $input['reason']=$this->text($input['reason']??'','Reason');$input['evidence_reference']=$this->text($input['evidence_reference']??'','Evidence reference');
         if(isset($input['remarks']))$input['remarks']=is_string($input['remarks'])&&trim($input['remarks'])===''?null:$this->text($input['remarks'],'Remarks',2000);
     }
-    private function text(mixed $value,string $label,int $max=1000):string
+    private function text(mixed $value,string $label,int $max=1000,bool $optional=false):string
     {
-        if(!is_string($value)||!mb_check_encoding($value,'UTF-8')||trim($value)===''||mb_strlen($value)>$max||preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u',$value))throw new DomainException($label.' is required and must be valid text.',422);return trim($value);
+        if(!is_string($value)||!mb_check_encoding($value,'UTF-8')||(!$optional&&trim($value)==='')||mb_strlen($value)>$max||preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u',$value))throw new DomainException($label.' is required and must be valid text.',422);return trim($value);
     }
     private function caseRow(string $id,bool $lock=false):array
     {

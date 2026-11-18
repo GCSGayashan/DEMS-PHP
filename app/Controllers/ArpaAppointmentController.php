@@ -55,11 +55,8 @@ final class ArpaAppointmentController extends Controller
             return;
         }
 
-        if($this->appointmentHierarchySummary(
-            'Pending Review & Approval',
-            'arpa-submitted-appointments-summary',
-            null,
-            null,
+        if(($_GET['view']??null)==='hierarchy'&&$this->appointmentHierarchySummary(
+            'Pending Review & Approval','arpa-submitted-appointments-summary',null,null,
             'Assignments currently waiting for your verification or approval in your active working context.'
         ))return;
 
@@ -99,11 +96,8 @@ final class ArpaAppointmentController extends Controller
             return;
         }
 
-        if($this->appointmentHierarchySummary(
-            'My Completed Reviews & Approvals',
-            'arpa-approval-verification-summary',
-            null,
-            null,
+        if(($_GET['view']??null)==='hierarchy'&&$this->appointmentHierarchySummary(
+            'My Completed Reviews & Approvals','arpa-approval-verification-summary',null,null,
             'Your completed verification and approval actions from the current review cycle.'
         ))return;
 
@@ -1108,7 +1102,7 @@ final class ArpaAppointmentController extends Controller
             'title'=>$title,
             'description'=>$description,
             'district'=>$district,
-            'summaryUrl'=>$summaryUrl,
+            'summaryUrl'=>$summaryUrl.(in_array($summaryKey,['arpa-submitted-appointments-summary','arpa-approval-verification-summary'],true)?'?view=hierarchy':''),
             'dataTable'=>DataTableRegistry::viewModel(
                 $summaryKey,
                 ['district_id'=>$districtId]
@@ -1184,6 +1178,8 @@ final class ArpaAppointmentController extends Controller
             ]);
             return;
         }
+
+        if($districtId===null&&in_array($key,['arpa-submitted-appointments','arpa-approval-verification'],true))$summaryUrl.='?view=hierarchy';
 
         $dataTable=DataTableRegistry::viewModel(
             $key,

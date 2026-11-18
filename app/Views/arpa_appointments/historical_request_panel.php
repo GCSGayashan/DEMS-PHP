@@ -50,12 +50,17 @@ foreach($events as $event){
 <?php if($detail['source_stale']): ?><div class="alert alert-warning">The source baseline has changed or cannot be validated. Existing-record attestation is unavailable; authorized source-baseline review is required.</div><?php endif; ?>
 <?php if(!empty($detail['action_blocker'])): ?><p class="text-danger"><?= e($detail['action_blocker']) ?></p><?php endif; ?>
 <?php if(!$administrativelyDeleted&&!$detail['source_stale']&&(!empty($actions['submit'])||!empty($actions['primary'])||!empty($actions['return'])||!empty($actions['reject']))): ?>
+<?php $allActions=$actions;$formGroups=($actions['primary']??null)==='VERIFY'
+    ? [array_replace($actions,['return'=>false,'reject'=>false]),array_replace($actions,['primary'=>null])]:[$actions];
+foreach($formGroups as $formIndex=>$actions):
+if(empty($actions['submit'])&&empty($actions['primary'])&&empty($actions['return'])&&empty($actions['reject']))continue;
+$optionalReason=($actions['primary']??null)==='VERIFY'; ?>
 <form method="post" action="<?= e(url('hr/arpa-appointments/historical-approvals/'.$case['id'].'/attest')) ?>">
 <?= Csrf::field() ?>
 <input type="hidden" name="expected_version" value="<?= e($case['version']) ?>">
 <input type="hidden" name="baseline_hash" value="<?= e($case['baseline_hash']) ?>">
-<?php if(empty($actions['submit'])): ?><label class="form-label" for="historical-reason">Decision reason</label><textarea id="historical-reason" class="form-control mb-3" name="reason" maxlength="1000" required></textarea><?php endif; ?>
-<div class="form-check mb-3"><input class="form-check-input" id="historical-confirm-records" type="checkbox" name="confirm_records" value="1" required><label class="form-check-label" for="historical-confirm-records">I have checked the existing imported records, appointment dates and closure.</label></div>
+<?php if(empty($actions['submit'])): ?><label class="form-label" for="historical-reason-<?= $formIndex ?>">Decision reason <?= $optionalReason?'(optional)':'*' ?></label><textarea id="historical-reason-<?= $formIndex ?>" class="form-control mb-3" name="reason" maxlength="1000" <?= $optionalReason?'':'required' ?>></textarea><?php endif; ?>
+<div class="form-check mb-3"><input class="form-check-input" id="historical-confirm-records-<?= $formIndex ?>" type="checkbox" name="confirm_records" value="1" required><label class="form-check-label" for="historical-confirm-records-<?= $formIndex ?>">I have checked the existing imported records, appointment dates and closure.</label></div>
 <?php if(!empty($actions['final'])): ?><div class="form-check mb-3"><input class="form-check-input" id="historical-confirm-final" type="checkbox" name="confirm_final" value="1" required><label class="form-check-label" for="historical-confirm-final">I confirm final National approval of this existing appointment and closure.</label></div><?php endif; ?>
 <div class="d-flex flex-wrap gap-2">
 <?php if(!empty($actions['submit'])): ?><button class="btn btn-primary" name="action" value="SUBMIT"><?= e($nextAction['label']??'Submit Historical Appointment') ?></button><?php endif; ?>
@@ -63,6 +68,7 @@ foreach($events as $event){
 <?php if(!empty($actions['return'])): ?><button class="btn btn-outline-warning" name="action" value="RETURN_FOR_CORRECTION">Return for Correction</button><?php endif; ?>
 <?php if(!empty($actions['reject'])): ?><button class="btn btn-outline-danger" name="action" value="REJECT">Reject Historical Appointment</button><?php endif; ?>
 </div></form>
+<?php endforeach;$actions=$allActions; ?>
 <?php else: ?><p class="text-muted">No historical approval action is available to your account at this stage.</p><?php endif; ?>
 <details class="mt-3"><summary>Historical review audit and baseline</summary><p class="small text-break mt-2">Reviewed baseline: <?= e($case['baseline_hash']) ?></p>
 <?php foreach($events as $event): $audit=json_decode($event['after_json'],true); ?>
