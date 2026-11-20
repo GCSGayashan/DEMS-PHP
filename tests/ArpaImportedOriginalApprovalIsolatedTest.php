@@ -47,6 +47,7 @@ final class ArpaImportedOriginalApprovalIsolatedTest
             $this->same(0,(new App\Services\ArpaHistoricalApprovalReadService($this->pdo))->count(self::actor(1)),'audit-only case is not an independent actionable submission');
             $this->negativePeriods($service,$s,$sources[1]);
             $this->closureRequestConsistency($s,$sources[2]);
+            $this->openWorkflow($service,$s,$sources[1]);
             $this->fails(fn()=>App\Services\ArpaAppointmentRules::assertNativeEffectiveDate('2020-10-15'),'native 2025 minimum remains unchanged');
             foreach([[6,'VERIFY','DISTRICT','DISTRICT_VERIFIED'],[7,'APPROVE','DISTRICT','DISTRICT_APPROVED'],[8,'VERIFY','NATIONAL','NATIONAL_VERIFIED'],[9,'APPROVE','NATIONAL','NATIONAL_APPROVED']] as [$actor,$action,$stage,$expected]){
                 $this->context($actor);
@@ -68,7 +69,10 @@ final class ArpaImportedOriginalApprovalIsolatedTest
     private function closureFailures(ArpaAppointmentService $service,array $s,int $actor,string $action,string $stage):void
     {
         $corruptions=[
-            'missing closure'=>function()use($s):void{$this->pdo->prepare('DELETE FROM arpa_division_appointment_closure WHERE appointment_id=?')->execute([$s['appointment']]);},
+            'missing ended closure'=>function()use($s):void{
+                $this->pdo->prepare("UPDATE arpa_division_appointment_request SET requested_effective_to='2025-01-20' WHERE id=?")->execute([$s['request']]);
+                $this->pdo->prepare('DELETE FROM arpa_division_appointment_closure WHERE appointment_id=?')->execute([$s['appointment']]);
+            },
             'duplicated closure'=>function()use($s):void{
                 $q=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_closure WHERE appointment_id=?');$q->execute([$s['appointment']]);$row=$q->fetch();$row['id']=(string)$this->pdo->query('SELECT UUID()')->fetchColumn();
                 $this->pdo->prepare('INSERT INTO arpa_division_appointment_closure('.implode(',',array_keys($row)).') VALUES('.implode(',',array_fill(0,count($row),'?')).')')->execute(array_values($row));
@@ -91,15 +95,72 @@ final class ArpaImportedOriginalApprovalIsolatedTest
             $this->pdo->prepare("UPDATE arpa_division_appointment_request SET requested_effective_to='2025-01-20' WHERE id=?")->execute([$s['request']]);
             $q=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=?');$q->execute([$s['request']]);$request=$q->fetch();
             $this->same('2025-01-20',$policy->period($request,true)['effective_to'],'matching explicit original request end is accepted');
+            $reason=$request;$reason['end_reason_id']='18000000-0000-4000-8000-000000000001';
+            $this->same('2025-01-20',$policy->period($reason,true)['effective_to'],'matching original end reason is accepted');
+            $reason=$request;$reason['end_reason_id']='mismatched-reason';
+            $this->fails(fn()=>$policy->period($reason,true),'mismatched original end reason is rejected');
             $this->pdo->prepare('UPDATE arpa_division_appointment_closure SET request_id=? WHERE appointment_id=?')->execute([$other['request'],$s['appointment']]);
             $this->fails(fn()=>$policy->period($request,true),'unrelated closure request is rejected');
             foreach(['END','TRANSFER'] as $type){
                 $this->pdo->prepare('UPDATE arpa_division_appointment_request SET request_type=?,source_appointment_id=?,officer_id=?,requested_effective_to=? WHERE id=?')->execute([$type,$s['appointment'],$s['officer'],'2025-01-20',$other['request']]);
                 $this->same('2025-01-20',$policy->period($request,true)['effective_to'],'matching authoritative '.$type.' request end is accepted');
+                $this->pdo->prepare("UPDATE arpa_division_appointment_request SET end_reason_id='mismatched-reason' WHERE id=?")->execute([$other['request']]);
+                $this->fails(fn()=>$policy->period($request,true),'inconsistent authoritative '.$type.' end reason is rejected');
+                $this->pdo->prepare('UPDATE arpa_division_appointment_request SET end_reason_id=NULL WHERE id=?')->execute([$other['request']]);
                 $this->pdo->prepare("UPDATE arpa_division_appointment_request SET requested_effective_to='2025-01-21' WHERE id=?")->execute([$other['request']]);
                 $this->fails(fn()=>$policy->period($request,true),'inconsistent authoritative '.$type.' request end is rejected');
             }
         }finally{$this->pdo->rollBack();}
+    }
+    private function openWorkflow(ArpaAppointmentService $service,array $s,array $other):void
+    {
+        $this->pdo->beginTransaction();try{
+            $this->pdo->prepare('DELETE FROM arpa_division_appointment_closure WHERE appointment_id=?')->execute([$s['appointment']]);
+            $this->pdo->prepare("UPDATE arpa_division_appointment_request SET requested_effective_from='2023-09-08',requested_effective_to=NULL,end_reason_id=NULL WHERE id=?")->execute([$s['request']]);
+            $this->pdo->prepare("UPDATE arpa_division_appointment SET effective_from='2023-09-08' WHERE id=?")->execute([$s['appointment']]);
+            // The ended-period fixture has a successor; an open period must not overlap that successor.
+            foreach(['arpa_division_appointment','arpa_division_appointment_request'] as $table)$this->pdo->prepare('UPDATE '.$table.' SET arpa_division_location_id=? WHERE id=?')->execute([$other['division'],$other[$table==='arpa_division_appointment'?'appointment':'request']]);
+            $q=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=?');$q->execute([$s['request']]);$request=$q->fetch();
+            $policy=new ArpaImportedAppointmentWorkflowPolicy($this->pdo);
+            $period=$policy->period($request,true);
+            $this->same(['appointment_id'=>$s['appointment'],'effective_from'=>'2023-09-08','effective_to'=>null,'closure_id'=>null],$period,'genuinely open imported Permanent period accepted');
+            foreach([['requested_effective_to'=>'2025-01-20'],['end_reason_id'=>'18000000-0000-4000-8000-000000000001'],['requested_effective_from'=>'2023-09-09'],['appointment_type'=>'ACTING'],['legacy_history_only'=>1]] as $change){
+                $this->fails(fn()=>$policy->period(array_replace($request,$change),true),'open period does not bypass inconsistent/unsupported request');
+            }
+            foreach([1,3,10,11] as $actor){$this->context($actor);$this->fails(fn()=>$service->workflow('division',$s['request'],'VERIFY','DISTRICT','Unauthorized open review',self::actor($actor)),'open review authorization '.$actor);}
+            $this->context(6);
+            $info=$service->importedWorkflowInfo($request,self::actor(6));$this->same(true,$info['allowed'],'authorized District UI no longer blocks a genuinely open import');
+            $this->same($period,$info['period'],'UI uses the same open canonical period');
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET request_id=? WHERE id=?')->execute([$other['request'],$s['appointment']]);
+            $this->fails(fn()=>$service->workflow('division',$s['request'],'VERIFY','DISTRICT','Missing open canonical',self::actor(6)),'open missing canonical never recreated');
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET request_id=? WHERE id=?')->execute([$s['request'],$s['appointment']]);
+            $q2=$this->pdo->prepare('SELECT * FROM arpa_division_appointment WHERE id=?');$q2->execute([$s['appointment']]);$duplicate=$q2->fetch();$duplicate['id']=(string)$this->pdo->query('SELECT UUID()')->fetchColumn();
+            $this->pdo->prepare('INSERT INTO arpa_division_appointment('.implode(',',array_keys($duplicate)).') VALUES('.implode(',',array_fill(0,count($duplicate),'?')).')')->execute(array_values($duplicate));
+            $this->fails(fn()=>$service->workflow('division',$s['request'],'VERIFY','DISTRICT','Ambiguous open canonical',self::actor(6)),'open ambiguous canonical remains blocked');
+            $this->pdo->prepare('DELETE FROM arpa_division_appointment WHERE id=?')->execute([$duplicate['id']]);
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET arpa_division_location_id=? WHERE id=?')->execute([$s['division'],$other['appointment']]);
+            $this->fails(fn()=>$service->workflow('division',$s['request'],'VERIFY','DISTRICT','Overlapping open review',self::actor(6)),'future canonical assignment conflicts with unbounded open period');
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET arpa_division_location_id=?,officer_id=? WHERE id=?')->execute([$other['division'],$s['officer'],$other['appointment']]);
+            $this->fails(fn()=>$service->workflow('division',$s['request'],'VERIFY','DISTRICT','Conflicting type',self::actor(6)),'future Permanent assignment in another division conflicts with open officer period');
+            $this->pdo->prepare('UPDATE arpa_division_appointment SET officer_id=? WHERE id=?')->execute([$other['officer'],$other['appointment']]);
+            $appointments=$this->rows('arpa_division_appointment');$closures=$this->rows('arpa_division_appointment_closure');
+            $corrections=$this->rows('arpa_appointment_data_correction');$cases=$this->rows('arpa_appointment_historical_approval_case');$events=$this->rows('arpa_appointment_historical_approval_event');
+            $history=$this->rows('arpa_appointment_workflow_action');
+            foreach([[6,'VERIFY','DISTRICT','DISTRICT_VERIFIED'],[7,'APPROVE','DISTRICT','DISTRICT_APPROVED'],[8,'VERIFY','NATIONAL','NATIONAL_VERIFIED'],[9,'APPROVE','NATIONAL','NATIONAL_APPROVED']] as [$actor,$action,$stage,$expected]){
+                $this->context($actor);$this->same($expected,$service->workflow('division',$s['request'],$action,$stage,'Reviewed open imported period',self::actor($actor)),'open original '.$stage.' '.$action);
+                $this->fails(fn()=>$service->workflow('division',$s['request'],$action,$stage,'Repeated open review',self::actor($actor)),'open duplicate transition blocked');
+                $this->same($appointments,$this->rows('arpa_division_appointment'),'open approval never creates or changes appointments');
+                $this->same($closures,$this->rows('arpa_division_appointment_closure'),'open approval never creates a closure');
+                $q->execute([$s['request']]);$current=$q->fetch();
+                $this->same('2023-09-08',$current['requested_effective_from'],'open original start preserved');$this->same(null,$current['requested_effective_to'],'open original end remains NULL');
+            }
+            $new=array_slice($this->rows('arpa_appointment_workflow_action'),count($history));$this->same(4,count($new),'exactly four actual open approval events');
+            foreach($new as $i=>$event){$this->same(self::actor([6,7,8,9][$i]),$event['user_id'],'open action records actual reviewer');$this->same(date('Y-m-d'),substr($event['action_at'],0,10),'open action records current timestamp');}
+            $q=$this->pdo->prepare('SELECT details_json FROM audit_event WHERE target_id=? ORDER BY id DESC LIMIT 1');$q->execute([$s['request']]);$audit=json_decode($q->fetchColumn(),true);
+            foreach($period as $field=>$value)$this->same($value,$audit['preserved_imported_period'][$field],'open period audit preserves '.$field);
+            $this->same($corrections,$this->rows('arpa_appointment_data_correction'),'open source corrections unchanged');
+            $this->same($cases,$this->rows('arpa_appointment_historical_approval_case'),'separate historical case remains unchanged');$this->same($events,$this->rows('arpa_appointment_historical_approval_event'),'separate historical events remain unchanged');
+        }finally{$this->pdo->rollBack();$this->context(6);}
     }
     private function nativeWorkflow(ArpaAppointmentService $service,array $s):void
     {

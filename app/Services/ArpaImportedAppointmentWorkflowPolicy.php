@@ -38,17 +38,21 @@ final class ArpaImportedAppointmentWorkflowPolicy
         if($a['record_origin']!=='LEGACY_IMPORT'||(int)$a['legacy_history_only']!==0||$a['effective_from']!==$request['requested_effective_from']
             ||(!empty($request['source_appointment_id'])&&$request['source_appointment_id']!==$a['id']))throw new DomainException(self::BLOCKED,409);
         $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_closure WHERE appointment_id=?'.$suffix);$s->execute([$a['id']]);$closures=$s->fetchAll();
-        if(count($closures)!==1)throw new DomainException(self::BLOCKED,409);$closure=$closures[0];$end=$closure['effective_to'];
-        foreach([$a['effective_from'],$end] as $date){
+        if(count($closures)>1)throw new DomainException(self::BLOCKED,409);$closure=$closures[0]??null;$end=$closure['effective_to']??null;
+        // No closure is an open period only when the authoritative request has no ending information.
+        if($closure===null&&(($request['requested_effective_to']??null)!==null||($request['end_reason_id']??null)!==null))throw new DomainException(self::BLOCKED,409);
+        foreach($closure===null?[$a['effective_from']]:[$a['effective_from'],$end] as $date){
             if(!is_string($date)||$date==='')throw new DomainException(self::BLOCKED,409);
             $d=DateTimeImmutable::createFromFormat('!Y-m-d',$date);if(!$d||$d->format('Y-m-d')!==$date)throw new DomainException(self::BLOCKED,409);
         }
-        if($end<$a['effective_from']||(($request['requested_effective_to']??null)!==null&&$request['requested_effective_to']!==$end))throw new DomainException(self::BLOCKED,409);
-        if($closure['request_id']!==null&&$closure['request_id']!==$request['id']){
+        if($end!==null&&($end<$a['effective_from']||(($request['requested_effective_to']??null)!==null&&$request['requested_effective_to']!==$end)))throw new DomainException(self::BLOCKED,409);
+        if($closure!==null&&($request['end_reason_id']??null)!==null&&$request['end_reason_id']!==$closure['end_reason_id'])throw new DomainException(self::BLOCKED,409);
+        if($closure!==null&&$closure['request_id']!==null&&$closure['request_id']!==$request['id']){
             $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_request WHERE id=?'.$suffix);$s->execute([$closure['request_id']]);$ends=$s->fetchAll();
             if(count($ends)!==1)throw new DomainException(self::BLOCKED,409);$endRequest=$ends[0];
             if(!in_array($endRequest['request_type'],['END','TRANSFER'],true)||$endRequest['source_appointment_id']!==$a['id']
-                ||$endRequest['officer_id']!==$a['officer_id']||$endRequest['requested_effective_to']!==$end||$endRequest['deleted_at']!==null)throw new DomainException(self::BLOCKED,409);
+                ||$endRequest['officer_id']!==$a['officer_id']||$endRequest['requested_effective_to']!==$end||$endRequest['deleted_at']!==null
+                ||(($endRequest['end_reason_id']??null)!==null&&$endRequest['end_reason_id']!==$closure['end_reason_id']))throw new DomainException(self::BLOCKED,409);
         }
         $parents=(new ArpaAppointmentLocationPolicy())->parents($this->pdo,$a['arpa_division_location_id'],'ASC_ARPA_DIVISION',$a['effective_from']);
         if(count($parents)!==1||$parents[0]['id']!==$a['asc_location_id'])throw new DomainException('The imported appointment hierarchy is ambiguous or inconsistent.',409);
@@ -57,6 +61,6 @@ final class ArpaImportedAppointmentWorkflowPolicy
         $read=new ArpaAppointmentReadService($this->pdo);
         $read->assertDivisionPeriodDoesNotOverlap($a['arpa_division_location_id'],$a['effective_from'],$end,false,$request['id'],$a['id']);
         $read->assertAppointmentTypeAvailable($a['officer_id'],$a['appointment_type'],$a['arpa_division_location_id'],$a['effective_from'],$end,$request['id'],$a['id']);
-        return ['appointment_id'=>$a['id'],'effective_from'=>$a['effective_from'],'effective_to'=>$end,'closure_id'=>$closure['id']];
+        return ['appointment_id'=>$a['id'],'effective_from'=>$a['effective_from'],'effective_to'=>$end,'closure_id'=>$closure['id']??null];
     }
 }
