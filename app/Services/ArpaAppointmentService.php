@@ -105,8 +105,9 @@ final class ArpaAppointmentService
 
     public function createEndRequest(string $appointmentId, string $effectiveTo, string $reasonId, ?string $remarks, string $actorId): string
     {
+        if(!$this->pdo->inTransaction())return $this->transaction(fn():string=>$this->createEndRequest($appointmentId,$effectiveTo,$reasonId,$remarks,$actorId));
         $this->assertDate($effectiveTo, 'Effective to');
-        $appointment = $this->appointment($appointmentId);
+        $appointment = $this->endableAppointment($appointmentId);
         if ($effectiveTo < $appointment['effective_from']) {
             throw new DomainException('Effective to cannot be before the appointment effective date.');
         }
@@ -301,13 +302,18 @@ final class ArpaAppointmentService
                 &&in_array(strtoupper($action),['SUBMIT','VERIFY','APPROVE'],true)){
                 $continuity=new ArpaDivisionContinuityService($this->pdo);
                 if((string)$request['request_type']==='APPOINTMENT'){
+                    $period=in_array(strtoupper($stage),['DISTRICT','NATIONAL'],true)?$this->existingOperationalPeriod($request):null;
                     $continuity->assertCanFillPeriod(
                         (string)$request['arpa_division_location_id'],
                         (string)$request['requested_effective_from'],
-                        $request['requested_effective_to']?:null,
+                        $period!==null?$period['effective_to']:($request['requested_effective_to']?:null),
                         $requestId,
-                        $request['source_appointment_id']?:null
+                        $period['id']??($request['source_appointment_id']?:null)
                     );
+                    if($period!==null){
+                        $read=new ArpaAppointmentReadService($this->pdo);
+                        $read->assertAppointmentTypeAvailable((string)$request['officer_id'],(string)$request['appointment_type'],(string)$request['arpa_division_location_id'],(string)$request['requested_effective_from'],$period['effective_to'],$requestId,$period['id']);
+                    }
                 }else{
                     $continuity->assertCanStart(
                         (string)$request['arpa_division_location_id'],
@@ -485,7 +491,7 @@ final class ArpaAppointmentService
         }
         if((string)$request['request_type']==='END'){
             if(empty($request['source_appointment_id']))throw new DomainException('The END request does not identify a source canonical appointment.');
-            $source=$this->appointment((string)$request['source_appointment_id'],true);
+            $source=$this->endableAppointment((string)$request['source_appointment_id']);
             $before=(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id=?',[(string)$request['id']]);
             $this->closeAppointmentAndDependents($source,$request,$approvedBy,'DIRECT',$approvedAt);
             $after=(int)$this->scalar('SELECT COUNT(*) FROM arpa_division_appointment_closure WHERE request_id=?',[(string)$request['id']]);
@@ -715,6 +721,36 @@ final class ArpaAppointmentService
         $row = $stmt->fetch();
         if (!$row) throw new DomainException('ARPA Division appointment was not found.');
         return $row;
+    }
+
+    /** END is independent of final approval, but requires an authoritative operational source. */
+    private function endableAppointment(string $id):array
+    {
+        $probe=$this->appointment($id);
+        $s=$this->pdo->prepare('SELECT id FROM arpa_division_appointment_request WHERE id=? FOR UPDATE');$s->execute([$probe['request_id']]);
+        $appointment=$this->appointment($id,true);
+        if($appointment['request_id']!==$probe['request_id'])throw new DomainException('The source appointment changed. Reload and retry.');
+        $qualified=(new ArpaAppointmentApprovalQualificationPolicy($this->pdo))->qualifyOperationalForMutation($id,[(string)$appointment['asc_location_id']]);
+        if(($qualified['classification']??null)!==ArpaAppointmentApprovalQualificationPolicy::APPROVED)throw new DomainException('The source appointment has not reached an eligible operational approval state.');
+        (new ArpaDivisionContinuityService($this->pdo))->assertNoUnresolvedDataIssues((string)$appointment['arpa_division_location_id'],true);
+        $this->assertNotClosed('arpa_division_appointment_closure','appointment_id',$id);
+        return $appointment;
+    }
+
+    /** Later governance reviews validate the preserved canonical period, not an obsolete open request envelope. */
+    private function existingOperationalPeriod(array $request):?array
+    {
+        $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment WHERE request_id=? FOR UPDATE');$s->execute([$request['id']]);$rows=$s->fetchAll();
+        if($rows===[])return null;
+        if(count($rows)!==1)throw new DomainException('The operational appointment is ambiguous.');$a=$rows[0];
+        foreach(['officer_id','asc_location_id','arpa_division_location_id','appointment_type','record_origin'] as $field)if($a[$field]!==$request[$field])throw new DomainException('The operational appointment does not match its request.');
+        if((int)$a['legacy_history_only']!==0||$a['effective_from']!==$request['requested_effective_from'])throw new DomainException('The operational appointment period does not match its request.');
+        $s=$this->pdo->prepare('SELECT * FROM arpa_division_appointment_closure WHERE appointment_id=? FOR UPDATE');$s->execute([$a['id']]);$closures=$s->fetchAll();
+        if(count($closures)>1)throw new DomainException('The operational appointment closure is ambiguous.');
+        $end=$closures[0]['effective_to']??null;
+        if($closures!==[]){$this->assertDate((string)$end,'Operational end');if($end<$a['effective_from'])throw new DomainException('Invalid operational appointment period.');}
+        if(($request['requested_effective_to']??null)!==null&&$request['requested_effective_to']!==$end)throw new DomainException('The operational appointment end does not match its request.');
+        return ['id'=>$a['id'],'effective_to'=>$end];
     }
 
     private function subject(string $id, bool $lock = false,?string $effectiveDate=null): array

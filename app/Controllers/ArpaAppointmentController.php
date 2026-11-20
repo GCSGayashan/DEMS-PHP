@@ -897,7 +897,7 @@ final class ArpaAppointmentController extends Controller
         $this->perform(function(ArpaAppointmentService $service,string $actor) use($id):void {
             $record=$this->divisionRecord($id);$this->assertArpaStageScope('ASC',(string)$record['asc_location_id']);
             $service->createAndSubmitEndRequest($id,(string)($_POST['effective_to']??''),(string)($_POST['end_reason_id']??''),$_POST['remarks']??null,$actor);
-            $this->flash('success','Assignment ending submitted. Dependent appointments will be closed as separate historical events after final approval.');
+            $this->flash('success','Assignment ending submitted. The closure and dependent appointment endings take effect on their approved end dates after ASC approval.');
         },'/hr/arpa-appointments/divisions/'.$id.'/end','/hr/arpa-appointments/submitted');
     }
 

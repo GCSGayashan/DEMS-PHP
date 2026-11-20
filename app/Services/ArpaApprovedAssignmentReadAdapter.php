@@ -63,7 +63,7 @@ final class ArpaApprovedAssignmentReadAdapter
                     unset($config['approvalSummarySource'],$config['approvalQualificationParameter']);
                 }else $config['qualificationReader']=$bounded;
                 self::checkDeadline($deadline);$result=$reader($config);self::checkDeadline($deadline);return $result;
-            });
+            },true); // Current Assignments are operational after ASC approval, not evidence of final approval.
         }finally{
             try{$pdo->exec('SET SESSION max_execution_time='.(int)$settings['timeout_ms']);}
             catch(Throwable){throw new DomainException('Read connection cleanup failed; discard this connection.',503);}

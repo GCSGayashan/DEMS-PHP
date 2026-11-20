@@ -1432,7 +1432,7 @@ final class DataTableRegistry
 
     private static function arpaOpenAppointments():array
     {
-        $definition=self::arpaDivisionAppointments();$definition['filename']='arpa-open-appointments';$definition['baseWhere'][]='c.id IS NULL';$definition['baseWhere'][]='a.legacy_history_only=0';
+        $definition=self::arpaDivisionAppointments();$definition['filename']='arpa-open-appointments';$definition['baseWhere'][]='(c.effective_to IS NULL OR c.effective_to>=CURRENT_DATE())';$definition['baseWhere'][]='a.legacy_history_only=0';
         $definition['requiresApprovalQualification']=true;
         $definition['readAdapter']=static function(\PDO $pdo,array $config,callable $reader):mixed{
             return \App\Services\ArpaApprovedAssignmentReadAdapter::run($pdo,$config,static function(array $qualified)use($reader):mixed{
@@ -2372,10 +2372,10 @@ final class DataTableRegistry
     private static function arpaDivisionActions(array $row,?array $capabilities=null): string
     {
         $actions='<a class="btn btn-sm btn-outline-dark me-1" href="'.e(url('hr/arpa-appointments/divisions/'.$row['id'])).'">View</a><a class="btn btn-sm btn-outline-secondary me-1" href="'.e(url('hr/officers/'.$row['officer_id'])).'">Profile</a>';
-        if ($row['operational_status'] !== 'ENDED' && ($capabilities['end']??Auth::can('arpa.appointment.end'))) {
+        if ($row['operational_status'] !== 'ENDED' && ($row['effective_to']??null)===null && ($capabilities['end']??Auth::can('arpa.appointment.end'))) {
             $actions.='<a class="btn btn-sm btn-outline-danger me-1" href="'.e(url('hr/arpa-appointments/divisions/'.$row['id'].'/end')).'">End</a>';
         }
-        if ($row['appointment_type']==='PERMANENT' && $row['operational_status']!=='ENDED' && ($capabilities['transfer']??Auth::can('arpa.appointment.transfer'))) {
+        if ($row['appointment_type']==='PERMANENT' && $row['operational_status']!=='ENDED' && ($row['effective_to']??null)===null && ($capabilities['transfer']??Auth::can('arpa.appointment.transfer'))) {
             $actions.='<a class="btn btn-sm btn-outline-primary" href="'.e(url('hr/arpa-appointments/divisions/'.$row['id'].'/transfer')).'">Transfer</a>';
         }
         return $actions;

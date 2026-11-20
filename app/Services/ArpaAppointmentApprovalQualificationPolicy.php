@@ -35,6 +35,23 @@ final class ArpaAppointmentApprovalQualificationPolicy
         return $result===[]?null:reset($result);
     }
 
+    /** Operational use only; does not grant or attest final National authorization. */
+    public function qualifyOperational(string $appointmentId,?array $allowedAscIds):?array
+    {
+        return $this->withCandidateQualification($allowedAscIds,static fn(callable $qualify):?array=>$qualify([$appointmentId])[$appointmentId]??null,true);
+    }
+
+    /** Mutation caller owns the transaction and source-request lock; never opens a read-only snapshot. */
+    public function qualifyOperationalForMutation(string $appointmentId,array $allowedAscIds):?array
+    {
+        $this->validate($allowedAscIds,200);$this->uuid($appointmentId);
+        if(!$this->pdo->inTransaction())throw new DomainException('Operational mutation qualification requires an active transaction.',409);
+        if($allowedAscIds===[])return null;
+        [$scope,$params]=$this->scope($allowedAscIds);
+        $rows=$this->rows('SELECT '.self::APPOINTMENT_COLUMNS.' FROM arpa_division_appointment WHERE id=?'.$scope.' FOR UPDATE',[$appointmentId,...$params]);
+        return $this->classifyBatch($rows,true,true)[$appointmentId]??null;
+    }
+
     /** Qualify the complete candidate ID set, NOT a previously paginated page.
      * Missing/inaccessible IDs are omitted. Duplicates collapse by canonical ID.
      * Queries/evidence are bounded per batch; the returned ID map itself is O(N).
@@ -94,26 +111,27 @@ final class ArpaAppointmentApprovalQualificationPolicy
 
     /** Bounded candidate reader for listings. The supplied closure qualifies at most
      * 200 server-selected IDs within this snapshot; it cannot escape or broaden scope.
-     * No complete-population ID map is retained. All evidence rules are unchanged.
+     * No complete-population ID map is retained. Final evidence remains the default;
+     * the explicit operational mode additionally admits proven ASC materialization.
      */
-    public function withCandidateQualification(?array $allowedAscIds,callable $reader):mixed
+    public function withCandidateQualification(?array $allowedAscIds,callable $reader,bool $ascOperational=false):mixed
     {
         $this->validate($allowedAscIds,200);
-        return $this->snapshot(function()use($allowedAscIds,$reader):mixed{
+        return $this->snapshot(function()use($allowedAscIds,$reader,$ascOperational):mixed{
             $active=true;
-            $qualify=function(array $ids)use($allowedAscIds,&$active):array{
+            $qualify=function(array $ids)use($allowedAscIds,$ascOperational,&$active):array{
                 if(!$active||!$this->pdo->inTransaction())throw new DomainException('The qualification snapshot has ended.',409);
                 if(count($ids)>200)throw new DomainException('Candidate qualification exceeds 200 records.',422);
                 foreach($ids as $id)$this->uuid($id);
                 if($ids===[]||$allowedAscIds===[])return [];
                 [$scope,$params]=$this->scope($allowedAscIds);
-                return $this->classifyBatch($this->rows('SELECT '.self::APPOINTMENT_COLUMNS.' FROM arpa_division_appointment WHERE id IN('.$this->marks($ids).')'.$scope,[...$ids,...$params]));
+                return $this->classifyBatch($this->rows('SELECT '.self::APPOINTMENT_COLUMNS.' FROM arpa_division_appointment WHERE id IN('.$this->marks($ids).')'.$scope,[...$ids,...$params]),$ascOperational);
             };
             try{return $reader($qualify);}finally{$active=false;}
         });
     }
 
-    private function classifyBatch(array $appointments):array
+    private function classifyBatch(array $appointments,bool $ascOperational=false,bool $lock=false):array
     {
         if($appointments===[])return [];
         $out=[];$needed=[];
@@ -124,9 +142,9 @@ final class ArpaAppointmentApprovalQualificationPolicy
         }
         if($operational===[])return $out;
         try{
-            $e=$this->evidence($operational);
+            $e=$this->evidence($operational,$ascOperational,$lock);
             foreach($operational as $a){
-                try{$out[$a['id']]=$this->classify($a,$e,$needed);}
+                try{$out[$a['id']]=$this->classify($a,$e,$needed,$ascOperational);}
                 catch(Throwable){$out[$a['id']]=$this->result(self::MANUAL_REVIEW,'APPROVAL_EVIDENCE_UNAVAILABLE');}
             }
             if($needed!==[]){
@@ -141,13 +159,15 @@ final class ArpaAppointmentApprovalQualificationPolicy
     }
 
     /** Set-based evidence loading, with no SQL in the per-appointment classifiers. */
-    private function evidence(array $appointments):array
+    private function evidence(array $appointments,bool $ascOperational=false,bool $lock=false):array
     {
+        $suffix=$lock?' FOR UPDATE':'';
         $ids=array_column($appointments,'id');$requests=array_values(array_unique(array_column($appointments,'request_id')));
-        $e=['requests'=>array_column($this->rows('SELECT id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,workflow_status,legacy_history_only,deleted_at,finalized_by,finalized_at FROM arpa_division_appointment_request WHERE id IN('.$this->marks($requests).')',$requests),null,'id')];
+        $e=['requests'=>array_column($this->rows('SELECT id,record_origin,request_type,officer_id,appointment_type,asc_location_id,arpa_division_location_id,requested_effective_from,requested_effective_to,workflow_status,legacy_history_only,deleted_at,finalized_by,finalized_at FROM arpa_division_appointment_request WHERE id IN('.$this->marks($requests).')'.$suffix,$requests),null,'id')];
         $e['canonical_counts']=array_column($this->rows('SELECT request_id,COUNT(*) n FROM arpa_division_appointment WHERE request_id IN('.$this->marks($requests).') GROUP BY request_id',$requests),'n','request_id');
-        $e['closures']=$this->group($this->rows('SELECT appointment_id,effective_to FROM arpa_division_appointment_closure WHERE appointment_id IN('.$this->marks($ids).')',$ids),'appointment_id');
-        $e['final_actions']=$this->group($this->rows("SELECT request_id,previous_status,user_id,action_at,record_origin,timestamp_provenance FROM arpa_appointment_workflow_action WHERE request_id IN(".$this->marks($requests).") AND action='APPROVE' AND stage='NATIONAL' AND new_status='NATIONAL_APPROVED'",$requests),'request_id');
+        $e['closures']=$this->group($this->rows('SELECT appointment_id,effective_to FROM arpa_division_appointment_closure WHERE appointment_id IN('.$this->marks($ids).')'.$suffix,$ids),'appointment_id');
+        $e['final_actions']=$this->group($this->rows("SELECT request_id,previous_status,user_id,action_at,record_origin,timestamp_provenance FROM arpa_appointment_workflow_action WHERE request_id IN(".$this->marks($requests).") AND action='APPROVE' AND stage='NATIONAL' AND new_status='NATIONAL_APPROVED'".$suffix,$requests),'request_id');
+        if($ascOperational)$e['asc_actions']=$this->group($this->rows("SELECT request_id,previous_status,user_id,action_at,record_origin,timestamp_provenance FROM arpa_appointment_workflow_action WHERE request_id IN(".$this->marks($requests).") AND action='APPROVE' AND stage='ASC' AND new_status='ASC_APPROVED'".$suffix,$requests),'request_id');
         $e['historical_schema']=false;
         if(array_filter($appointments,fn($a)=>$a['record_origin']==='LEGACY_IMPORT'&&($e['requests'][$a['request_id']]['workflow_status']??null)==='CREATED')===[])return $e;
         $e['historical_schema']=ArpaAppointmentCorrectionDecision::lineageAvailable($this->pdo)&&(new ArpaHistoricalApprovalReadService($this->pdo))->available();
@@ -166,7 +186,7 @@ final class ArpaAppointmentApprovalQualificationPolicy
         return $e;
     }
 
-    private function classify(array $a,array $e,array &$needed):array
+    private function classify(array $a,array $e,array &$needed,bool $ascOperational=false):array
     {
         if((int)$a['legacy_history_only']===1)return $this->result(self::HISTORICAL_ONLY,'NON_AUTHORITATIVE_HISTORY');
         $r=$e['requests'][$a['request_id']]??null;
@@ -178,6 +198,19 @@ final class ArpaAppointmentApprovalQualificationPolicy
         $closures=$e['closures'][$a['id']]??[];
         if(count($closures)>1||!$this->date($a['effective_from'])||($closures!==[]&&(!$this->date($closures[0]['effective_to'])||$closures[0]['effective_to']<$a['effective_from'])))return $this->result(self::MANUAL_REVIEW,'INVALID_CANONICAL_PERIOD');
 
+        if($ascOperational&&$r['request_type']==='APPOINTMENT'&&in_array($r['workflow_status'],['ASC_APPROVED','DISTRICT_VERIFIED','DISTRICT_APPROVED','NATIONAL_VERIFIED'],true)){
+            if($r['requested_effective_from']!==$a['effective_from']||($r['requested_effective_to']!==null&&$r['requested_effective_to']!==($closures[0]['effective_to']??null)))return $this->result(self::MANUAL_REVIEW,'SOURCE_PERIOD_MISMATCH');
+            $events=$e['asc_actions'][$r['id']]??[];
+            if(count($events)!==1||empty($events[0]['user_id']))return $this->result(self::MANUAL_REVIEW,'MISSING_OR_AMBIGUOUS_ASC_APPROVAL');$event=$events[0];
+            // The importer can omit an unmapped verifier; its recorded ASC approval still needs an actor and legacy provenance.
+            $native=$event['record_origin']==='NATIVE'&&$event['previous_status']==='ASC_VERIFIED'
+                &&($a['record_origin']==='NATIVE'||(!empty($event['action_at'])&&$event['timestamp_provenance']==='NATIVE_RECORDED'));
+            $legacy=$a['record_origin']==='LEGACY_IMPORT'&&$event['record_origin']==='LEGACY_IMPORT'
+                &&in_array($event['previous_status'],['CREATED','ASC_VERIFIED'],true)
+                &&in_array($event['timestamp_provenance'],['LEGACY_SOURCE_RECORDED','UNAVAILABLE_FROM_LEGACY_SOURCE'],true);
+            if(!$native&&!$legacy)return $this->result(self::MANUAL_REVIEW,$a['record_origin']==='NATIVE'?'MISSING_OR_AMBIGUOUS_ASC_APPROVAL':'INVALID_ASC_APPROVAL_EVIDENCE');
+            return $this->result(self::APPROVED,'ASC_APPROVED_OPERATIONAL','ASC_OPERATIONAL');
+        }
         if($a['record_origin']==='NATIVE'||ArpaImportedAppointmentWorkflowPolicy::usesOriginalReview($r))return $this->original($r,$e);
         if($r['workflow_status']!=='CREATED')return $this->result(self::MANUAL_REVIEW,'UNSUPPORTED_IMPORTED_WORKFLOW');
         return $this->historical($a,$r,$e,$needed);
